@@ -1,0 +1,1124 @@
+use axum::{
+    body::Body,
+    extract::{Form, OriginalUri, Path, State},
+    http::{HeaderMap, Method, StatusCode, Uri},
+    response::IntoResponse,
+    routing::any,
+    Router,
+};
+use bytes::Bytes;
+use futures_util::StreamExt;
+use base64::Engine;
+use rand::{distr::Alphanumeric, Rng};
+use sha2::{Digest, Sha256};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tracing::{error, info};
+use uuid::Uuid;
+use url::Url;
+use chrono::{DateTime, Utc};
+
+#[derive(Clone)]
+struct AppState {
+    cfg: Arc<Config>,
+    rr: Arc<Mutex<usize>>,
+    client: reqwest::Client,
+    tokens: Arc<Mutex<Vec<UpstreamToken>>>,
+    stats: Arc<Mutex<UsageStats>>,
+    quota_cache: Arc<Mutex<Vec<Option<QuotaCacheEntry>>>>,
+    oauth_pending: Arc<Mutex<HashMap<String, PendingOAuth>>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Config {
+    // Proxy listen port
+    listen: String,
+    // Upstream base url, e.g. https://chatgpt.com/backend-api/codex
+    upstream_base: String,
+    // One shared API key used by your Codex CLI (proxy client)
+    proxy_api_key: String,
+    // List of codex account access tokens (or API keys) to rotate
+    tokens: Vec<String>,
+    // Optional directory containing Codex credential json files
+    auth_dir: Option<String>,
+}
+
+#[derive(Clone)]
+struct UpstreamToken {
+    token: String,
+    account_id: Option<String>,
+    label: String,
+}
+
+#[derive(Default, Clone, Serialize)]
+struct UsageStats {
+    per_account: Vec<AccountUsage>,
+    total_requests: u64,
+    total_errors: u64,
+}
+
+#[derive(Default, Clone, Serialize)]
+struct AccountUsage {
+    label: String,
+    account_id: String,
+    requests: u64,
+    errors: u64,
+}
+
+#[derive(Clone)]
+struct QuotaCacheEntry {
+    fetched_at: std::time::Instant,
+    summary: QuotaSummary,
+    error: Option<String>,
+}
+
+#[derive(Default, Clone, Serialize)]
+struct QuotaSummary {
+    label: String,
+    account_id: String,
+    plan_type: String,
+    code_generation: QuotaRateSummary,
+    code_review: QuotaRateSummary,
+}
+
+#[derive(Default, Clone, Serialize)]
+struct QuotaRateSummary {
+    five_hour: Option<QuotaWindowSummary>,
+    weekly: Option<QuotaWindowSummary>,
+}
+
+#[derive(Default, Clone, Serialize)]
+struct QuotaWindowSummary {
+    used_percent: Option<f64>,
+    reset_label: String,
+}
+
+#[derive(Clone)]
+struct PendingOAuth {
+    code_verifier: String,
+    created_at: std::time::Instant,
+}
+
+#[tokio::main]
+async fn main() {
+    let cfg = load_config();
+    let tokens = load_tokens(&cfg);
+    let stats = UsageStats {
+        per_account: tokens
+            .iter()
+            .map(|t| AccountUsage {
+                label: t.label.clone(),
+                account_id: t.account_id.clone().unwrap_or_default(),
+                requests: 0,
+                errors: 0,
+            })
+            .collect(),
+        total_requests: 0,
+        total_errors: 0,
+    };
+    let quota_cache = vec![None; tokens.len()];
+    tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .init();
+
+    let client = reqwest::Client::builder()
+        .http1_only()
+        .tcp_keepalive(Duration::from_secs(60))
+        .pool_idle_timeout(None)
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+
+    let state = AppState {
+        cfg: Arc::new(cfg),
+        rr: Arc::new(Mutex::new(0)),
+        client,
+        tokens: Arc::new(Mutex::new(tokens)),
+        stats: Arc::new(Mutex::new(stats)),
+        quota_cache: Arc::new(Mutex::new(quota_cache)),
+        oauth_pending: Arc::new(Mutex::new(HashMap::new())),
+    };
+
+    let app = Router::new()
+        .route("/health", any(health))
+        .route("/", any(dashboard))
+        .route("/dashboard", any(dashboard))
+        .route("/dashboard.json", any(dashboard_json))
+        .route("/quota.json", any(quota_json))
+        .route("/login", any(login_page))
+        .route("/login/codex/start", any(login_start))
+        .route("/login/codex/submit", any(login_submit))
+        .route("/*path", any(proxy))
+        .with_state(state.clone());
+
+    let addr: SocketAddr = state
+        .cfg
+        .listen
+        .parse()
+        .expect("invalid listen address");
+    info!("listening on {}", addr);
+    axum::serve(tokio::net::TcpListener::bind(addr).await.unwrap(), app)
+        .await
+        .unwrap();
+}
+
+async fn health() -> impl IntoResponse {
+    (StatusCode::OK, "ok")
+}
+
+async fn dashboard(State(_state): State<AppState>) -> impl IntoResponse {
+    let html = r#"<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Codex Gateway Dashboard</title>
+    <style>
+      :root { color-scheme: light; }
+      body { font-family: Arial, sans-serif; margin: 24px; }
+      h1 { margin: 0 0 12px 0; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+      th { background: #f2f2f2; }
+      .muted { color: #666; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <h1>Codex Gateway Usage</h1>
+    <div id="totals" class="muted"></div>
+    <table>
+      <thead>
+        <tr>
+          <th>Label</th>
+          <th>Account ID</th>
+          <th>Requests</th>
+          <th>Errors</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <h2 style="margin-top:24px;">Quota (5h / Weekly)</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Label</th>
+          <th>Plan</th>
+          <th>Code Gen 5h</th>
+          <th>Code Gen Weekly</th>
+          <th>Code Review 5h</th>
+          <th>Code Review Weekly</th>
+        </tr>
+      </thead>
+      <tbody id="quotaRows"></tbody>
+    </table>
+    <script>
+      async function refresh() {
+        const res = await fetch('/dashboard.json');
+        const data = await res.json();
+        document.getElementById('totals').textContent =
+          'Total requests: ' + data.total_requests + ' | Total errors: ' + data.total_errors;
+        const rows = data.accounts.map(a =>
+          '<tr>' +
+            '<td>' + a.label + '</td>' +
+            '<td>' + (a.account_id || '-') + '</td>' +
+            '<td>' + a.requests + '</td>' +
+            '<td>' + a.errors + '</td>' +
+          '</tr>'
+        ).join('');
+        document.getElementById('rows').innerHTML = rows;
+      }
+      async function refreshQuota() {
+        const res = await fetch('/quota.json');
+        const data = await res.json();
+        const rows = data.accounts.map(a => {
+          if (a.error) {
+            return '<tr>' +
+              '<td>' + a.label + '</td>' +
+              '<td colspan="5">' + a.error + '</td>' +
+            '</tr>';
+          }
+          const cg5 = a.code_generation?.five_hour || {};
+          const cgw = a.code_generation?.weekly || {};
+          const cr5 = a.code_review?.five_hour || {};
+          const crw = a.code_review?.weekly || {};
+          const fmt = (x) => x && x.used_percent !== null && x.used_percent !== undefined
+            ? (x.used_percent.toFixed(1) + '% ' + (x.reset_label ? '(' + x.reset_label + ')' : ''))
+            : '-';
+          return '<tr>' +
+            '<td>' + a.label + '</td>' +
+            '<td>' + (a.plan_type || '-') + '</td>' +
+            '<td>' + fmt(cg5) + '</td>' +
+            '<td>' + fmt(cgw) + '</td>' +
+            '<td>' + fmt(cr5) + '</td>' +
+            '<td>' + fmt(crw) + '</td>' +
+          '</tr>';
+        }).join('');
+        document.getElementById('quotaRows').innerHTML = rows;
+      }
+      refresh();
+      refreshQuota();
+      setInterval(refresh, 2000);
+      setInterval(refreshQuota, 60000);
+    </script>
+  </body>
+</html>
+"#;
+    (StatusCode::OK, [("Content-Type", "text/html")], html).into_response()
+}
+
+async fn dashboard_json(State(state): State<AppState>) -> impl IntoResponse {
+    let snapshot = {
+        let stats = state.stats.lock().unwrap();
+        stats.clone()
+    };
+    let accounts: Vec<serde_json::Value> = snapshot
+        .per_account
+        .into_iter()
+        .map(|a| {
+            serde_json::json!({
+                "label": a.label,
+                "account_id": a.account_id,
+                "requests": a.requests,
+                "errors": a.errors
+            })
+        })
+        .collect();
+    axum::Json(serde_json::json!({
+        "total_requests": snapshot.total_requests,
+        "total_errors": snapshot.total_errors,
+        "accounts": accounts
+    }))
+}
+
+async fn quota_json(State(state): State<AppState>) -> impl IntoResponse {
+    let accounts = get_quota_summaries(&state).await;
+    axum::Json(serde_json::json!({ "accounts": accounts }))
+}
+
+async fn login_page() -> impl IntoResponse {
+    let html = r#"<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Codex Login</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 24px; }
+      button { padding: 8px 12px; }
+      input { width: 100%; padding: 8px; }
+      .box { max-width: 720px; }
+      .muted { color: #666; font-size: 12px; }
+      pre { background: #f6f6f6; padding: 8px; }
+    </style>
+  </head>
+  <body>
+    <div class="box">
+      <h1>Codex OAuth Login</h1>
+      <p>Click start, open the URL in your browser, complete login, then paste the callback URL below.</p>
+      <button onclick="startLogin()">Start Login</button>
+      <div id="status" class="muted" style="margin-top:8px;"></div>
+      <pre id="authUrl" style="display:none;"></pre>
+      <form action="/login/codex/submit" method="post" style="margin-top:16px;">
+        <label>Callback URL</label>
+        <input name="redirect_url" placeholder="http://localhost:1455/auth/callback?code=...&state=...">
+        <button type="submit" style="margin-top:8px;">Submit</button>
+      </form>
+    </div>
+    <script>
+      async function startLogin() {
+        const res = await fetch('/login/codex/start');
+        const data = await res.json();
+        if (data.url) {
+          document.getElementById('status').textContent = 'Open this URL in your browser:';
+          const pre = document.getElementById('authUrl');
+          pre.textContent = data.url;
+          pre.style.display = 'block';
+        } else {
+          document.getElementById('status').textContent = 'Failed to start login';
+        }
+      }
+    </script>
+  </body>
+</html>
+"#;
+    (StatusCode::OK, [("Content-Type", "text/html")], html).into_response()
+}
+
+async fn login_start(State(state): State<AppState>) -> impl IntoResponse {
+    let (url, state_token, code_verifier) = match build_codex_auth_url() {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("failed to create auth url: {}", err),
+            )
+                .into_response();
+        }
+    };
+    {
+        let mut pending = state.oauth_pending.lock().unwrap();
+        pending.insert(
+            state_token.clone(),
+            PendingOAuth {
+                code_verifier,
+                created_at: std::time::Instant::now(),
+            },
+        );
+    }
+    axum::Json(serde_json::json!({ "url": url, "state": state_token })).into_response()
+}
+
+#[derive(Deserialize)]
+struct CallbackForm {
+    redirect_url: String,
+}
+
+async fn login_submit(
+    State(state): State<AppState>,
+    Form(form): Form<CallbackForm>,
+) -> impl IntoResponse {
+    let redirect_url = form.redirect_url.trim();
+    if redirect_url.is_empty() {
+        return (StatusCode::BAD_REQUEST, "redirect_url is required").into_response();
+    }
+    let (code, state_token) = match parse_oauth_callback(redirect_url) {
+        Ok(v) => v,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let code_verifier = {
+        let mut pending = state.oauth_pending.lock().unwrap();
+        match pending.remove(&state_token) {
+            Some(p) => p.code_verifier,
+            None => return (StatusCode::BAD_REQUEST, "invalid or expired state").into_response(),
+        }
+    };
+
+    match exchange_code_for_tokens(&state.client, &code, &code_verifier).await {
+        Ok(token_resp) => match save_codex_auth(&state, &token_resp) {
+            Ok(saved_path) => (
+                StatusCode::OK,
+                format!("saved credentials to {}", saved_path),
+            )
+                .into_response(),
+            Err(err) => (StatusCode::BAD_REQUEST, err).into_response(),
+        },
+        Err(err) => (StatusCode::BAD_REQUEST, err).into_response(),
+    }
+}
+
+async fn proxy(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    method: Method,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    body: Body,
+) -> impl IntoResponse {
+    // Simple API key guard
+    if !check_api_key(&headers, &state.cfg.proxy_api_key) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+
+    // Read full body (small/simple proxy)
+    let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid body").into_response(),
+    };
+
+    let upstream = build_upstream_url(&state.cfg.upstream_base, &path, &uri);
+    let session_id = Uuid::new_v4().to_string();
+
+    let picked = pick_token(&state);
+    if picked.is_none() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "no upstream tokens configured")
+            .into_response();
+    }
+    let (token_idx, token) = picked.unwrap();
+    record_request(&state, token_idx);
+    let body_bytes = maybe_apply_prompt_cache_key(&headers, body_bytes, &session_id);
+    let mut req = state.client.request(method, upstream).body(body_bytes);
+
+    // Copy headers except hop-by-hop and auth; set upstream auth
+    for (k, v) in headers.iter() {
+        if is_hop_header(k.as_str())
+            || k.as_str().eq_ignore_ascii_case("authorization")
+            || k.as_str().eq_ignore_ascii_case("host")
+            || k.as_str().eq_ignore_ascii_case("content-length")
+        {
+            continue;
+        }
+        req = req.header(k, v);
+    }
+    req = req.header("Authorization", format!("Bearer {}", token.token));
+    req = apply_default_codex_headers(
+        req,
+        &headers,
+        token.account_id.as_deref(),
+        &session_id,
+    );
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(err) => {
+            error!("upstream error: {}", err);
+            record_error(&state, token_idx);
+            return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
+        }
+    };
+
+    let status = resp.status();
+    if status.as_u16() >= 400 {
+        record_error(&state, token_idx);
+    }
+    let mut out_headers = HeaderMap::new();
+    for (k, v) in resp.headers().iter() {
+        if is_hop_header(k.as_str()) {
+            continue;
+        }
+        out_headers.insert(k, v.clone());
+    }
+
+    // Stream response body back
+    let stats_state = state.clone();
+    let stream_idx = token_idx;
+    let stream = resp.bytes_stream().map(move |chunk| {
+        if chunk.is_err() {
+            record_error(&stats_state, stream_idx);
+        }
+        chunk.map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "stream"))
+    });
+    let body = Body::from_stream(stream);
+    (status, out_headers, body).into_response()
+}
+
+fn check_api_key(headers: &HeaderMap, expected: &str) -> bool {
+    let auth = headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    if let Some(token) = auth.strip_prefix("Bearer ") {
+        return token == expected;
+    }
+    false
+}
+
+fn pick_token(state: &AppState) -> Option<(usize, UpstreamToken)> {
+    let mut idx = state.rr.lock().unwrap();
+    let tokens = state.tokens.lock().unwrap();
+    if tokens.is_empty() {
+        return None;
+    }
+    let picked_idx = *idx % tokens.len();
+    let token = tokens[picked_idx].clone();
+    *idx = (*idx + 1) % tokens.len();
+    Some((picked_idx, token))
+}
+
+fn record_request(state: &AppState, idx: usize) {
+    let mut stats = state.stats.lock().unwrap();
+    stats.total_requests += 1;
+    if let Some(a) = stats.per_account.get_mut(idx) {
+        a.requests += 1;
+    }
+}
+
+fn record_error(state: &AppState, idx: usize) {
+    let mut stats = state.stats.lock().unwrap();
+    stats.total_errors += 1;
+    if let Some(a) = stats.per_account.get_mut(idx) {
+        a.errors += 1;
+    }
+}
+
+fn build_upstream_url(base: &str, path: &str, uri: &Uri) -> String {
+    let mut base = base.trim_end_matches('/').to_string();
+    if !path.is_empty() {
+        base.push('/');
+        base.push_str(path.trim_start_matches('/'));
+    }
+    if let Some(q) = uri.query() {
+        base.push('?');
+        base.push_str(q);
+    }
+    base
+}
+
+fn is_hop_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+
+fn apply_default_codex_headers(
+    mut req: reqwest::RequestBuilder,
+    incoming: &HeaderMap,
+    account_id: Option<&str>,
+    session_id: &str,
+) -> reqwest::RequestBuilder {
+    // Mirror codex-cli defaults if missing.
+    if !incoming.contains_key("content-type") {
+        req = req.header("Content-Type", "application/json");
+    }
+    if !incoming.contains_key("accept") {
+        req = req.header("Accept", "text/event-stream");
+    }
+    if !incoming.contains_key("connection") {
+        req = req.header("Connection", "Keep-Alive");
+    }
+    if !incoming.contains_key("openai-beta") {
+        req = req.header("Openai-Beta", "responses=experimental");
+    }
+    if !incoming.contains_key("version") {
+        req = req.header("Version", "0.21.0");
+    }
+    if !incoming.contains_key("session_id") {
+        req = req.header("Session_id", session_id);
+    }
+    if !incoming.contains_key("conversation_id") {
+        req = req.header("Conversation_id", session_id);
+    }
+    if !incoming.contains_key("user-agent") {
+        req = req.header(
+            "User-Agent",
+            "codex_cli_rs/0.50.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464",
+        );
+    }
+    if !incoming.contains_key("origin") {
+        req = req.header("Origin", "https://chatgpt.com");
+    }
+    if !incoming.contains_key("referer") {
+        req = req.header("Referer", "https://chatgpt.com/");
+    }
+    if !incoming.contains_key("accept-language") {
+        req = req.header("Accept-Language", "en-US,en;q=0.9");
+    }
+    if !incoming.contains_key("originator") {
+        req = req.header("Originator", "codex_cli_rs");
+    }
+    if !incoming.contains_key("chatgpt-account-id") {
+        if let Some(id) = account_id {
+            if !id.trim().is_empty() {
+                req = req.header("Chatgpt-Account-Id", id);
+            }
+        }
+    }
+    req
+}
+
+fn maybe_apply_prompt_cache_key(
+    headers: &HeaderMap,
+    body: Bytes,
+    session_id: &str,
+) -> Bytes {
+    if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok()) {
+        if !ct.to_ascii_lowercase().contains("application/json") {
+            return body;
+        }
+    } else {
+        return body;
+    }
+
+    let mut value: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return body,
+    };
+    if let serde_json::Value::Object(map) = &mut value {
+        if !map.contains_key("prompt_cache_key") {
+            map.insert(
+                "prompt_cache_key".to_string(),
+                serde_json::Value::String(session_id.to_string()),
+            );
+        }
+        if !map.contains_key("stream") {
+            map.insert("stream".to_string(), serde_json::Value::Bool(true));
+        }
+        if let Ok(out) = serde_json::to_vec(&value) {
+            return Bytes::from(out);
+        }
+    }
+    body
+}
+
+fn load_config() -> Config {
+    // expects config.json in working dir
+    let data = std::fs::read_to_string("config.json").expect("config.json missing");
+    serde_json::from_str(&data).expect("invalid config.json")
+}
+
+fn load_tokens(cfg: &Config) -> Vec<UpstreamToken> {
+    let mut tokens: Vec<UpstreamToken> = cfg
+        .tokens
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (i, t.trim().to_string()))
+        .filter(|(_, t)| !t.is_empty())
+        .map(|(i, t)| UpstreamToken {
+            token: t,
+            account_id: None,
+            label: format!("manual-{}", i + 1),
+        })
+        .collect();
+
+    if let Some(dir) = cfg.auth_dir.as_ref() {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut files: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+            files.sort_by_key(|e| e.path());
+            for entry in files {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                    continue;
+                }
+                let data = match std::fs::read_to_string(&path) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                let value: serde_json::Value = match serde_json::from_str(&data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if let Some(t) = value.get("type").and_then(|v| v.as_str()) {
+                    if !t.eq_ignore_ascii_case("codex") {
+                        continue;
+                    }
+                }
+                let account_id = value
+                    .get("account_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let label = value
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| value.get("label").and_then(|v| v.as_str()))
+                    .or_else(|| value.get("account_id").and_then(|v| v.as_str()))
+                    .or_else(|| path.file_name().and_then(|s| s.to_str()))
+                    .unwrap_or("codex-account")
+                    .to_string();
+                if let Some(tok) = value
+                    .get("access_token")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| value.get("api_key").and_then(|v| v.as_str()))
+                {
+                    let tok = tok.trim();
+                    if !tok.is_empty() {
+                        tokens.push(UpstreamToken {
+                            token: tok.to_string(),
+                            account_id,
+                            label,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // de-dup while preserving order
+    let mut seen = HashSet::new();
+    tokens.retain(|t| seen.insert(t.token.clone()));
+    tokens
+}
+
+fn build_codex_auth_url() -> Result<(String, String, String), String> {
+    let code_verifier: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(64)
+        .map(char::from)
+        .collect();
+    let mut hasher = Sha256::new();
+    hasher.update(code_verifier.as_bytes());
+    let digest = hasher.finalize();
+    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+    let state_token: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+
+    let mut url = Url::parse("https://auth.openai.com/oauth/authorize")
+        .map_err(|e| e.to_string())?;
+    url.query_pairs_mut()
+        .append_pair("client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
+        .append_pair("response_type", "code")
+        .append_pair("redirect_uri", "http://localhost:1455/auth/callback")
+        .append_pair("scope", "openid email profile offline_access")
+        .append_pair("state", &state_token)
+        .append_pair("code_challenge", &code_challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("prompt", "login")
+        .append_pair("id_token_add_organizations", "true")
+        .append_pair("codex_cli_simplified_flow", "true");
+
+    Ok((url.to_string(), state_token, code_verifier))
+}
+
+fn parse_oauth_callback(redirect_url: &str) -> Result<(String, String), String> {
+    let url = Url::parse(redirect_url).map_err(|_| "invalid redirect_url".to_string())?;
+    let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
+    let code = params.get("code").cloned().unwrap_or_default();
+    let state = params.get("state").cloned().unwrap_or_default();
+    if code.is_empty() || state.is_empty() {
+        return Err("missing code or state in redirect_url".to_string());
+    }
+    Ok((code, state))
+}
+
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    refresh_token: String,
+    id_token: String,
+    expires_in: i64,
+    token_type: Option<String>,
+}
+
+async fn exchange_code_for_tokens(
+    client: &reqwest::Client,
+    code: &str,
+    code_verifier: &str,
+) -> Result<TokenResponse, String> {
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("client_id", "app_EMoamEEZ73f0CkXaXp7hrann"),
+        ("code", code),
+        ("redirect_uri", "http://localhost:1455/auth/callback"),
+        ("code_verifier", code_verifier),
+    ];
+    let resp = client
+        .post("https://auth.openai.com/oauth/token")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("token exchange failed: {}", body));
+    }
+    resp.json::<TokenResponse>().await.map_err(|e| e.to_string())
+}
+
+fn save_codex_auth(state: &AppState, token_resp: &TokenResponse) -> Result<String, String> {
+    let id_token = &token_resp.id_token;
+    let account_id = parse_jwt_account_id(id_token).unwrap_or_default();
+    let email = parse_jwt_email(id_token).unwrap_or_else(|| "unknown".to_string());
+    let now = Utc::now();
+    let expires_at = now + chrono::Duration::seconds(token_resp.expires_in);
+
+    let file_name = format!("codex-{}.json", sanitize_label(&email));
+    let auth_dir = state
+        .cfg
+        .auth_dir
+        .clone()
+        .unwrap_or_else(|| "/root/dev/yow/gpt-gateway/auths".to_string());
+    let path = std::path::Path::new(&auth_dir).join(file_name);
+    std::fs::create_dir_all(&auth_dir).map_err(|e| e.to_string())?;
+    let out = serde_json::json!({
+        "id_token": token_resp.id_token,
+        "access_token": token_resp.access_token,
+        "refresh_token": token_resp.refresh_token,
+        "account_id": account_id,
+        "last_refresh": now.to_rfc3339(),
+        "email": email,
+        "type": "codex",
+        "expired": expires_at.to_rfc3339()
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&out).unwrap())
+        .map_err(|e| e.to_string())?;
+
+    // reload tokens + stats
+    let tokens = load_tokens(&state.cfg);
+    {
+        let mut tlock = state.tokens.lock().unwrap();
+        *tlock = tokens.clone();
+    }
+    {
+        let mut stats = state.stats.lock().unwrap();
+        stats.per_account = tokens
+            .iter()
+            .map(|t| AccountUsage {
+                label: t.label.clone(),
+                account_id: t.account_id.clone().unwrap_or_default(),
+                requests: 0,
+                errors: 0,
+            })
+            .collect();
+        stats.total_requests = 0;
+        stats.total_errors = 0;
+    }
+    {
+        let mut cache = state.quota_cache.lock().unwrap();
+        *cache = vec![None; tokens.len()];
+    }
+    Ok(path.to_string_lossy().to_string())
+}
+
+fn sanitize_label(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '_' })
+        .collect()
+}
+
+fn parse_jwt_email(id_token: &str) -> Option<String> {
+    let parts: Vec<&str> = id_token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let payload = parts[1];
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    v.get("email")
+        .and_then(|e| e.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            v.get("https://api.openai.com/profile")
+                .and_then(|p| p.get("email"))
+                .and_then(|e| e.as_str())
+                .map(|s| s.to_string())
+        })
+}
+
+fn parse_jwt_account_id(id_token: &str) -> Option<String> {
+    let parts: Vec<&str> = id_token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let payload = parts[1];
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    v.get("https://api.openai.com/auth")
+        .and_then(|a| a.get("chatgpt_account_id"))
+        .and_then(|e| e.as_str())
+        .map(|s| s.to_string())
+}
+
+async fn get_quota_summaries(state: &AppState) -> Vec<serde_json::Value> {
+    let tokens = state.tokens.lock().unwrap().clone();
+    {
+        let mut cache = state.quota_cache.lock().unwrap();
+        if cache.len() != tokens.len() {
+            *cache = vec![None; tokens.len()];
+        }
+    }
+    let now = std::time::Instant::now();
+    let mut results = Vec::with_capacity(tokens.len());
+    for (idx, token) in tokens.iter().enumerate() {
+        let cached = {
+            let cache = state.quota_cache.lock().unwrap();
+            cache.get(idx).cloned().flatten()
+        };
+        let entry = if let Some(c) = cached {
+            if now.duration_since(c.fetched_at).as_secs() < 60 {
+                c
+            } else {
+                let fetched = fetch_codex_quota(state, token).await;
+                let mut cache = state.quota_cache.lock().unwrap();
+                if cache.len() <= idx {
+                    cache.resize(idx + 1, None);
+                }
+                cache[idx] = Some(fetched.clone());
+                fetched
+            }
+        } else {
+            let fetched = fetch_codex_quota(state, token).await;
+            let mut cache = state.quota_cache.lock().unwrap();
+            if cache.len() <= idx {
+                cache.resize(idx + 1, None);
+            }
+            cache[idx] = Some(fetched.clone());
+            fetched
+        };
+        if let Some(err) = entry.error {
+            results.push(serde_json::json!({
+                "label": token.label,
+                "account_id": token.account_id.clone().unwrap_or_default(),
+                "error": err
+            }));
+        } else {
+            results.push(serde_json::json!({
+                "label": entry.summary.label,
+                "account_id": entry.summary.account_id,
+                "plan_type": entry.summary.plan_type,
+                "code_generation": entry.summary.code_generation,
+                "code_review": entry.summary.code_review
+            }));
+        }
+    }
+    results
+}
+
+async fn fetch_codex_quota(state: &AppState, token: &UpstreamToken) -> QuotaCacheEntry {
+    let mut req = state
+        .client
+        .get("https://chatgpt.com/backend-api/wham/usage")
+        .header("Authorization", format!("Bearer {}", token.token))
+        .header("Content-Type", "application/json")
+        .header("User-Agent", "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal");
+    if let Some(account_id) = token.account_id.as_ref() {
+        if !account_id.trim().is_empty() {
+            req = req.header("Chatgpt-Account-Id", account_id);
+        }
+    }
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(err) => {
+            return QuotaCacheEntry {
+                fetched_at: std::time::Instant::now(),
+                summary: QuotaSummary::default(),
+                error: Some(err.to_string()),
+            }
+        }
+    };
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return QuotaCacheEntry {
+            fetched_at: std::time::Instant::now(),
+            summary: QuotaSummary::default(),
+            error: Some(format!("status {}: {}", status.as_u16(), body)),
+        };
+    }
+    let body = resp.text().await.unwrap_or_default();
+    let v: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return QuotaCacheEntry {
+                fetched_at: std::time::Instant::now(),
+                summary: QuotaSummary::default(),
+                error: Some("failed to parse quota response".to_string()),
+            }
+        }
+    };
+
+    let plan_type = v
+        .get("plan_type")
+        .or_else(|| v.get("planType"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let rate_limit = v.get("rate_limit").or_else(|| v.get("rateLimit"));
+    let code_review = v
+        .get("code_review_rate_limit")
+        .or_else(|| v.get("codeReviewRateLimit"));
+
+    let summary = QuotaSummary {
+        label: token.label.clone(),
+        account_id: token.account_id.clone().unwrap_or_default(),
+        plan_type,
+        code_generation: extract_quota_rate(rate_limit),
+        code_review: extract_quota_rate(code_review),
+    };
+    QuotaCacheEntry {
+        fetched_at: std::time::Instant::now(),
+        summary,
+        error: None,
+    }
+}
+
+fn extract_quota_rate(rate: Option<&serde_json::Value>) -> QuotaRateSummary {
+    if rate.is_none() {
+        return QuotaRateSummary::default();
+    }
+    let rate = rate.unwrap();
+    let primary = rate.get("primary_window").or_else(|| rate.get("primaryWindow"));
+    let secondary = rate
+        .get("secondary_window")
+        .or_else(|| rate.get("secondaryWindow"));
+    let mut five_hour = None;
+    let mut weekly = None;
+    for w in [primary, secondary] {
+        if let Some(win) = w {
+            let secs = get_window_seconds(win);
+            if secs == 18000 && five_hour.is_none() {
+                five_hour = Some(build_window_summary(win));
+            } else if secs == 604800 && weekly.is_none() {
+                weekly = Some(build_window_summary(win));
+            } else if five_hour.is_none() {
+                five_hour = Some(build_window_summary(win));
+            } else if weekly.is_none() {
+                weekly = Some(build_window_summary(win));
+            }
+        }
+    }
+    QuotaRateSummary { five_hour, weekly }
+}
+
+fn get_window_seconds(win: &serde_json::Value) -> i64 {
+    let raw = win
+        .get("limit_window_seconds")
+        .or_else(|| win.get("limitWindowSeconds"));
+    raw.and_then(|v| v.as_f64())
+        .map(|v| v as i64)
+        .unwrap_or(0)
+}
+
+fn build_window_summary(win: &serde_json::Value) -> QuotaWindowSummary {
+    let used = win.get("used_percent").or_else(|| win.get("usedPercent"));
+    let used_percent = used.and_then(|v| v.as_f64());
+    let reset_label = get_reset_label(win);
+    QuotaWindowSummary {
+        used_percent,
+        reset_label,
+    }
+}
+
+fn get_reset_label(win: &serde_json::Value) -> String {
+    if let Some(v) = win.get("reset_at").or_else(|| win.get("resetAt")) {
+        if let Some(ts) = v.as_f64() {
+            let ms = if ts > 1e12 { ts } else { ts * 1000.0 };
+            let dt = DateTime::<Utc>::from(std::time::UNIX_EPOCH + Duration::from_millis(ms as u64));
+            return format_reset_time(dt);
+        }
+    }
+    if let Some(v) = win
+        .get("reset_after_seconds")
+        .or_else(|| win.get("resetAfterSeconds"))
+    {
+        if let Some(secs) = v.as_f64() {
+            let mins = (secs / 60.0).floor() as i64;
+            if mins < 60 {
+                return format!("in {}m", mins);
+            }
+            let hours = mins / 60;
+            let rem = mins % 60;
+            if hours < 24 {
+                return format!("in {}h {}m", hours, rem);
+            }
+            let days = hours / 24;
+            return format!("in {}d {}h", days, hours % 24);
+        }
+    }
+    String::new()
+}
+
+fn format_reset_time(dt: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let diff = dt - now;
+    let mins = diff.num_minutes();
+    if mins <= 0 {
+        return "now".to_string();
+    }
+    if mins < 60 {
+        return format!("in {}m", mins);
+    }
+    let hours = mins / 60;
+    let rem = mins % 60;
+    if hours < 24 {
+        return format!("in {}h {}m", hours, rem);
+    }
+    let days = hours / 24;
+    format!("in {}d {}h", days, hours % 24)
+}
