@@ -1,0 +1,7 @@
+{
+  "listen": "0.0.0.0:8319",
+  "upstream_base": "https://chatgpt.com/backend-api/codex",
+  "proxy_api_key": "your-shared-proxy-key",
+  "tokens": [],
+  "auth_dir": "./auths"
+}
