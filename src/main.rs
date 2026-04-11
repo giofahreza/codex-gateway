@@ -53,6 +53,7 @@ struct UpstreamToken {
     token: String,
     account_id: Option<String>,
     label: String,
+    file_name: Option<String>,
 }
 
 #[derive(Default, Clone, Serialize)]
@@ -150,7 +151,7 @@ async fn main() {
         .route("/dashboard", any(dashboard))
         .route("/dashboard.json", any(dashboard_json))
         .route("/quota.json", any(quota_json))
-        .route("/login", any(login_page))
+        .route("/credentials/delete", any(delete_credential))
         .route("/login/codex/start", any(login_start))
         .route("/login/codex/submit", any(login_submit))
         .route("/*path", any(proxy))
@@ -197,11 +198,12 @@ async fn dashboard(State(_state): State<AppState>) -> impl IntoResponse {
           <th>Account ID</th>
           <th>Requests</th>
           <th>Errors</th>
+          <th>Actions</th>
         </tr>
       </thead>
       <tbody id="rows"></tbody>
     </table>
-    <h2 style="margin-top:24px;">Quota (5h / Weekly)</h2>
+    <h2 style="margin-top:24px;">Quota Usage (5h / Weekly)</h2>
     <table>
       <thead>
         <tr>
@@ -221,14 +223,18 @@ async fn dashboard(State(_state): State<AppState>) -> impl IntoResponse {
         const data = await res.json();
         document.getElementById('totals').textContent =
           'Total requests: ' + data.total_requests + ' | Total errors: ' + data.total_errors;
-        const rows = data.accounts.map(a =>
-          '<tr>' +
+        const rows = data.accounts.map(a => {
+          const action = a.file_name
+            ? `<button onclick="deleteCred('${a.file_name}')">Delete</button>`
+            : '-';
+          return '<tr>' +
             '<td>' + a.label + '</td>' +
             '<td>' + (a.account_id || '-') + '</td>' +
             '<td>' + a.requests + '</td>' +
             '<td>' + a.errors + '</td>' +
-          '</tr>'
-        ).join('');
+            '<td>' + action + '</td>' +
+          '</tr>';
+        }).join('');
         document.getElementById('rows').innerHTML = rows;
       }
       async function refreshQuota() {
@@ -247,7 +253,7 @@ async fn dashboard(State(_state): State<AppState>) -> impl IntoResponse {
           const crw = a.code_review?.weekly || {};
           const fmt = (x) => x && x.used_percent !== null && x.used_percent !== undefined
             ? (x.used_percent.toFixed(1) + '% ' + (x.reset_label ? '(' + x.reset_label + ')' : ''))
-            : '-';
+            : '0%';
           return '<tr>' +
             '<td>' + a.label + '</td>' +
             '<td>' + (a.plan_type || '-') + '</td>' +
@@ -264,10 +270,77 @@ async fn dashboard(State(_state): State<AppState>) -> impl IntoResponse {
       setInterval(refresh, 2000);
       setInterval(refreshQuota, 60000);
     </script>
+    <h2 style="margin-top:24px;">Codex OAuth Login</h2>
+    <p>Click start, open the URL in a new tab, complete login, then paste the callback URL below.</p>
+    <button onclick="startLogin()">Start Login</button>
+    <div id="status" class="muted" style="margin-top:8px;"></div>
+    <pre id="authUrl" style="display:none;"></pre>
+    <form id="loginForm" style="margin-top:16px;">
+      <label>Callback URL</label>
+      <input name="redirect_url" placeholder="http://localhost:1455/auth/callback?code=...&state=...">
+      <button type="submit" style="margin-top:8px;">Submit</button>
+    </form>
+    <script>
+      async function startLogin() {
+        const res = await fetch('/login/codex/start');
+        const data = await res.json();
+        if (data.url) {
+          window.open(data.url, '_blank');
+          document.getElementById('status').textContent = 'Opened login URL in new tab. If blocked, copy from below.';
+          const pre = document.getElementById('authUrl');
+          pre.textContent = data.url;
+          pre.style.display = 'block';
+        } else {
+          document.getElementById('status').textContent = 'Failed to start login';
+        }
+      }
+      document.getElementById('loginForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const form = e.target;
+        const input = form.querySelector('input[name="redirect_url"]');
+        const redirectUrl = input.value.trim();
+        if (!redirectUrl) {
+          document.getElementById('status').textContent = 'Callback URL is required.';
+          return;
+        }
+        const res = await fetch('/login/codex/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ redirect_url: redirectUrl })
+        });
+        const data = await res.json();
+        document.getElementById('status').textContent = data.message || 'Login completed.';
+      });
+      async function deleteCred(fileName) {
+        const key = prompt('Proxy API key for delete:');
+        if (!key) return;
+        const res = await fetch('/credentials/delete', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Authorization': 'Bearer ' + key
+          },
+          body: new URLSearchParams({ file_name: fileName })
+        });
+        const data = await res.json();
+        alert(data.message || 'done');
+        refresh();
+        refreshQuota();
+      }
+    </script>
   </body>
 </html>
 "#;
-    (StatusCode::OK, [("Content-Type", "text/html")], html).into_response()
+    (
+        StatusCode::OK,
+        [
+            ("Content-Type", "text/html"),
+            ("Cache-Control", "no-store"),
+            ("Pragma", "no-cache"),
+        ],
+        html,
+    )
+        .into_response()
 }
 
 async fn dashboard_json(State(state): State<AppState>) -> impl IntoResponse {
@@ -278,12 +351,18 @@ async fn dashboard_json(State(state): State<AppState>) -> impl IntoResponse {
     let accounts: Vec<serde_json::Value> = snapshot
         .per_account
         .into_iter()
-        .map(|a| {
+        .enumerate()
+        .map(|(i, a)| {
+            let file_name = {
+                let tokens = state.tokens.lock().unwrap();
+                tokens.get(i).and_then(|t| t.file_name.clone())
+            };
             serde_json::json!({
                 "label": a.label,
                 "account_id": a.account_id,
                 "requests": a.requests,
-                "errors": a.errors
+                "errors": a.errors,
+                "file_name": file_name
             })
         })
         .collect();
@@ -297,54 +376,6 @@ async fn dashboard_json(State(state): State<AppState>) -> impl IntoResponse {
 async fn quota_json(State(state): State<AppState>) -> impl IntoResponse {
     let accounts = get_quota_summaries(&state).await;
     axum::Json(serde_json::json!({ "accounts": accounts }))
-}
-
-async fn login_page() -> impl IntoResponse {
-    let html = r#"<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <title>Codex Login</title>
-    <style>
-      body { font-family: Arial, sans-serif; margin: 24px; }
-      button { padding: 8px 12px; }
-      input { width: 100%; padding: 8px; }
-      .box { max-width: 720px; }
-      .muted { color: #666; font-size: 12px; }
-      pre { background: #f6f6f6; padding: 8px; }
-    </style>
-  </head>
-  <body>
-    <div class="box">
-      <h1>Codex OAuth Login</h1>
-      <p>Click start, open the URL in your browser, complete login, then paste the callback URL below.</p>
-      <button onclick="startLogin()">Start Login</button>
-      <div id="status" class="muted" style="margin-top:8px;"></div>
-      <pre id="authUrl" style="display:none;"></pre>
-      <form action="/login/codex/submit" method="post" style="margin-top:16px;">
-        <label>Callback URL</label>
-        <input name="redirect_url" placeholder="http://localhost:1455/auth/callback?code=...&state=...">
-        <button type="submit" style="margin-top:8px;">Submit</button>
-      </form>
-    </div>
-    <script>
-      async function startLogin() {
-        const res = await fetch('/login/codex/start');
-        const data = await res.json();
-        if (data.url) {
-          document.getElementById('status').textContent = 'Open this URL in your browser:';
-          const pre = document.getElementById('authUrl');
-          pre.textContent = data.url;
-          pre.style.display = 'block';
-        } else {
-          document.getElementById('status').textContent = 'Failed to start login';
-        }
-      }
-    </script>
-  </body>
-</html>
-"#;
-    (StatusCode::OK, [("Content-Type", "text/html")], html).into_response()
 }
 
 async fn login_start(State(state): State<AppState>) -> impl IntoResponse {
@@ -376,36 +407,131 @@ struct CallbackForm {
     redirect_url: String,
 }
 
+#[derive(Deserialize)]
+struct DeleteForm {
+    file_name: String,
+}
+
 async fn login_submit(
     State(state): State<AppState>,
     Form(form): Form<CallbackForm>,
 ) -> impl IntoResponse {
     let redirect_url = form.redirect_url.trim();
     if redirect_url.is_empty() {
-        return (StatusCode::BAD_REQUEST, "redirect_url is required").into_response();
+        return axum::Json(serde_json::json!({
+            "ok": false,
+            "message": "redirect_url is required"
+        }))
+        .into_response();
     }
     let (code, state_token) = match parse_oauth_callback(redirect_url) {
         Ok(v) => v,
-        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        Err(err) => {
+            return axum::Json(serde_json::json!({
+                "ok": false,
+                "message": err
+            }))
+            .into_response()
+        }
     };
     let code_verifier = {
         let mut pending = state.oauth_pending.lock().unwrap();
         match pending.remove(&state_token) {
             Some(p) => p.code_verifier,
-            None => return (StatusCode::BAD_REQUEST, "invalid or expired state").into_response(),
+            None => {
+                return axum::Json(serde_json::json!({
+                    "ok": false,
+                    "message": "invalid or expired state"
+                }))
+                .into_response()
+            }
         }
     };
 
     match exchange_code_for_tokens(&state.client, &code, &code_verifier).await {
         Ok(token_resp) => match save_codex_auth(&state, &token_resp) {
-            Ok(saved_path) => (
-                StatusCode::OK,
-                format!("saved credentials to {}", saved_path),
-            )
-                .into_response(),
-            Err(err) => (StatusCode::BAD_REQUEST, err).into_response(),
+            Ok(saved_path) => axum::Json(serde_json::json!({
+                "ok": true,
+                "message": format!("saved credentials to {}", saved_path)
+            }))
+            .into_response(),
+            Err(err) => axum::Json(serde_json::json!({
+                "ok": false,
+                "message": err
+            }))
+            .into_response(),
         },
-        Err(err) => (StatusCode::BAD_REQUEST, err).into_response(),
+        Err(err) => axum::Json(serde_json::json!({
+            "ok": false,
+            "message": err
+        }))
+        .into_response(),
+    }
+}
+
+async fn delete_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<DeleteForm>,
+) -> impl IntoResponse {
+    if !check_api_key(&headers, &state.cfg.proxy_api_key) {
+        return axum::Json(serde_json::json!({
+            "ok": false,
+            "message": "unauthorized"
+        }))
+        .into_response();
+    }
+    let file_name = form.file_name.trim();
+    if file_name.is_empty() {
+        return axum::Json(serde_json::json!({
+            "ok": false,
+            "message": "file_name is required"
+        }))
+        .into_response();
+    }
+    let auth_dir = state
+        .cfg
+        .auth_dir
+        .clone()
+        .unwrap_or_else(|| "/root/dev/yow/gpt-gateway/auths".to_string());
+    let path = std::path::Path::new(&auth_dir).join(file_name);
+    match std::fs::remove_file(&path) {
+        Ok(_) => {
+            // reload tokens + stats
+            let tokens = load_tokens(&state.cfg);
+            {
+                let mut tlock = state.tokens.lock().unwrap();
+                *tlock = tokens.clone();
+            }
+            {
+                let mut stats = state.stats.lock().unwrap();
+                stats.per_account = tokens
+                    .iter()
+                    .map(|t| AccountUsage {
+                        label: t.label.clone(),
+                        account_id: t.account_id.clone().unwrap_or_default(),
+                        requests: 0,
+                        errors: 0,
+                    })
+                    .collect();
+                stats.total_requests = 0;
+                stats.total_errors = 0;
+            }
+            {
+                let mut cache = state.quota_cache.lock().unwrap();
+                *cache = vec![None; tokens.len()];
+            }
+            axum::Json(serde_json::json!({
+                "ok": true,
+                "message": format!("deleted {}", file_name)
+            }))
+            .into_response()
+        }
+        Err(err) => axum::Json(serde_json::json!({
+            "ok": false,
+            "message": format!("delete failed: {}", err)
+        }))
+        .into_response(),
     }
 }
 
@@ -667,6 +793,7 @@ fn load_tokens(cfg: &Config) -> Vec<UpstreamToken> {
             token: t,
             account_id: None,
             label: format!("manual-{}", i + 1),
+            file_name: None,
         })
         .collect();
 
@@ -715,6 +842,7 @@ fn load_tokens(cfg: &Config) -> Vec<UpstreamToken> {
                             token: tok.to_string(),
                             account_id,
                             label,
+                            file_name: path.file_name().and_then(|s| s.to_str()).map(|s| s.to_string()),
                         });
                     }
                 }
