@@ -131,7 +131,9 @@ async fn main() {
         .http1_only()
         .tcp_keepalive(Duration::from_secs(60))
         .pool_idle_timeout(None)
-        .timeout(Duration::from_secs(30))
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
         .build()
         .unwrap();
 
@@ -596,22 +598,37 @@ async fn proxy(
     };
 
     let status = resp.status();
-    if status.as_u16() >= 400 {
-        record_error(&state, token_idx);
-    }
     let mut out_headers = HeaderMap::new();
     for (k, v) in resp.headers().iter() {
-        if is_hop_header(k.as_str()) {
+        let name = k.as_str().to_ascii_lowercase();
+        if is_hop_header(&name) || name == "content-encoding" || name == "content-length" {
             continue;
         }
         out_headers.insert(k, v.clone());
+    }
+
+    if status.as_u16() >= 400 {
+        record_error(&state, token_idx);
+        let body_bytes = match resp.bytes().await {
+            Ok(b) => b,
+            Err(err) => {
+                error!("upstream error body read failed: {}", err);
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    "upstream error (failed to read body)",
+                )
+                    .into_response();
+            }
+        };
+        return (status, out_headers, body_bytes).into_response();
     }
 
     // Stream response body back
     let stats_state = state.clone();
     let stream_idx = token_idx;
     let stream = resp.bytes_stream().map(move |chunk| {
-        if chunk.is_err() {
+        if let Err(ref err) = chunk {
+            error!("stream chunk error: {}", err);
             record_error(&stats_state, stream_idx);
         }
         chunk.map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "stream"))
@@ -728,6 +745,9 @@ fn apply_default_codex_headers(
     }
     if !incoming.contains_key("accept-language") {
         req = req.header("Accept-Language", "en-US,en;q=0.9");
+    }
+    if !incoming.contains_key("accept-encoding") {
+        req = req.header("Accept-Encoding", "identity");
     }
     if !incoming.contains_key("originator") {
         req = req.header("Originator", "codex_cli_rs");
@@ -924,6 +944,7 @@ async fn exchange_code_for_tokens(
     let resp = client
         .post("https://auth.openai.com/oauth/token")
         .form(&params)
+        .timeout(Duration::from_secs(30))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1100,7 +1121,7 @@ async fn fetch_codex_quota(state: &AppState, token: &UpstreamToken) -> QuotaCach
         }
     }
 
-    let resp = match req.send().await {
+    let resp = match req.timeout(Duration::from_secs(30)).send().await {
         Ok(r) => r,
         Err(err) => {
             return QuotaCacheEntry {
