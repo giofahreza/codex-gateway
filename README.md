@@ -1,4 +1,4 @@
-# gpt-gateway
+# codex-gateway
 
 Simple local proxy for Codex CLI that rotates multiple Codex accounts behind one shared API key.
 
@@ -19,13 +19,14 @@ Open `http://127.0.0.1:8319/` to see per‑account usage and errors.
 
 ## Codex Login (Web UI)
 
-Open `http://127.0.0.1:8319/login`.
+Open `http://127.0.0.1:8319/` and scroll to **Codex OAuth Login**.
 
 Flow:
-1. Click “Start Login”.
-2. Open the auth URL in your browser and complete login.
-3. Copy the callback URL from the browser (it will fail to connect on the server).
-4. Paste the callback URL into the form to save credentials into `auth_dir`.
+1. Click **Start Login** (it will open a new tab; if blocked, copy the URL shown).
+2. Complete login in the new tab.
+3. Copy the callback URL (it will fail to connect on the server).
+4. Paste the callback URL into the form and click **Submit**.
+5. The credential is saved into `auth_dir` and immediately loaded.
 
 ## Files
 

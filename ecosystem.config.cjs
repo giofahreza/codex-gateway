@@ -1,8 +1,8 @@
 module.exports = {
   apps: [
     {
-      name: 'gpt-gateway',
-      script: './target/release/gpt-gateway',
+      name: 'codex-gateway',
+      script: './target/release/codex-gateway',
       cwd: '/root/dev/yow/gpt-gateway',
       env: {
         RUST_LOG: 'info'
