@@ -193,15 +193,38 @@ async fn dashboard(State(_state): State<AppState>) -> impl IntoResponse {
 <html>
   <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Codex Gateway Dashboard</title>
     <style>
       :root { color-scheme: light; }
-      body { font-family: Arial, sans-serif; margin: 24px; }
+      body { font-family: Arial, sans-serif; margin: 24px; font-size: 16px; }
       h1 { margin: 0 0 12px 0; }
       table { border-collapse: collapse; width: 100%; }
       th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
       th { background: #f2f2f2; }
       .muted { color: #666; font-size: 12px; }
+      .stacked { line-height: 1.35; white-space: nowrap; }
+      .weekly-line { font-size: calc(1em - 4px); }
+      input, button { font-size: 14px; }
+      .tap-tip {
+        position: absolute;
+        background: #111827;
+        color: #fff;
+        border-radius: 6px;
+        padding: 6px 8px;
+        font-size: 12px;
+        line-height: 1.25;
+        white-space: nowrap;
+        z-index: 9999;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+      }
+      @media (max-width: 768px) {
+        body { margin: 12px; font-size: 17px; }
+        h1 { font-size: 22px; }
+        th, td { padding: 10px; font-size: 15px; }
+        .muted { font-size: 13px; }
+        input, button { font-size: 16px; }
+      }
     </style>
   </head>
   <body>
@@ -214,15 +237,10 @@ async fn dashboard(State(_state): State<AppState>) -> impl IntoResponse {
       <table>
       <thead>
         <tr>
-          <th>Label</th>
-          <th>Requests</th>
-          <th>Errors</th>
+          <th>Account</th>
+          <th>Code Gen</th>
+          <th>Code Review</th>
           <th>Expired At</th>
-          <th>Code Gen 5h</th>
-          <th>Code Gen Weekly</th>
-          <th>Code Review 5h</th>
-          <th>Code Review Weekly</th>
-          <th>Actions</th>
         </tr>
       </thead>
       <tbody id="rows"></tbody>
@@ -230,24 +248,65 @@ async fn dashboard(State(_state): State<AppState>) -> impl IntoResponse {
     </div>
     <script>
       let lastQuota = new Map();
+      let activeTipEl = null;
+      let activeTipTimer = null;
+      function showTapTip(el, ev) {
+        if (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+        }
+        const text = el.getAttribute('data-tip') || el.getAttribute('title') || '';
+        if (!text) return;
+        if (activeTipEl) {
+          activeTipEl.remove();
+          activeTipEl = null;
+        }
+        const tip = document.createElement('div');
+        tip.className = 'tap-tip';
+        tip.textContent = text;
+        document.body.appendChild(tip);
+        const rect = el.getBoundingClientRect();
+        const margin = 8;
+        let left = rect.left + (rect.width / 2) - (tip.offsetWidth / 2);
+        left = Math.max(margin, Math.min(left, window.innerWidth - tip.offsetWidth - margin));
+        let top = rect.bottom + 8;
+        if (top + tip.offsetHeight > window.innerHeight - margin) {
+          top = rect.top - tip.offsetHeight - 8;
+        }
+        tip.style.left = (left + window.scrollX) + 'px';
+        tip.style.top = (top + window.scrollY) + 'px';
+        activeTipEl = tip;
+        if (activeTipTimer) clearTimeout(activeTipTimer);
+        activeTipTimer = setTimeout(() => {
+          if (activeTipEl) {
+            activeTipEl.remove();
+            activeTipEl = null;
+          }
+        }, 2500);
+      }
+      document.addEventListener('click', () => {
+        if (activeTipEl) {
+          activeTipEl.remove();
+          activeTipEl = null;
+        }
+      });
       async function refresh() {
         const res = await fetch('/dashboard.json');
         const data = await res.json();
         document.getElementById('totals').textContent =
           'Total requests: ' + data.total_requests + ' | Total errors: ' + data.total_errors;
         const rows = data.accounts.map(a => {
-          const action = a.file_name
-            ? `<button onclick="deleteCred('${a.file_name}')">Delete</button>`
-            : '-';
           const toggleLabel = a.enabled ? 'Disable' : 'Enable';
-          const toggleAction = a.file_name
-            ? `<button onclick="toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})">${toggleLabel}</button>`
-            : '-';
           const dot = a.enabled ? '#2ecc71' : '#e74c3c';
           const key = a.file_name || a.label;
-          const label = `<span title="${a.account_id || ''}" style="display:inline-flex;align-items:center;gap:6px;">` +
-            `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dot};"></span>` +
-            `${a.label}</span>`;
+          const toggleControl = a.file_name
+            ? `<button title="${toggleLabel}" onclick="toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${dot};border:none;padding:0;cursor:pointer;"></button>`
+            : `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${dot};"></span>`;
+          const deleteControl = a.file_name
+            ? `<button title="Delete" onclick="deleteCred('${a.file_name}')" style="border:none;background:transparent;cursor:pointer;padding:0 0 0 4px;line-height:1;">&#128465;</button>`
+            : '';
+          const expiredAt = a.expired_at || '-';
+          const label = `<span style="display:flex;align-items:center;gap:6px;width:100%;">${toggleControl}${deleteControl}<span data-tip="Account ID: ${a.account_id || ''} | Expired at: ${expiredAt}" title="Account ID: ${a.account_id || ''} | Expired at: ${expiredAt}" onclick="showTapTip(this, event)" style="cursor:help;">${a.label}</span><span style="margin-left:auto;color:#666;font-size:12px;">(${a.requests}/${a.errors})</span></span>`;
           const q = lastQuota.get(key);
           const qcg5 = q?.code_generation?.five_hour;
           const qcgw = q?.code_generation?.weekly;
@@ -258,14 +317,9 @@ async fn dashboard(State(_state): State<AppState>) -> impl IntoResponse {
             : '…';
           return '<tr>' +
             '<td>' + label + '</td>' +
-            '<td>' + a.requests + '</td>' +
-            '<td>' + a.errors + '</td>' +
-            '<td>' + (a.expired_at || '-') + '</td>' +
-            '<td data-q="cg5" data-key="' + key + '">' + fmt(qcg5) + '</td>' +
-            '<td data-q="cgw" data-key="' + key + '">' + fmt(qcgw) + '</td>' +
-            '<td data-q="cr5" data-key="' + key + '">' + fmt(qcr5) + '</td>' +
-            '<td data-q="crw" data-key="' + key + '">' + fmt(qcrw) + '</td>' +
-            '<td>' + action + ' ' + toggleAction + '</td>' +
+            '<td class="stacked">5h: <span data-q="cg5" data-key="' + key + '">' + fmt(qcg5) + '</span><br><span class="weekly-line">Weekly: <span data-q="cgw" data-key="' + key + '">' + fmt(qcgw) + '</span></span></td>' +
+            '<td class="stacked">5h: <span data-q="cr5" data-key="' + key + '">' + fmt(qcr5) + '</span><br><span class="weekly-line">Weekly: <span data-q="crw" data-key="' + key + '">' + fmt(qcrw) + '</span></span></td>' +
+            '<td>' + expiredAt + '</td>' +
           '</tr>';
         }).join('');
         document.getElementById('rows').innerHTML = rows;
