@@ -6,6 +6,7 @@ use axum::{
     routing::any,
     Router,
 };
+use axum::http::HeaderValue;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use base64::Engine;
@@ -32,6 +33,7 @@ struct AppState {
     stats: Arc<Mutex<UsageStats>>,
     quota_cache: Arc<Mutex<Vec<Option<QuotaCacheEntry>>>>,
     oauth_pending: Arc<Mutex<HashMap<String, PendingOAuth>>>,
+    disabled: Arc<Mutex<HashSet<String>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +48,8 @@ struct Config {
     tokens: Vec<String>,
     // Optional directory containing Codex credential json files
     auth_dir: Option<String>,
+    // Optional list of disabled credential filenames
+    disabled_files: Option<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -54,6 +58,8 @@ struct UpstreamToken {
     account_id: Option<String>,
     label: String,
     file_name: Option<String>,
+    enabled: bool,
+    expired_at: Option<String>,
 }
 
 #[derive(Default, Clone, Serialize)]
@@ -108,7 +114,13 @@ struct PendingOAuth {
 #[tokio::main]
 async fn main() {
     let cfg = load_config();
-    let tokens = load_tokens(&cfg);
+    let disabled = cfg
+        .disabled_files
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let tokens = load_tokens(&cfg, &disabled);
     let stats = UsageStats {
         per_account: tokens
             .iter()
@@ -145,6 +157,7 @@ async fn main() {
         stats: Arc::new(Mutex::new(stats)),
         quota_cache: Arc::new(Mutex::new(quota_cache)),
         oauth_pending: Arc::new(Mutex::new(HashMap::new())),
+        disabled: Arc::new(Mutex::new(disabled)),
     };
 
     let app = Router::new()
@@ -154,6 +167,7 @@ async fn main() {
         .route("/dashboard.json", any(dashboard_json))
         .route("/quota.json", any(quota_json))
         .route("/credentials/delete", any(delete_credential))
+        .route("/credentials/toggle", any(toggle_credential))
         .route("/login/codex/start", any(login_start))
         .route("/login/codex/submit", any(login_submit))
         .route("/*path", any(proxy))
@@ -191,35 +205,31 @@ async fn dashboard(State(_state): State<AppState>) -> impl IntoResponse {
     </style>
   </head>
   <body>
-    <h1>Codex Gateway Usage</h1>
+    <h1 style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+      <span>Codex Gateway Usage</span>
+      <button id="addAccountBtn">Add account</button>
+    </h1>
     <div id="totals" class="muted"></div>
-    <table>
+    <div style="overflow-x:auto;">
+      <table>
       <thead>
         <tr>
           <th>Label</th>
-          <th>Account ID</th>
           <th>Requests</th>
           <th>Errors</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody id="rows"></tbody>
-    </table>
-    <h2 style="margin-top:24px;">Quota Usage (5h / Weekly)</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Label</th>
-          <th>Plan</th>
+          <th>Expired At</th>
           <th>Code Gen 5h</th>
           <th>Code Gen Weekly</th>
           <th>Code Review 5h</th>
           <th>Code Review Weekly</th>
+          <th>Actions</th>
         </tr>
       </thead>
-      <tbody id="quotaRows"></tbody>
-    </table>
+      <tbody id="rows"></tbody>
+      </table>
+    </div>
     <script>
+      let lastQuota = new Map();
       async function refresh() {
         const res = await fetch('/dashboard.json');
         const data = await res.json();
@@ -229,59 +239,87 @@ async fn dashboard(State(_state): State<AppState>) -> impl IntoResponse {
           const action = a.file_name
             ? `<button onclick="deleteCred('${a.file_name}')">Delete</button>`
             : '-';
+          const toggleLabel = a.enabled ? 'Disable' : 'Enable';
+          const toggleAction = a.file_name
+            ? `<button onclick="toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})">${toggleLabel}</button>`
+            : '-';
+          const dot = a.enabled ? '#2ecc71' : '#e74c3c';
+          const key = a.file_name || a.label;
+          const label = `<span title="${a.account_id || ''}" style="display:inline-flex;align-items:center;gap:6px;">` +
+            `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dot};"></span>` +
+            `${a.label}</span>`;
+          const q = lastQuota.get(key);
+          const qcg5 = q?.code_generation?.five_hour;
+          const qcgw = q?.code_generation?.weekly;
+          const qcr5 = q?.code_review?.five_hour;
+          const qcrw = q?.code_review?.weekly;
+          const fmt = (x) => x && x.used_percent !== null && x.used_percent !== undefined
+            ? (x.used_percent.toFixed(1) + '% ' + (x.reset_label ? '(' + x.reset_label + ')' : ''))
+            : '…';
           return '<tr>' +
-            '<td>' + a.label + '</td>' +
-            '<td>' + (a.account_id || '-') + '</td>' +
+            '<td>' + label + '</td>' +
             '<td>' + a.requests + '</td>' +
             '<td>' + a.errors + '</td>' +
-            '<td>' + action + '</td>' +
+            '<td>' + (a.expired_at || '-') + '</td>' +
+            '<td data-q="cg5" data-key="' + key + '">' + fmt(qcg5) + '</td>' +
+            '<td data-q="cgw" data-key="' + key + '">' + fmt(qcgw) + '</td>' +
+            '<td data-q="cr5" data-key="' + key + '">' + fmt(qcr5) + '</td>' +
+            '<td data-q="crw" data-key="' + key + '">' + fmt(qcrw) + '</td>' +
+            '<td>' + action + ' ' + toggleAction + '</td>' +
           '</tr>';
         }).join('');
         document.getElementById('rows').innerHTML = rows;
       }
       async function refreshQuota() {
         const res = await fetch('/quota.json');
-        const data = await res.json();
-        const rows = data.accounts.map(a => {
-          if (a.error) {
-            return '<tr>' +
-              '<td>' + a.label + '</td>' +
-              '<td colspan="5">' + a.error + '</td>' +
-            '</tr>';
+        const quota = await res.json();
+        const quotaMap = new Map();
+        (quota.accounts || []).forEach(q => {
+          const key = q.file_name || q.label;
+          quotaMap.set(key, q);
+        });
+        lastQuota = quotaMap;
+        const fmt = (x) => x && x.used_percent !== null && x.used_percent !== undefined
+          ? (x.used_percent.toFixed(1) + '% ' + (x.reset_label ? '(' + x.reset_label + ')' : ''))
+          : '0%';
+        document.querySelectorAll('[data-q]').forEach(td => {
+          const key = td.getAttribute('data-key');
+          const kind = td.getAttribute('data-q');
+          const row = quotaMap.get(key);
+          if (!row || row.error) {
+            td.textContent = '0%';
+            return;
           }
-          const cg5 = a.code_generation?.five_hour || {};
-          const cgw = a.code_generation?.weekly || {};
-          const cr5 = a.code_review?.five_hour || {};
-          const crw = a.code_review?.weekly || {};
-          const fmt = (x) => x && x.used_percent !== null && x.used_percent !== undefined
-            ? (x.used_percent.toFixed(1) + '% ' + (x.reset_label ? '(' + x.reset_label + ')' : ''))
-            : '0%';
-          return '<tr>' +
-            '<td>' + a.label + '</td>' +
-            '<td>' + (a.plan_type || '-') + '</td>' +
-            '<td>' + fmt(cg5) + '</td>' +
-            '<td>' + fmt(cgw) + '</td>' +
-            '<td>' + fmt(cr5) + '</td>' +
-            '<td>' + fmt(crw) + '</td>' +
-          '</tr>';
-        }).join('');
-        document.getElementById('quotaRows').innerHTML = rows;
+          const cg5 = row.code_generation?.five_hour || {};
+          const cgw = row.code_generation?.weekly || {};
+          const cr5 = row.code_review?.five_hour || {};
+          const crw = row.code_review?.weekly || {};
+          if (kind === 'cg5') td.textContent = fmt(cg5);
+          if (kind === 'cgw') td.textContent = fmt(cgw);
+          if (kind === 'cr5') td.textContent = fmt(cr5);
+          if (kind === 'crw') td.textContent = fmt(crw);
+        });
       }
       refresh();
       refreshQuota();
-      setInterval(refresh, 2000);
+      setInterval(refresh, 5000);
       setInterval(refreshQuota, 60000);
     </script>
-    <h2 style="margin-top:24px;">Codex OAuth Login</h2>
-    <p>Click start, open the URL in a new tab, complete login, then paste the callback URL below.</p>
-    <button onclick="startLogin()">Start Login</button>
-    <div id="status" class="muted" style="margin-top:8px;"></div>
-    <pre id="authUrl" style="display:none;"></pre>
-    <form id="loginForm" style="margin-top:16px;">
-      <label>Callback URL</label>
-      <input name="redirect_url" placeholder="http://localhost:1455/auth/callback?code=...&state=...">
-      <button type="submit" style="margin-top:8px;">Submit</button>
-    </form>
+    <div id="addModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);">
+      <div style="background:#fff;max-width:720px;margin:8% auto;padding:16px;border-radius:8px;max-height:80vh;overflow:auto;">
+        <h2 style="margin-top:0;">Add Codex Account</h2>
+        <p>Click start, open the URL in a new tab, complete login, then paste the callback URL below.</p>
+        <button onclick="startLogin()">Start Login</button>
+        <div id="status" class="muted" style="margin-top:8px;"></div>
+        <pre id="authUrl" style="display:none;white-space:pre-wrap;word-break:break-all;overflow-wrap:anywhere;"></pre>
+        <form id="loginForm" style="margin-top:16px;">
+          <label>Callback URL</label>
+          <input name="redirect_url" placeholder="http://localhost:1455/auth/callback?code=...&state=...">
+          <button type="submit" style="margin-top:8px;">Submit</button>
+          <button type="button" id="closeModalBtn" style="margin-top:8px;margin-left:8px;">Close</button>
+        </form>
+      </div>
+    </div>
     <script>
       async function startLogin() {
         const res = await fetch('/login/codex/start');
@@ -296,6 +334,17 @@ async fn dashboard(State(_state): State<AppState>) -> impl IntoResponse {
           document.getElementById('status').textContent = 'Failed to start login';
         }
       }
+      document.getElementById('addAccountBtn').addEventListener('click', () => {
+        document.getElementById('addModal').style.display = 'block';
+      });
+      document.getElementById('closeModalBtn').addEventListener('click', () => {
+        document.getElementById('addModal').style.display = 'none';
+      });
+      document.getElementById('addModal').addEventListener('click', (e) => {
+        if (e.target.id === 'addModal') {
+          document.getElementById('addModal').style.display = 'none';
+        }
+      });
       document.getElementById('loginForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         const form = e.target;
@@ -312,6 +361,9 @@ async fn dashboard(State(_state): State<AppState>) -> impl IntoResponse {
         });
         const data = await res.json();
         document.getElementById('status').textContent = data.message || 'Login completed.';
+        if (data.ok) {
+          refresh();
+        }
       });
       async function deleteCred(fileName) {
         const key = prompt('Proxy API key for delete:');
@@ -323,6 +375,22 @@ async fn dashboard(State(_state): State<AppState>) -> impl IntoResponse {
             'Authorization': 'Bearer ' + key
           },
           body: new URLSearchParams({ file_name: fileName })
+        });
+        const data = await res.json();
+        alert(data.message || 'done');
+        refresh();
+        refreshQuota();
+      }
+      async function toggleCred(fileName, enabled) {
+        const key = prompt('Proxy API key for toggle:');
+        if (!key) return;
+        const res = await fetch('/credentials/toggle', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Authorization': 'Bearer ' + key
+          },
+          body: new URLSearchParams({ file_name: fileName, enabled: enabled ? 'true' : 'false' })
         });
         const data = await res.json();
         alert(data.message || 'done');
@@ -359,12 +427,22 @@ async fn dashboard_json(State(state): State<AppState>) -> impl IntoResponse {
                 let tokens = state.tokens.lock().unwrap();
                 tokens.get(i).and_then(|t| t.file_name.clone())
             };
+            let enabled = {
+                let tokens = state.tokens.lock().unwrap();
+                tokens.get(i).map(|t| t.enabled).unwrap_or(false)
+            };
+            let expired_at = {
+                let tokens = state.tokens.lock().unwrap();
+                tokens.get(i).and_then(|t| t.expired_at.clone())
+            };
             serde_json::json!({
                 "label": a.label,
                 "account_id": a.account_id,
                 "requests": a.requests,
                 "errors": a.errors,
-                "file_name": file_name
+                "file_name": file_name,
+                "enabled": enabled,
+                "expired_at": expired_at
             })
         })
         .collect();
@@ -412,6 +490,12 @@ struct CallbackForm {
 #[derive(Deserialize)]
 struct DeleteForm {
     file_name: String,
+}
+
+#[derive(Deserialize)]
+struct ToggleForm {
+    file_name: String,
+    enabled: String,
 }
 
 async fn login_submit(
@@ -500,7 +584,8 @@ async fn delete_credential(
     match std::fs::remove_file(&path) {
         Ok(_) => {
             // reload tokens + stats
-            let tokens = load_tokens(&state.cfg);
+            let disabled = state.disabled.lock().unwrap().clone();
+            let tokens = load_tokens(&state.cfg, &disabled);
             {
                 let mut tlock = state.tokens.lock().unwrap();
                 *tlock = tokens.clone();
@@ -537,6 +622,78 @@ async fn delete_credential(
     }
 }
 
+async fn toggle_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ToggleForm>,
+) -> impl IntoResponse {
+    if !check_api_key(&headers, &state.cfg.proxy_api_key) {
+        return axum::Json(serde_json::json!({
+            "ok": false,
+            "message": "unauthorized"
+        }))
+        .into_response();
+    }
+    let file_name = form.file_name.trim();
+    if file_name.is_empty() {
+        return axum::Json(serde_json::json!({
+            "ok": false,
+            "message": "file_name is required"
+        }))
+        .into_response();
+    }
+    let enable = form.enabled.trim().eq_ignore_ascii_case("true");
+
+    {
+        let mut disabled = state.disabled.lock().unwrap();
+        if enable {
+            disabled.remove(file_name);
+        } else {
+            disabled.insert(file_name.to_string());
+        }
+    }
+
+    if let Err(err) = persist_disabled_list(state.cfg.as_ref(), &state.disabled) {
+        return axum::Json(serde_json::json!({
+            "ok": false,
+            "message": format!("failed to persist: {}", err)
+        }))
+        .into_response();
+    }
+
+    // reload tokens + stats
+    let disabled = state.disabled.lock().unwrap().clone();
+    let tokens = load_tokens(&state.cfg, &disabled);
+    {
+        let mut tlock = state.tokens.lock().unwrap();
+        *tlock = tokens.clone();
+    }
+    {
+        let mut stats = state.stats.lock().unwrap();
+        stats.per_account = tokens
+            .iter()
+            .map(|t| AccountUsage {
+                label: t.label.clone(),
+                account_id: t.account_id.clone().unwrap_or_default(),
+                requests: 0,
+                errors: 0,
+            })
+            .collect();
+        stats.total_requests = 0;
+        stats.total_errors = 0;
+    }
+    {
+        let mut cache = state.quota_cache.lock().unwrap();
+        *cache = vec![None; tokens.len()];
+    }
+
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "message": format!("{} {}", if enable { "enabled" } else { "disabled" }, file_name)
+    }))
+    .into_response()
+}
+
 async fn proxy(
     State(state): State<AppState>,
     Path(path): Path<String>,
@@ -556,7 +713,10 @@ async fn proxy(
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid body").into_response(),
     };
 
-    let upstream = build_upstream_url(&state.cfg.upstream_base, &path, &uri);
+    let (mapped_path, mapped_query) = map_v1_path_and_query(&path, &uri);
+    let client_wants_stream =
+        mapped_path == "responses" && method == Method::POST && wants_stream(&headers, &body_bytes);
+    let upstream = build_upstream_url(&state.cfg.upstream_base, &mapped_path, mapped_query.as_deref());
     let session_id = Uuid::new_v4().to_string();
 
     let picked = pick_token(&state);
@@ -566,8 +726,11 @@ async fn proxy(
     }
     let (token_idx, token) = picked.unwrap();
     record_request(&state, token_idx);
-    let body_bytes = maybe_apply_prompt_cache_key(&headers, body_bytes, &session_id);
-    let mut req = state.client.request(method, upstream).body(body_bytes);
+    let mut body_bytes = maybe_apply_prompt_cache_key(&headers, body_bytes, &session_id);
+    if mapped_path == "responses" && method == Method::POST {
+        body_bytes = ensure_store_and_stream(&headers, body_bytes);
+    }
+    let mut req = state.client.request(method.clone(), upstream).body(body_bytes);
 
     // Copy headers except hop-by-hop and auth; set upstream auth
     for (k, v) in headers.iter() {
@@ -623,6 +786,23 @@ async fn proxy(
         return (status, out_headers, body_bytes).into_response();
     }
 
+    if mapped_path == "responses" && method == Method::POST && !client_wants_stream {
+        let body_bytes = match resp.bytes().await {
+            Ok(b) => b,
+            Err(err) => {
+                error!("upstream body read failed: {}", err);
+                return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
+            }
+        };
+        let json_body = sse_to_response_json(&body_bytes);
+        let mut headers = out_headers;
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        return (status, headers, json_body).into_response();
+    }
+
     // Stream response body back
     let stats_state = state.clone();
     let stream_idx = token_idx;
@@ -654,10 +834,16 @@ fn pick_token(state: &AppState) -> Option<(usize, UpstreamToken)> {
     if tokens.is_empty() {
         return None;
     }
-    let picked_idx = *idx % tokens.len();
-    let token = tokens[picked_idx].clone();
-    *idx = (*idx + 1) % tokens.len();
-    Some((picked_idx, token))
+    let len = tokens.len();
+    for _ in 0..len {
+        let picked_idx = *idx % len;
+        *idx = (*idx + 1) % len;
+        if tokens[picked_idx].enabled {
+            let token = tokens[picked_idx].clone();
+            return Some((picked_idx, token));
+        }
+    }
+    None
 }
 
 fn record_request(state: &AppState, idx: usize) {
@@ -676,17 +862,42 @@ fn record_error(state: &AppState, idx: usize) {
     }
 }
 
-fn build_upstream_url(base: &str, path: &str, uri: &Uri) -> String {
+fn build_upstream_url(base: &str, path: &str, query: Option<&str>) -> String {
     let mut base = base.trim_end_matches('/').to_string();
     if !path.is_empty() {
         base.push('/');
         base.push_str(path.trim_start_matches('/'));
     }
-    if let Some(q) = uri.query() {
+    if let Some(q) = query {
         base.push('?');
         base.push_str(q);
     }
     base
+}
+
+fn map_v1_path_and_query(path: &str, uri: &Uri) -> (String, Option<String>) {
+    let mut new_path = path.trim_start_matches('/').to_string();
+    if let Some(stripped) = new_path.strip_prefix("v1/") {
+        new_path = stripped.to_string();
+    }
+
+    let mut query = uri.query().unwrap_or("").to_string();
+    if new_path == "models" {
+        let has_client_version = query
+            .split('&')
+            .any(|kv| kv.starts_with("client_version="));
+        if !has_client_version {
+            if query.is_empty() {
+                query = "client_version=0.0.0".to_string();
+            } else {
+                query.push('&');
+                query.push_str("client_version=0.0.0");
+            }
+        }
+    }
+
+    let query = if query.is_empty() { None } else { Some(query) };
+    (new_path, query)
 }
 
 fn is_hop_header(name: &str) -> bool {
@@ -796,13 +1007,142 @@ fn maybe_apply_prompt_cache_key(
     body
 }
 
+fn ensure_store_and_stream(headers: &HeaderMap, body: Bytes) -> Bytes {
+    if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok()) {
+        if !ct.to_ascii_lowercase().contains("application/json") {
+            return body;
+        }
+    } else {
+        return body;
+    }
+
+    let mut value: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return body,
+    };
+    if let serde_json::Value::Object(map) = &mut value {
+        map.insert("store".to_string(), serde_json::Value::Bool(false));
+        map.insert("stream".to_string(), serde_json::Value::Bool(true));
+        if let Ok(out) = serde_json::to_vec(&value) {
+            return Bytes::from(out);
+        }
+    }
+    body
+}
+
+fn wants_stream(headers: &HeaderMap, body: &Bytes) -> bool {
+    if let Some(accept) = headers.get("accept").and_then(|v| v.to_str().ok()) {
+        if accept.to_ascii_lowercase().contains("text/event-stream") {
+            return true;
+        }
+    }
+    if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok()) {
+        if !ct.to_ascii_lowercase().contains("application/json") {
+            return false;
+        }
+    } else {
+        return false;
+    }
+    let value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    match value.get("stream") {
+        Some(serde_json::Value::Bool(b)) => *b,
+        _ => false,
+    }
+}
+
+fn sse_to_response_json(body: &Bytes) -> Bytes {
+    let text = String::from_utf8_lossy(body);
+    let mut response_obj: Option<serde_json::Value> = None;
+    let mut output_text = String::new();
+
+    for line in text.lines() {
+        let data = match line.strip_prefix("data: ") {
+            Some(d) => d.trim(),
+            None => continue,
+        };
+        if data == "[DONE]" {
+            break;
+        }
+        let v: serde_json::Value = match serde_json::from_str(data) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(t) = v.get("type").and_then(|v| v.as_str()) {
+            if t == "response.output_text.delta" {
+                if let Some(delta) = v.get("delta").and_then(|v| v.as_str()) {
+                    output_text.push_str(delta);
+                }
+            } else if t == "response.completed" {
+                if let Some(r) = v.get("response") {
+                    response_obj = Some(r.clone());
+                }
+            } else if t == "response.created" && response_obj.is_none() {
+                if let Some(r) = v.get("response") {
+                    response_obj = Some(r.clone());
+                }
+            }
+        }
+    }
+
+    let mut resp = response_obj.unwrap_or_else(|| {
+        serde_json::json!({
+            "object": "response",
+            "output": []
+        })
+    });
+    if let serde_json::Value::Object(map) = &mut resp {
+        map.insert(
+            "output_text".to_string(),
+            serde_json::Value::String(output_text.clone()),
+        );
+        let output_is_empty = map
+            .get("output")
+            .and_then(|v| v.as_array())
+            .map(|a| a.is_empty())
+            .unwrap_or(true);
+        if output_is_empty {
+            map.insert(
+                "output".to_string(),
+                serde_json::json!([{
+                    "type": "message",
+                    "id": "msg_compat",
+                    "role": "assistant",
+                    "content": [{"type":"output_text","text": output_text}]
+                }]),
+            );
+        }
+    }
+    Bytes::from(serde_json::to_vec(&resp).unwrap_or_default())
+}
+
 fn load_config() -> Config {
     // expects config.json in working dir
     let data = std::fs::read_to_string("config.json").expect("config.json missing");
     serde_json::from_str(&data).expect("invalid config.json")
 }
 
-fn load_tokens(cfg: &Config) -> Vec<UpstreamToken> {
+fn persist_disabled_list(cfg: &Config, disabled: &Arc<Mutex<HashSet<String>>>) -> Result<(), String> {
+    let mut v: serde_json::Value = {
+        let data = std::fs::read_to_string("config.json").map_err(|e| e.to_string())?;
+        serde_json::from_str(&data).map_err(|e| e.to_string())?
+    };
+    let list: Vec<String> = disabled.lock().unwrap().iter().cloned().collect();
+    if let serde_json::Value::Object(map) = &mut v {
+        if list.is_empty() {
+            map.remove("disabled_files");
+        } else {
+            map.insert("disabled_files".to_string(), serde_json::json!(list));
+        }
+    }
+    std::fs::write("config.json", serde_json::to_vec_pretty(&v).unwrap())
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn load_tokens(cfg: &Config, disabled: &HashSet<String>) -> Vec<UpstreamToken> {
     let mut tokens: Vec<UpstreamToken> = cfg
         .tokens
         .iter()
@@ -814,6 +1154,8 @@ fn load_tokens(cfg: &Config) -> Vec<UpstreamToken> {
             account_id: None,
             label: format!("manual-{}", i + 1),
             file_name: None,
+            enabled: true,
+            expired_at: None,
         })
         .collect();
 
@@ -851,6 +1193,18 @@ fn load_tokens(cfg: &Config) -> Vec<UpstreamToken> {
                     .or_else(|| path.file_name().and_then(|s| s.to_str()))
                     .unwrap_or("codex-account")
                     .to_string();
+                // Prefer subscription end date from ID token.
+                // Fallback to access token expiration only when subscription data is unavailable.
+                let expired_at = value
+                    .get("id_token")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_jwt_subscription_until)
+                    .or_else(|| {
+                        value
+                            .get("expired")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    });
                 if let Some(tok) = value
                     .get("access_token")
                     .and_then(|v| v.as_str())
@@ -858,11 +1212,18 @@ fn load_tokens(cfg: &Config) -> Vec<UpstreamToken> {
                 {
                     let tok = tok.trim();
                     if !tok.is_empty() {
+                        let file_name = path.file_name().and_then(|s| s.to_str()).map(|s| s.to_string());
+                        let enabled = file_name
+                            .as_ref()
+                            .map(|f| !disabled.contains(f))
+                            .unwrap_or(true);
                         tokens.push(UpstreamToken {
                             token: tok.to_string(),
                             account_id,
                             label,
-                            file_name: path.file_name().and_then(|s| s.to_str()).map(|s| s.to_string()),
+                            file_name,
+                            enabled,
+                            expired_at,
                         });
                     }
                 }
@@ -984,7 +1345,8 @@ fn save_codex_auth(state: &AppState, token_resp: &TokenResponse) -> Result<Strin
         .map_err(|e| e.to_string())?;
 
     // reload tokens + stats
-    let tokens = load_tokens(&state.cfg);
+    let disabled = state.disabled.lock().unwrap().clone();
+    let tokens = load_tokens(&state.cfg, &disabled);
     {
         let mut tlock = state.tokens.lock().unwrap();
         *tlock = tokens.clone();
@@ -1053,6 +1415,35 @@ fn parse_jwt_account_id(id_token: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn parse_jwt_subscription_until(id_token: &str) -> Option<String> {
+    let parts: Vec<&str> = id_token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let payload = parts[1];
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    let raw = v
+        .get("https://api.openai.com/auth")
+        .and_then(|a| a.get("chatgpt_subscription_active_until"))?;
+    if let Some(s) = raw.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(ts) = raw.as_f64() {
+        if ts > 0.0 {
+            let dt = if ts > 1e12 {
+                DateTime::<Utc>::from(std::time::UNIX_EPOCH + Duration::from_millis(ts as u64))
+            } else {
+                DateTime::<Utc>::from(std::time::UNIX_EPOCH + Duration::from_secs(ts as u64))
+            };
+            return Some(dt.to_rfc3339());
+        }
+    }
+    None
+}
+
 async fn get_quota_summaries(state: &AppState) -> Vec<serde_json::Value> {
     let tokens = state.tokens.lock().unwrap().clone();
     {
@@ -1093,12 +1484,14 @@ async fn get_quota_summaries(state: &AppState) -> Vec<serde_json::Value> {
             results.push(serde_json::json!({
                 "label": token.label,
                 "account_id": token.account_id.clone().unwrap_or_default(),
+                "file_name": token.file_name.clone().unwrap_or_default(),
                 "error": err
             }));
         } else {
             results.push(serde_json::json!({
                 "label": entry.summary.label,
                 "account_id": entry.summary.account_id,
+                "file_name": token.file_name.clone().unwrap_or_default(),
                 "plan_type": entry.summary.plan_type,
                 "code_generation": entry.summary.code_generation,
                 "code_review": entry.summary.code_review
