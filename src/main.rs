@@ -786,13 +786,9 @@ async fn proxy(
     }
     let mut req = state.client.request(method.clone(), upstream).body(body_bytes);
 
-    // Copy headers except hop-by-hop and auth; set upstream auth
+    // Copy headers except hop-by-hop/auth and proxy-edge client headers; set upstream auth
     for (k, v) in headers.iter() {
-        if is_hop_header(k.as_str())
-            || k.as_str().eq_ignore_ascii_case("authorization")
-            || k.as_str().eq_ignore_ascii_case("host")
-            || k.as_str().eq_ignore_ascii_case("content-length")
-        {
+        if should_drop_incoming_header(k.as_str()) {
             continue;
         }
         req = req.header(k, v);
@@ -966,6 +962,25 @@ fn is_hop_header(name: &str) -> bool {
             | "transfer-encoding"
             | "upgrade"
     )
+}
+
+fn should_drop_incoming_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if is_hop_header(&lower)
+        || lower == "authorization"
+        || lower == "host"
+        || lower == "content-length"
+        || lower == "x-forwarded-for"
+        || lower == "x-forwarded-host"
+        || lower == "x-forwarded-proto"
+        || lower == "x-real-ip"
+        || lower == "true-client-ip"
+    {
+        return true;
+    }
+
+    // Never leak edge-provider headers upstream (for example Cloudflare).
+    lower.starts_with("cf-")
 }
 
 fn apply_default_codex_headers(
