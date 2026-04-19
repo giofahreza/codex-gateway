@@ -1,17 +1,13 @@
 use axum::{
     body::Body,
-    extract::{Form, OriginalUri, Path, State},
-    http::{HeaderMap, Method, StatusCode, Uri},
+    extract::{OriginalUri, State},
+    http::{HeaderMap, Method, StatusCode},
     response::IntoResponse,
     routing::any,
     Router,
 };
 use axum::http::HeaderValue;
-use bytes::Bytes;
 use futures_util::StreamExt;
-use base64::Engine;
-use rand::{distr::Alphanumeric, Rng};
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -21,8 +17,16 @@ use std::{
 };
 use tracing::{error, info};
 use uuid::Uuid;
-use url::Url;
-use chrono::{DateTime, Utc};
+mod source;
+mod target;
+use source::{route_request, ResponseMode, TargetModel};
+use source::v1::response::{
+    model_retrieve_to_openai_json, models_list_to_openai_json, openai_error_body,
+    sse_to_response_json, upstream_error_to_openai,
+};
+use target::codex::auth::PendingOAuth;
+use target::codex::quota::QuotaCacheEntry;
+use target::codex::tokens::UpstreamToken;
 
 #[derive(Clone)]
 struct AppState {
@@ -34,6 +38,13 @@ struct AppState {
     quota_cache: Arc<Mutex<Vec<Option<QuotaCacheEntry>>>>,
     oauth_pending: Arc<Mutex<HashMap<String, PendingOAuth>>>,
     disabled: Arc<Mutex<HashSet<String>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceApi {
+    V1,
+    Codex,
+    Claude,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,15 +63,6 @@ struct Config {
     disabled_files: Option<Vec<String>>,
 }
 
-#[derive(Clone)]
-struct UpstreamToken {
-    token: String,
-    account_id: Option<String>,
-    label: String,
-    file_name: Option<String>,
-    enabled: bool,
-    expired_at: Option<String>,
-}
 
 #[derive(Default, Clone, Serialize)]
 struct UsageStats {
@@ -77,39 +79,6 @@ struct AccountUsage {
     errors: u64,
 }
 
-#[derive(Clone)]
-struct QuotaCacheEntry {
-    fetched_at: std::time::Instant,
-    summary: QuotaSummary,
-    error: Option<String>,
-}
-
-#[derive(Default, Clone, Serialize)]
-struct QuotaSummary {
-    label: String,
-    account_id: String,
-    plan_type: String,
-    code_generation: QuotaRateSummary,
-    code_review: QuotaRateSummary,
-}
-
-#[derive(Default, Clone, Serialize)]
-struct QuotaRateSummary {
-    five_hour: Option<QuotaWindowSummary>,
-    weekly: Option<QuotaWindowSummary>,
-}
-
-#[derive(Default, Clone, Serialize)]
-struct QuotaWindowSummary {
-    used_percent: Option<f64>,
-    reset_label: String,
-}
-
-#[derive(Clone)]
-struct PendingOAuth {
-    code_verifier: String,
-    created_at: std::time::Instant,
-}
 
 #[tokio::main]
 async fn main() {
@@ -120,7 +89,7 @@ async fn main() {
         .unwrap_or_default()
         .into_iter()
         .collect::<HashSet<_>>();
-    let tokens = load_tokens(&cfg, &disabled);
+    let tokens = target::codex::tokens::load_tokens(&cfg, &disabled);
     let stats = UsageStats {
         per_account: tokens
             .iter()
@@ -165,11 +134,11 @@ async fn main() {
         .route("/", any(dashboard))
         .route("/dashboard", any(dashboard))
         .route("/dashboard.json", any(dashboard_json))
-        .route("/quota.json", any(quota_json))
-        .route("/credentials/delete", any(delete_credential))
-        .route("/credentials/toggle", any(toggle_credential))
-        .route("/login/codex/start", any(login_start))
-        .route("/login/codex/submit", any(login_submit))
+        .route("/quota.json", any(target::codex::admin::quota_json))
+        .route("/credentials/delete", any(target::codex::admin::delete_credential))
+        .route("/credentials/toggle", any(target::codex::admin::toggle_credential))
+        .route("/login/codex/start", any(target::codex::admin::login_start))
+        .route("/login/codex/submit", any(target::codex::admin::login_submit))
         .route("/*path", any(proxy))
         .with_state(state.clone());
 
@@ -507,283 +476,99 @@ async fn dashboard_json(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-async fn quota_json(State(state): State<AppState>) -> impl IntoResponse {
-    let accounts = get_quota_summaries(&state).await;
-    axum::Json(serde_json::json!({ "accounts": accounts }))
-}
-
-async fn login_start(State(state): State<AppState>) -> impl IntoResponse {
-    let (url, state_token, code_verifier) = match build_codex_auth_url() {
-        Ok(v) => v,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("failed to create auth url: {}", err),
-            )
-                .into_response();
-        }
-    };
-    {
-        let mut pending = state.oauth_pending.lock().unwrap();
-        pending.insert(
-            state_token.clone(),
-            PendingOAuth {
-                code_verifier,
-                created_at: std::time::Instant::now(),
-            },
-        );
-    }
-    axum::Json(serde_json::json!({ "url": url, "state": state_token })).into_response()
-}
-
-#[derive(Deserialize)]
-struct CallbackForm {
-    redirect_url: String,
-}
-
-#[derive(Deserialize)]
-struct DeleteForm {
-    file_name: String,
-}
-
-#[derive(Deserialize)]
-struct ToggleForm {
-    file_name: String,
-    enabled: String,
-}
-
-async fn login_submit(
-    State(state): State<AppState>,
-    Form(form): Form<CallbackForm>,
-) -> impl IntoResponse {
-    let redirect_url = form.redirect_url.trim();
-    if redirect_url.is_empty() {
-        return axum::Json(serde_json::json!({
-            "ok": false,
-            "message": "redirect_url is required"
-        }))
-        .into_response();
-    }
-    let (code, state_token) = match parse_oauth_callback(redirect_url) {
-        Ok(v) => v,
-        Err(err) => {
-            return axum::Json(serde_json::json!({
-                "ok": false,
-                "message": err
-            }))
-            .into_response()
-        }
-    };
-    let code_verifier = {
-        let mut pending = state.oauth_pending.lock().unwrap();
-        match pending.remove(&state_token) {
-            Some(p) => p.code_verifier,
-            None => {
-                return axum::Json(serde_json::json!({
-                    "ok": false,
-                    "message": "invalid or expired state"
-                }))
-                .into_response()
-            }
-        }
-    };
-
-    match exchange_code_for_tokens(&state.client, &code, &code_verifier).await {
-        Ok(token_resp) => match save_codex_auth(&state, &token_resp) {
-            Ok(saved_path) => axum::Json(serde_json::json!({
-                "ok": true,
-                "message": format!("saved credentials to {}", saved_path)
-            }))
-            .into_response(),
-            Err(err) => axum::Json(serde_json::json!({
-                "ok": false,
-                "message": err
-            }))
-            .into_response(),
-        },
-        Err(err) => axum::Json(serde_json::json!({
-            "ok": false,
-            "message": err
-        }))
-        .into_response(),
-    }
-}
-
-async fn delete_credential(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Form(form): Form<DeleteForm>,
-) -> impl IntoResponse {
-    if !check_api_key(&headers, &state.cfg.proxy_api_key) {
-        return axum::Json(serde_json::json!({
-            "ok": false,
-            "message": "unauthorized"
-        }))
-        .into_response();
-    }
-    let file_name = form.file_name.trim();
-    if file_name.is_empty() {
-        return axum::Json(serde_json::json!({
-            "ok": false,
-            "message": "file_name is required"
-        }))
-        .into_response();
-    }
-    let auth_dir = state
-        .cfg
-        .auth_dir
-        .clone()
-        .unwrap_or_else(|| "/root/dev/yow/gpt-gateway/auths".to_string());
-    let path = std::path::Path::new(&auth_dir).join(file_name);
-    match std::fs::remove_file(&path) {
-        Ok(_) => {
-            // reload tokens + stats
-            let disabled = state.disabled.lock().unwrap().clone();
-            let tokens = load_tokens(&state.cfg, &disabled);
-            {
-                let mut tlock = state.tokens.lock().unwrap();
-                *tlock = tokens.clone();
-            }
-            {
-                let mut stats = state.stats.lock().unwrap();
-                stats.per_account = tokens
-                    .iter()
-                    .map(|t| AccountUsage {
-                        label: t.label.clone(),
-                        account_id: t.account_id.clone().unwrap_or_default(),
-                        requests: 0,
-                        errors: 0,
-                    })
-                    .collect();
-                stats.total_requests = 0;
-                stats.total_errors = 0;
-            }
-            {
-                let mut cache = state.quota_cache.lock().unwrap();
-                *cache = vec![None; tokens.len()];
-            }
-            axum::Json(serde_json::json!({
-                "ok": true,
-                "message": format!("deleted {}", file_name)
-            }))
-            .into_response()
-        }
-        Err(err) => axum::Json(serde_json::json!({
-            "ok": false,
-            "message": format!("delete failed: {}", err)
-        }))
-        .into_response(),
-    }
-}
-
-async fn toggle_credential(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Form(form): Form<ToggleForm>,
-) -> impl IntoResponse {
-    if !check_api_key(&headers, &state.cfg.proxy_api_key) {
-        return axum::Json(serde_json::json!({
-            "ok": false,
-            "message": "unauthorized"
-        }))
-        .into_response();
-    }
-    let file_name = form.file_name.trim();
-    if file_name.is_empty() {
-        return axum::Json(serde_json::json!({
-            "ok": false,
-            "message": "file_name is required"
-        }))
-        .into_response();
-    }
-    let enable = form.enabled.trim().eq_ignore_ascii_case("true");
-
-    {
-        let mut disabled = state.disabled.lock().unwrap();
-        if enable {
-            disabled.remove(file_name);
-        } else {
-            disabled.insert(file_name.to_string());
-        }
-    }
-
-    if let Err(err) = persist_disabled_list(state.cfg.as_ref(), &state.disabled) {
-        return axum::Json(serde_json::json!({
-            "ok": false,
-            "message": format!("failed to persist: {}", err)
-        }))
-        .into_response();
-    }
-
-    // reload tokens + stats
-    let disabled = state.disabled.lock().unwrap().clone();
-    let tokens = load_tokens(&state.cfg, &disabled);
-    {
-        let mut tlock = state.tokens.lock().unwrap();
-        *tlock = tokens.clone();
-    }
-    {
-        let mut stats = state.stats.lock().unwrap();
-        stats.per_account = tokens
-            .iter()
-            .map(|t| AccountUsage {
-                label: t.label.clone(),
-                account_id: t.account_id.clone().unwrap_or_default(),
-                requests: 0,
-                errors: 0,
-            })
-            .collect();
-        stats.total_requests = 0;
-        stats.total_errors = 0;
-    }
-    {
-        let mut cache = state.quota_cache.lock().unwrap();
-        *cache = vec![None; tokens.len()];
-    }
-
-    axum::Json(serde_json::json!({
-        "ok": true,
-        "message": format!("{} {}", if enable { "enabled" } else { "disabled" }, file_name)
-    }))
-    .into_response()
-}
-
 async fn proxy(
     State(state): State<AppState>,
-    Path(path): Path<String>,
     method: Method,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
     body: Body,
 ) -> impl IntoResponse {
+    let raw_path = uri.path().to_string();
+    let source_api = detect_source_api(&raw_path);
+
     // Simple API key guard
     if !check_api_key(&headers, &state.cfg.proxy_api_key) {
-        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+        return if matches!(source_api, SourceApi::V1) {
+            (
+                StatusCode::UNAUTHORIZED,
+                [(axum::http::header::CONTENT_TYPE.as_str(), "application/json")],
+                openai_error_body(
+                    "Missing bearer authentication in header",
+                    "invalid_request_error",
+                    None,
+                ),
+            )
+                .into_response()
+        } else {
+            (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
+        };
     }
 
     // Read full body (small/simple proxy)
     let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
         Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid body").into_response(),
+        Err(_) => {
+            return if matches!(source_api, SourceApi::V1) {
+                (
+                    StatusCode::BAD_REQUEST,
+                    [(axum::http::header::CONTENT_TYPE.as_str(), "application/json")],
+                    openai_error_body("Invalid request body", "invalid_request_error", None),
+                )
+                    .into_response()
+            } else {
+                (StatusCode::BAD_REQUEST, "invalid body").into_response()
+            };
+        }
     };
 
-    let (mapped_path, mapped_query) = map_v1_path_and_query(&path, &uri);
-    let client_wants_stream =
-        mapped_path == "responses" && method == Method::POST && wants_stream(&headers, &body_bytes);
-    let upstream = build_upstream_url(&state.cfg.upstream_base, &mapped_path, mapped_query.as_deref());
+    let routed = match route_request(&raw_path, &uri, &method, &headers, body_bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            return if matches!(source_api, SourceApi::V1) {
+                (
+                    e.status,
+                    [(axum::http::header::CONTENT_TYPE.as_str(), "application/json")],
+                    openai_error_body(e.message, "invalid_request_error", None),
+                )
+                    .into_response()
+            } else {
+                (e.status, e.message).into_response()
+            };
+        }
+    };
+    let upstream = match routed.target {
+        TargetModel::Codex => target::codex::gateway::build_upstream_url(
+            &state.cfg.upstream_base,
+            &routed.upstream_path,
+            routed.upstream_query.as_deref(),
+        ),
+    };
     let session_id = Uuid::new_v4().to_string();
 
     let picked = pick_token(&state);
     if picked.is_none() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "no upstream tokens configured")
-            .into_response();
+        return if matches!(source_api, SourceApi::V1) {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::CONTENT_TYPE.as_str(), "application/json")],
+                openai_error_body("No upstream credentials configured", "server_error", None),
+            )
+                .into_response()
+        } else {
+            (StatusCode::SERVICE_UNAVAILABLE, "no upstream tokens configured").into_response()
+        };
     }
     let (token_idx, token) = picked.unwrap();
     record_request(&state, token_idx);
-    let mut body_bytes = maybe_apply_prompt_cache_key(&headers, body_bytes, &session_id);
-    if mapped_path == "responses" && method == Method::POST {
-        body_bytes = ensure_store_and_stream(&headers, body_bytes);
-    }
+    let body_bytes = match routed.target {
+        TargetModel::Codex => target::codex::gateway::build_request_body(
+            &method,
+            &routed.upstream_path,
+            &headers,
+            routed.upstream_body,
+            &session_id,
+        ),
+    };
     let mut req = state.client.request(method.clone(), upstream).body(body_bytes);
 
     // Copy headers except hop-by-hop/auth and proxy-edge client headers; set upstream auth
@@ -794,19 +579,30 @@ async fn proxy(
         req = req.header(k, v);
     }
     req = req.header("Authorization", format!("Bearer {}", token.token));
-    req = apply_default_codex_headers(
-        req,
-        &headers,
-        token.account_id.as_deref(),
-        &session_id,
-    );
+    req = match routed.target {
+        TargetModel::Codex => target::codex::gateway::apply_default_headers(
+            req,
+            &headers,
+            token.account_id.as_deref(),
+            &session_id,
+        ),
+    };
 
     let resp = match req.send().await {
         Ok(r) => r,
         Err(err) => {
             error!("upstream error: {}", err);
             record_error(&state, token_idx);
-            return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
+            return if matches!(source_api, SourceApi::V1) {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    [(axum::http::header::CONTENT_TYPE.as_str(), "application/json")],
+                    openai_error_body("Upstream error", "server_error", None),
+                )
+                    .into_response()
+            } else {
+                (StatusCode::BAD_GATEWAY, "upstream error").into_response()
+            };
         }
     };
 
@@ -826,17 +622,35 @@ async fn proxy(
             Ok(b) => b,
             Err(err) => {
                 error!("upstream error body read failed: {}", err);
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    "upstream error (failed to read body)",
-                )
-                    .into_response();
+                return if matches!(source_api, SourceApi::V1) {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        [(axum::http::header::CONTENT_TYPE.as_str(), "application/json")],
+                        openai_error_body("Upstream error", "server_error", None),
+                    )
+                        .into_response()
+                } else {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        "upstream error (failed to read body)",
+                    )
+                        .into_response()
+                };
             }
         };
-        return (status, out_headers, body_bytes).into_response();
+        return if matches!(source_api, SourceApi::V1) {
+            let mut headers = out_headers;
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            (status, headers, upstream_error_to_openai(status, &body_bytes)).into_response()
+        } else {
+            (status, out_headers, body_bytes).into_response()
+        };
     }
 
-    if mapped_path == "responses" && method == Method::POST && !client_wants_stream {
+    if matches!(routed.response_mode, ResponseMode::SseToJson) {
         let body_bytes = match resp.bytes().await {
             Ok(b) => b,
             Err(err) => {
@@ -853,6 +667,62 @@ async fn proxy(
         return (status, headers, json_body).into_response();
     }
 
+    if matches!(source_api, SourceApi::V1) && method == Method::GET {
+        if is_v1_models_list_path(&raw_path) || v1_model_retrieve_id(&raw_path).is_some() {
+            let body_bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(err) => {
+                    error!("upstream body read failed: {}", err);
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        [(axum::http::header::CONTENT_TYPE.as_str(), "application/json")],
+                        openai_error_body("Upstream error", "server_error", None),
+                    )
+                        .into_response();
+                }
+            };
+            let converted = if let Some(model_id) = v1_model_retrieve_id(&raw_path) {
+                model_retrieve_to_openai_json(&body_bytes, &model_id).map_err(|e| {
+                    if e.contains("does not exist") {
+                        (StatusCode::NOT_FOUND, e)
+                    } else {
+                        (StatusCode::BAD_GATEWAY, e)
+                    }
+                })
+            } else {
+                models_list_to_openai_json(&body_bytes).map_err(|e| (StatusCode::BAD_GATEWAY, e))
+            };
+            return match converted {
+                Ok(json_body) => {
+                    let mut headers = out_headers;
+                    headers.insert(
+                        axum::http::header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    );
+                    (status, headers, json_body).into_response()
+                }
+                Err((mapped_status, mapped_message)) => (
+                    mapped_status,
+                    [(axum::http::header::CONTENT_TYPE.as_str(), "application/json")],
+                    openai_error_body(
+                        &mapped_message,
+                        if mapped_status == StatusCode::NOT_FOUND {
+                            "invalid_request_error"
+                        } else {
+                            "server_error"
+                        },
+                        if mapped_status == StatusCode::NOT_FOUND {
+                            Some("model_not_found")
+                        } else {
+                            None
+                        },
+                    ),
+                )
+                    .into_response(),
+            };
+        }
+    }
+
     // Stream response body back
     let stats_state = state.clone();
     let stream_idx = token_idx;
@@ -864,6 +734,14 @@ async fn proxy(
         chunk.map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "stream"))
     });
     let body = Body::from_stream(stream);
+    if matches!(source_api, SourceApi::V1)
+        && !out_headers.contains_key(axum::http::header::CONTENT_TYPE)
+    {
+        out_headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream"),
+        );
+    }
     (status, out_headers, body).into_response()
 }
 
@@ -912,43 +790,6 @@ fn record_error(state: &AppState, idx: usize) {
     }
 }
 
-fn build_upstream_url(base: &str, path: &str, query: Option<&str>) -> String {
-    let mut base = base.trim_end_matches('/').to_string();
-    if !path.is_empty() {
-        base.push('/');
-        base.push_str(path.trim_start_matches('/'));
-    }
-    if let Some(q) = query {
-        base.push('?');
-        base.push_str(q);
-    }
-    base
-}
-
-fn map_v1_path_and_query(path: &str, uri: &Uri) -> (String, Option<String>) {
-    let mut new_path = path.trim_start_matches('/').to_string();
-    if let Some(stripped) = new_path.strip_prefix("v1/") {
-        new_path = stripped.to_string();
-    }
-
-    let mut query = uri.query().unwrap_or("").to_string();
-    if new_path == "models" {
-        let has_client_version = query
-            .split('&')
-            .any(|kv| kv.starts_with("client_version="));
-        if !has_client_version {
-            if query.is_empty() {
-                query = "client_version=0.0.0".to_string();
-            } else {
-                query.push('&');
-                query.push_str("client_version=0.0.0");
-            }
-        }
-    }
-
-    let query = if query.is_empty() { None } else { Some(query) };
-    (new_path, query)
-}
 
 fn is_hop_header(name: &str) -> bool {
     matches!(
@@ -983,753 +824,43 @@ fn should_drop_incoming_header(name: &str) -> bool {
     lower.starts_with("cf-")
 }
 
-fn apply_default_codex_headers(
-    mut req: reqwest::RequestBuilder,
-    incoming: &HeaderMap,
-    account_id: Option<&str>,
-    session_id: &str,
-) -> reqwest::RequestBuilder {
-    // Mirror codex-cli defaults if missing.
-    if !incoming.contains_key("content-type") {
-        req = req.header("Content-Type", "application/json");
-    }
-    if !incoming.contains_key("accept") {
-        req = req.header("Accept", "text/event-stream");
-    }
-    if !incoming.contains_key("connection") {
-        req = req.header("Connection", "Keep-Alive");
-    }
-    if !incoming.contains_key("openai-beta") {
-        req = req.header("Openai-Beta", "responses=experimental");
-    }
-    if !incoming.contains_key("version") {
-        req = req.header("Version", "0.21.0");
-    }
-    if !incoming.contains_key("session_id") {
-        req = req.header("Session_id", session_id);
-    }
-    if !incoming.contains_key("conversation_id") {
-        req = req.header("Conversation_id", session_id);
-    }
-    if !incoming.contains_key("user-agent") {
-        req = req.header(
-            "User-Agent",
-            "codex_cli_rs/0.50.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464",
-        );
-    }
-    if !incoming.contains_key("origin") {
-        req = req.header("Origin", "https://chatgpt.com");
-    }
-    if !incoming.contains_key("referer") {
-        req = req.header("Referer", "https://chatgpt.com/");
-    }
-    if !incoming.contains_key("accept-language") {
-        req = req.header("Accept-Language", "en-US,en;q=0.9");
-    }
-    if !incoming.contains_key("accept-encoding") {
-        req = req.header("Accept-Encoding", "identity");
-    }
-    if !incoming.contains_key("originator") {
-        req = req.header("Originator", "codex_cli_rs");
-    }
-    if !incoming.contains_key("chatgpt-account-id") {
-        if let Some(id) = account_id {
-            if !id.trim().is_empty() {
-                req = req.header("Chatgpt-Account-Id", id);
-            }
-        }
-    }
-    req
-}
-
-fn maybe_apply_prompt_cache_key(
-    headers: &HeaderMap,
-    body: Bytes,
-    session_id: &str,
-) -> Bytes {
-    if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok()) {
-        if !ct.to_ascii_lowercase().contains("application/json") {
-            return body;
-        }
-    } else {
-        return body;
-    }
-
-    let mut value: serde_json::Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => return body,
-    };
-    if let serde_json::Value::Object(map) = &mut value {
-        if !map.contains_key("prompt_cache_key") {
-            map.insert(
-                "prompt_cache_key".to_string(),
-                serde_json::Value::String(session_id.to_string()),
-            );
-        }
-        if !map.contains_key("stream") {
-            map.insert("stream".to_string(), serde_json::Value::Bool(true));
-        }
-        if let Ok(out) = serde_json::to_vec(&value) {
-            return Bytes::from(out);
-        }
-    }
-    body
-}
-
-fn ensure_store_and_stream(headers: &HeaderMap, body: Bytes) -> Bytes {
-    if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok()) {
-        if !ct.to_ascii_lowercase().contains("application/json") {
-            return body;
-        }
-    } else {
-        return body;
-    }
-
-    let mut value: serde_json::Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => return body,
-    };
-    if let serde_json::Value::Object(map) = &mut value {
-        map.insert("store".to_string(), serde_json::Value::Bool(false));
-        map.insert("stream".to_string(), serde_json::Value::Bool(true));
-        if let Ok(out) = serde_json::to_vec(&value) {
-            return Bytes::from(out);
-        }
-    }
-    body
-}
-
-fn wants_stream(headers: &HeaderMap, body: &Bytes) -> bool {
-    if let Some(accept) = headers.get("accept").and_then(|v| v.to_str().ok()) {
-        if accept.to_ascii_lowercase().contains("text/event-stream") {
-            return true;
-        }
-    }
-    if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok()) {
-        if !ct.to_ascii_lowercase().contains("application/json") {
-            return false;
-        }
-    } else {
-        return false;
-    }
-    let value: serde_json::Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    match value.get("stream") {
-        Some(serde_json::Value::Bool(b)) => *b,
-        _ => false,
-    }
-}
-
-fn sse_to_response_json(body: &Bytes) -> Bytes {
-    let text = String::from_utf8_lossy(body);
-    let mut response_obj: Option<serde_json::Value> = None;
-    let mut output_text = String::new();
-
-    for line in text.lines() {
-        let data = match line.strip_prefix("data: ") {
-            Some(d) => d.trim(),
-            None => continue,
-        };
-        if data == "[DONE]" {
-            break;
-        }
-        let v: serde_json::Value = match serde_json::from_str(data) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if let Some(t) = v.get("type").and_then(|v| v.as_str()) {
-            if t == "response.output_text.delta" {
-                if let Some(delta) = v.get("delta").and_then(|v| v.as_str()) {
-                    output_text.push_str(delta);
-                }
-            } else if t == "response.completed" {
-                if let Some(r) = v.get("response") {
-                    response_obj = Some(r.clone());
-                }
-            } else if t == "response.created" && response_obj.is_none() {
-                if let Some(r) = v.get("response") {
-                    response_obj = Some(r.clone());
-                }
-            }
-        }
-    }
-
-    let mut resp = response_obj.unwrap_or_else(|| {
-        serde_json::json!({
-            "object": "response",
-            "output": []
-        })
-    });
-    if let serde_json::Value::Object(map) = &mut resp {
-        map.insert(
-            "output_text".to_string(),
-            serde_json::Value::String(output_text.clone()),
-        );
-        let output_is_empty = map
-            .get("output")
-            .and_then(|v| v.as_array())
-            .map(|a| a.is_empty())
-            .unwrap_or(true);
-        if output_is_empty {
-            map.insert(
-                "output".to_string(),
-                serde_json::json!([{
-                    "type": "message",
-                    "id": "msg_compat",
-                    "role": "assistant",
-                    "content": [{"type":"output_text","text": output_text}]
-                }]),
-            );
-        }
-    }
-    Bytes::from(serde_json::to_vec(&resp).unwrap_or_default())
-}
-
 fn load_config() -> Config {
     // expects config.json in working dir
     let data = std::fs::read_to_string("config.json").expect("config.json missing");
     serde_json::from_str(&data).expect("invalid config.json")
 }
 
-fn persist_disabled_list(cfg: &Config, disabled: &Arc<Mutex<HashSet<String>>>) -> Result<(), String> {
-    let mut v: serde_json::Value = {
-        let data = std::fs::read_to_string("config.json").map_err(|e| e.to_string())?;
-        serde_json::from_str(&data).map_err(|e| e.to_string())?
-    };
-    let list: Vec<String> = disabled.lock().unwrap().iter().cloned().collect();
-    if let serde_json::Value::Object(map) = &mut v {
-        if list.is_empty() {
-            map.remove("disabled_files");
-        } else {
-            map.insert("disabled_files".to_string(), serde_json::json!(list));
-        }
+fn detect_source_api(raw_path: &str) -> SourceApi {
+    let trimmed = raw_path.trim_start_matches('/');
+    if trimmed == "codex" || trimmed.starts_with("codex/") {
+        SourceApi::Codex
+    } else if trimmed == "claude" || trimmed.starts_with("claude/") {
+        SourceApi::Claude
+    } else {
+        SourceApi::V1
     }
-    std::fs::write("config.json", serde_json::to_vec_pretty(&v).unwrap())
-        .map_err(|e| e.to_string())?;
-    Ok(())
 }
 
-fn load_tokens(cfg: &Config, disabled: &HashSet<String>) -> Vec<UpstreamToken> {
-    let mut tokens: Vec<UpstreamToken> = cfg
-        .tokens
-        .iter()
-        .enumerate()
-        .map(|(i, t)| (i, t.trim().to_string()))
-        .filter(|(_, t)| !t.is_empty())
-        .map(|(i, t)| UpstreamToken {
-            token: t,
-            account_id: None,
-            label: format!("manual-{}", i + 1),
-            file_name: None,
-            enabled: true,
-            expired_at: None,
-        })
-        .collect();
-
-    if let Some(dir) = cfg.auth_dir.as_ref() {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            let mut files: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-            files.sort_by_key(|e| e.path());
-            for entry in files {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                    continue;
-                }
-                let data = match std::fs::read_to_string(&path) {
-                    Ok(d) => d,
-                    Err(_) => continue,
-                };
-                let value: serde_json::Value = match serde_json::from_str(&data) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                if let Some(t) = value.get("type").and_then(|v| v.as_str()) {
-                    if !t.eq_ignore_ascii_case("codex") {
-                        continue;
-                    }
-                }
-                let account_id = value
-                    .get("account_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let label = value
-                    .get("email")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| value.get("label").and_then(|v| v.as_str()))
-                    .or_else(|| value.get("account_id").and_then(|v| v.as_str()))
-                    .or_else(|| path.file_name().and_then(|s| s.to_str()))
-                    .unwrap_or("codex-account")
-                    .to_string();
-                // Prefer subscription end date from ID token.
-                // Fallback to access token expiration only when subscription data is unavailable.
-                let expired_at = value
-                    .get("id_token")
-                    .and_then(|v| v.as_str())
-                    .and_then(parse_jwt_subscription_until)
-                    .or_else(|| {
-                        value
-                            .get("expired")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                    });
-                if let Some(tok) = value
-                    .get("access_token")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| value.get("api_key").and_then(|v| v.as_str()))
-                {
-                    let tok = tok.trim();
-                    if !tok.is_empty() {
-                        let file_name = path.file_name().and_then(|s| s.to_str()).map(|s| s.to_string());
-                        let enabled = file_name
-                            .as_ref()
-                            .map(|f| !disabled.contains(f))
-                            .unwrap_or(true);
-                        tokens.push(UpstreamToken {
-                            token: tok.to_string(),
-                            account_id,
-                            label,
-                            file_name,
-                            enabled,
-                            expired_at,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    // de-dup while preserving order
-    let mut seen = HashSet::new();
-    tokens.retain(|t| seen.insert(t.token.clone()));
-    tokens
+fn is_v1_models_list_path(raw_path: &str) -> bool {
+    normalize_v1_path(raw_path) == "models"
 }
 
-fn build_codex_auth_url() -> Result<(String, String, String), String> {
-    let code_verifier: String = rand::rng()
-        .sample_iter(&Alphanumeric)
-        .take(64)
-        .map(char::from)
-        .collect();
-    let mut hasher = Sha256::new();
-    hasher.update(code_verifier.as_bytes());
-    let digest = hasher.finalize();
-    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
-    let state_token: String = rand::rng()
-        .sample_iter(&Alphanumeric)
-        .take(32)
-        .map(char::from)
-        .collect();
-
-    let mut url = Url::parse("https://auth.openai.com/oauth/authorize")
-        .map_err(|e| e.to_string())?;
-    url.query_pairs_mut()
-        .append_pair("client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
-        .append_pair("response_type", "code")
-        .append_pair("redirect_uri", "http://localhost:1455/auth/callback")
-        .append_pair("scope", "openid email profile offline_access")
-        .append_pair("state", &state_token)
-        .append_pair("code_challenge", &code_challenge)
-        .append_pair("code_challenge_method", "S256")
-        .append_pair("prompt", "login")
-        .append_pair("id_token_add_organizations", "true")
-        .append_pair("codex_cli_simplified_flow", "true");
-
-    Ok((url.to_string(), state_token, code_verifier))
-}
-
-fn parse_oauth_callback(redirect_url: &str) -> Result<(String, String), String> {
-    let url = Url::parse(redirect_url).map_err(|_| "invalid redirect_url".to_string())?;
-    let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
-    let code = params.get("code").cloned().unwrap_or_default();
-    let state = params.get("state").cloned().unwrap_or_default();
-    if code.is_empty() || state.is_empty() {
-        return Err("missing code or state in redirect_url".to_string());
-    }
-    Ok((code, state))
-}
-
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: String,
-    id_token: String,
-    expires_in: i64,
-    token_type: Option<String>,
-}
-
-async fn exchange_code_for_tokens(
-    client: &reqwest::Client,
-    code: &str,
-    code_verifier: &str,
-) -> Result<TokenResponse, String> {
-    let params = [
-        ("grant_type", "authorization_code"),
-        ("client_id", "app_EMoamEEZ73f0CkXaXp7hrann"),
-        ("code", code),
-        ("redirect_uri", "http://localhost:1455/auth/callback"),
-        ("code_verifier", code_verifier),
-    ];
-    let resp = client
-        .post("https://auth.openai.com/oauth/token")
-        .form(&params)
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("token exchange failed: {}", body));
-    }
-    resp.json::<TokenResponse>().await.map_err(|e| e.to_string())
-}
-
-fn save_codex_auth(state: &AppState, token_resp: &TokenResponse) -> Result<String, String> {
-    let id_token = &token_resp.id_token;
-    let account_id = parse_jwt_account_id(id_token).unwrap_or_default();
-    let email = parse_jwt_email(id_token).unwrap_or_else(|| "unknown".to_string());
-    let now = Utc::now();
-    let expires_at = now + chrono::Duration::seconds(token_resp.expires_in);
-
-    let file_name = format!("codex-{}.json", sanitize_label(&email));
-    let auth_dir = state
-        .cfg
-        .auth_dir
-        .clone()
-        .unwrap_or_else(|| "/root/dev/yow/gpt-gateway/auths".to_string());
-    let path = std::path::Path::new(&auth_dir).join(file_name);
-    std::fs::create_dir_all(&auth_dir).map_err(|e| e.to_string())?;
-    let out = serde_json::json!({
-        "id_token": token_resp.id_token,
-        "access_token": token_resp.access_token,
-        "refresh_token": token_resp.refresh_token,
-        "account_id": account_id,
-        "last_refresh": now.to_rfc3339(),
-        "email": email,
-        "type": "codex",
-        "expired": expires_at.to_rfc3339()
-    });
-    std::fs::write(&path, serde_json::to_vec_pretty(&out).unwrap())
-        .map_err(|e| e.to_string())?;
-
-    // reload tokens + stats
-    let disabled = state.disabled.lock().unwrap().clone();
-    let tokens = load_tokens(&state.cfg, &disabled);
-    {
-        let mut tlock = state.tokens.lock().unwrap();
-        *tlock = tokens.clone();
-    }
-    {
-        let mut stats = state.stats.lock().unwrap();
-        stats.per_account = tokens
-            .iter()
-            .map(|t| AccountUsage {
-                label: t.label.clone(),
-                account_id: t.account_id.clone().unwrap_or_default(),
-                requests: 0,
-                errors: 0,
-            })
-            .collect();
-        stats.total_requests = 0;
-        stats.total_errors = 0;
-    }
-    {
-        let mut cache = state.quota_cache.lock().unwrap();
-        *cache = vec![None; tokens.len()];
-    }
-    Ok(path.to_string_lossy().to_string())
-}
-
-fn sanitize_label(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '_' })
-        .collect()
-}
-
-fn parse_jwt_email(id_token: &str) -> Option<String> {
-    let parts: Vec<&str> = id_token.split('.').collect();
-    if parts.len() != 3 {
+fn v1_model_retrieve_id(raw_path: &str) -> Option<String> {
+    let norm = normalize_v1_path(raw_path);
+    let id = norm.strip_prefix("models/")?;
+    if id.is_empty() || id.contains('/') {
         return None;
     }
-    let payload = parts[1];
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
-    v.get("email")
-        .and_then(|e| e.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            v.get("https://api.openai.com/profile")
-                .and_then(|p| p.get("email"))
-                .and_then(|e| e.as_str())
-                .map(|s| s.to_string())
-        })
+    Some(id.to_string())
 }
 
-fn parse_jwt_account_id(id_token: &str) -> Option<String> {
-    let parts: Vec<&str> = id_token.split('.').collect();
-    if parts.len() != 3 {
-        return None;
+fn normalize_v1_path(raw_path: &str) -> String {
+    let trimmed = raw_path.trim_start_matches('/');
+    if trimmed == "v1" {
+        String::new()
+    } else if let Some(rest) = trimmed.strip_prefix("v1/") {
+        rest.to_string()
+    } else {
+        trimmed.to_string()
     }
-    let payload = parts[1];
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
-    v.get("https://api.openai.com/auth")
-        .and_then(|a| a.get("chatgpt_account_id"))
-        .and_then(|e| e.as_str())
-        .map(|s| s.to_string())
-}
-
-fn parse_jwt_subscription_until(id_token: &str) -> Option<String> {
-    let parts: Vec<&str> = id_token.split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let payload = parts[1];
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
-    let raw = v
-        .get("https://api.openai.com/auth")
-        .and_then(|a| a.get("chatgpt_subscription_active_until"))?;
-    if let Some(s) = raw.as_str() {
-        return Some(s.to_string());
-    }
-    if let Some(ts) = raw.as_f64() {
-        if ts > 0.0 {
-            let dt = if ts > 1e12 {
-                DateTime::<Utc>::from(std::time::UNIX_EPOCH + Duration::from_millis(ts as u64))
-            } else {
-                DateTime::<Utc>::from(std::time::UNIX_EPOCH + Duration::from_secs(ts as u64))
-            };
-            return Some(dt.to_rfc3339());
-        }
-    }
-    None
-}
-
-async fn get_quota_summaries(state: &AppState) -> Vec<serde_json::Value> {
-    let tokens = state.tokens.lock().unwrap().clone();
-    {
-        let mut cache = state.quota_cache.lock().unwrap();
-        if cache.len() != tokens.len() {
-            *cache = vec![None; tokens.len()];
-        }
-    }
-    let now = std::time::Instant::now();
-    let mut results = Vec::with_capacity(tokens.len());
-    for (idx, token) in tokens.iter().enumerate() {
-        let cached = {
-            let cache = state.quota_cache.lock().unwrap();
-            cache.get(idx).cloned().flatten()
-        };
-        let entry = if let Some(c) = cached {
-            if now.duration_since(c.fetched_at).as_secs() < 60 {
-                c
-            } else {
-                let fetched = fetch_codex_quota(state, token).await;
-                let mut cache = state.quota_cache.lock().unwrap();
-                if cache.len() <= idx {
-                    cache.resize(idx + 1, None);
-                }
-                cache[idx] = Some(fetched.clone());
-                fetched
-            }
-        } else {
-            let fetched = fetch_codex_quota(state, token).await;
-            let mut cache = state.quota_cache.lock().unwrap();
-            if cache.len() <= idx {
-                cache.resize(idx + 1, None);
-            }
-            cache[idx] = Some(fetched.clone());
-            fetched
-        };
-        if let Some(err) = entry.error {
-            results.push(serde_json::json!({
-                "label": token.label,
-                "account_id": token.account_id.clone().unwrap_or_default(),
-                "file_name": token.file_name.clone().unwrap_or_default(),
-                "error": err
-            }));
-        } else {
-            results.push(serde_json::json!({
-                "label": entry.summary.label,
-                "account_id": entry.summary.account_id,
-                "file_name": token.file_name.clone().unwrap_or_default(),
-                "plan_type": entry.summary.plan_type,
-                "code_generation": entry.summary.code_generation,
-                "code_review": entry.summary.code_review
-            }));
-        }
-    }
-    results
-}
-
-async fn fetch_codex_quota(state: &AppState, token: &UpstreamToken) -> QuotaCacheEntry {
-    let mut req = state
-        .client
-        .get("https://chatgpt.com/backend-api/wham/usage")
-        .header("Authorization", format!("Bearer {}", token.token))
-        .header("Content-Type", "application/json")
-        .header("User-Agent", "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal");
-    if let Some(account_id) = token.account_id.as_ref() {
-        if !account_id.trim().is_empty() {
-            req = req.header("Chatgpt-Account-Id", account_id);
-        }
-    }
-
-    let resp = match req.timeout(Duration::from_secs(30)).send().await {
-        Ok(r) => r,
-        Err(err) => {
-            return QuotaCacheEntry {
-                fetched_at: std::time::Instant::now(),
-                summary: QuotaSummary::default(),
-                error: Some(err.to_string()),
-            }
-        }
-    };
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return QuotaCacheEntry {
-            fetched_at: std::time::Instant::now(),
-            summary: QuotaSummary::default(),
-            error: Some(format!("status {}: {}", status.as_u16(), body)),
-        };
-    }
-    let body = resp.text().await.unwrap_or_default();
-    let v: serde_json::Value = match serde_json::from_str(&body) {
-        Ok(v) => v,
-        Err(_) => {
-            return QuotaCacheEntry {
-                fetched_at: std::time::Instant::now(),
-                summary: QuotaSummary::default(),
-                error: Some("failed to parse quota response".to_string()),
-            }
-        }
-    };
-
-    let plan_type = v
-        .get("plan_type")
-        .or_else(|| v.get("planType"))
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
-    let rate_limit = v.get("rate_limit").or_else(|| v.get("rateLimit"));
-    let code_review = v
-        .get("code_review_rate_limit")
-        .or_else(|| v.get("codeReviewRateLimit"));
-
-    let summary = QuotaSummary {
-        label: token.label.clone(),
-        account_id: token.account_id.clone().unwrap_or_default(),
-        plan_type,
-        code_generation: extract_quota_rate(rate_limit),
-        code_review: extract_quota_rate(code_review),
-    };
-    QuotaCacheEntry {
-        fetched_at: std::time::Instant::now(),
-        summary,
-        error: None,
-    }
-}
-
-fn extract_quota_rate(rate: Option<&serde_json::Value>) -> QuotaRateSummary {
-    if rate.is_none() {
-        return QuotaRateSummary::default();
-    }
-    let rate = rate.unwrap();
-    let primary = rate.get("primary_window").or_else(|| rate.get("primaryWindow"));
-    let secondary = rate
-        .get("secondary_window")
-        .or_else(|| rate.get("secondaryWindow"));
-    let mut five_hour = None;
-    let mut weekly = None;
-    for w in [primary, secondary] {
-        if let Some(win) = w {
-            let secs = get_window_seconds(win);
-            if secs == 18000 && five_hour.is_none() {
-                five_hour = Some(build_window_summary(win));
-            } else if secs == 604800 && weekly.is_none() {
-                weekly = Some(build_window_summary(win));
-            } else if five_hour.is_none() {
-                five_hour = Some(build_window_summary(win));
-            } else if weekly.is_none() {
-                weekly = Some(build_window_summary(win));
-            }
-        }
-    }
-    QuotaRateSummary { five_hour, weekly }
-}
-
-fn get_window_seconds(win: &serde_json::Value) -> i64 {
-    let raw = win
-        .get("limit_window_seconds")
-        .or_else(|| win.get("limitWindowSeconds"));
-    raw.and_then(|v| v.as_f64())
-        .map(|v| v as i64)
-        .unwrap_or(0)
-}
-
-fn build_window_summary(win: &serde_json::Value) -> QuotaWindowSummary {
-    let used = win.get("used_percent").or_else(|| win.get("usedPercent"));
-    let used_percent = used.and_then(|v| v.as_f64());
-    let reset_label = get_reset_label(win);
-    QuotaWindowSummary {
-        used_percent,
-        reset_label,
-    }
-}
-
-fn get_reset_label(win: &serde_json::Value) -> String {
-    if let Some(v) = win.get("reset_at").or_else(|| win.get("resetAt")) {
-        if let Some(ts) = v.as_f64() {
-            let ms = if ts > 1e12 { ts } else { ts * 1000.0 };
-            let dt = DateTime::<Utc>::from(std::time::UNIX_EPOCH + Duration::from_millis(ms as u64));
-            return format_reset_time(dt);
-        }
-    }
-    if let Some(v) = win
-        .get("reset_after_seconds")
-        .or_else(|| win.get("resetAfterSeconds"))
-    {
-        if let Some(secs) = v.as_f64() {
-            let mins = (secs / 60.0).floor() as i64;
-            if mins < 60 {
-                return format!("in {}m", mins);
-            }
-            let hours = mins / 60;
-            let rem = mins % 60;
-            if hours < 24 {
-                return format!("in {}h {}m", hours, rem);
-            }
-            let days = hours / 24;
-            return format!("in {}d {}h", days, hours % 24);
-        }
-    }
-    String::new()
-}
-
-fn format_reset_time(dt: DateTime<Utc>) -> String {
-    let now = Utc::now();
-    let diff = dt - now;
-    let mins = diff.num_minutes();
-    if mins <= 0 {
-        return "now".to_string();
-    }
-    if mins < 60 {
-        return format!("in {}m", mins);
-    }
-    let hours = mins / 60;
-    let rem = mins % 60;
-    if hours < 24 {
-        return format!("in {}h {}m", hours, rem);
-    }
-    let days = hours / 24;
-    format!("in {}d {}h", days, hours % 24)
 }
