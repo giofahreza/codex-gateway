@@ -1,7 +1,7 @@
 use axum::http::HeaderValue;
 use axum::{
     body::Body,
-    extract::{OriginalUri, State},
+    extract::{Form, OriginalUri, State},
     http::{HeaderMap, Method, StatusCode},
     response::IntoResponse,
     routing::any,
@@ -127,23 +127,18 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", any(health))
-        .route("/", any(dashboard))
+        .route("/", any(dashboard_root))
         .route("/dashboard", any(dashboard))
         .route("/dashboard.json", any(dashboard_json))
-        .route("/quota.json", any(target::codex::admin::quota_json))
-        .route(
-            "/credentials/delete",
-            any(target::codex::admin::delete_credential),
-        )
-        .route(
-            "/credentials/toggle",
-            any(target::codex::admin::toggle_credential),
-        )
-        .route("/login/codex/start", any(target::codex::admin::login_start))
-        .route(
-            "/login/codex/submit",
-            any(target::codex::admin::login_submit),
-        )
+        .route("/quota.json", any(quota_json_route))
+        .route("/credentials/delete", any(delete_credential_route))
+        .route("/credentials/toggle", any(toggle_credential_route))
+        .route("/login/codex/start", any(login_start_route))
+        .route("/login/codex/submit", any(login_submit_route))
+        .route("/docs", any(source::openapi::swagger_ui_redirect))
+        .route("/docs/", any(source::openapi::swagger_ui_root))
+        .route("/docs/*rest", any(source::openapi::swagger_ui_asset))
+        .route("/api-docs/openapi.json", any(source::openapi::openapi_json))
         .route("/*path", any(proxy))
         .with_state(state.clone());
 
@@ -154,11 +149,33 @@ async fn main() {
         .unwrap();
 }
 
+/// Returns `ok` when the gateway process is running.
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses((status = 200, description = "Gateway health check", body = String))
+)]
 async fn health() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-async fn dashboard(State(_state): State<AppState>) -> impl IntoResponse {
+/// Serves the HTML dashboard at the root path.
+#[utoipa::path(
+    get,
+    path = "/",
+    responses((status = 200, description = "Dashboard HTML", body = String))
+)]
+async fn dashboard_root() -> impl IntoResponse {
+    dashboard().await
+}
+
+/// Serves the HTML dashboard page.
+#[utoipa::path(
+    get,
+    path = "/dashboard",
+    responses((status = 200, description = "Dashboard HTML", body = String))
+)]
+async fn dashboard() -> impl IntoResponse {
     let html = r#"<!doctype html>
 <html>
   <head>
@@ -437,6 +454,16 @@ async fn dashboard(State(_state): State<AppState>) -> impl IntoResponse {
         .into_response()
 }
 
+/// Returns the dashboard counters and per-account request totals.
+#[utoipa::path(
+    get,
+    path = "/dashboard.json",
+    responses((
+        status = 200,
+        description = "Dashboard JSON snapshot",
+        body = crate::source::openapi::DashboardJsonResponse
+    ))
+)]
 async fn dashboard_json(State(state): State<AppState>) -> impl IntoResponse {
     let snapshot = {
         let stats = state.stats.lock().unwrap();
@@ -475,6 +502,118 @@ async fn dashboard_json(State(state): State<AppState>) -> impl IntoResponse {
         "total_errors": snapshot.total_errors,
         "accounts": accounts
     }))
+}
+
+/// Returns cached quota usage for each configured Codex credential.
+#[utoipa::path(
+    get,
+    path = "/quota.json",
+    responses((
+        status = 200,
+        description = "Quota summary",
+        body = crate::source::openapi::QuotaResponse
+    ))
+)]
+async fn quota_json_route(State(state): State<AppState>) -> impl IntoResponse {
+    target::codex::admin::quota_json(State(state)).await
+}
+
+/// Starts the Codex OAuth login flow and returns the upstream authorization URL.
+#[utoipa::path(
+    get,
+    path = "/login/codex/start",
+    responses((
+        status = 200,
+        description = "OAuth login URL and state token",
+        body = crate::source::openapi::LoginStartResponse
+    ))
+)]
+async fn login_start_route(State(state): State<AppState>) -> impl IntoResponse {
+    target::codex::admin::login_start(State(state)).await
+}
+
+/// Accepts the OAuth callback URL and stores the resulting Codex credentials.
+#[utoipa::path(
+    post,
+    path = "/login/codex/submit",
+    request_body(
+        content = crate::source::openapi::LoginSubmitRequest,
+        content_type = "application/x-www-form-urlencoded",
+        description = "OAuth callback URL copied from the browser redirect"
+    ),
+    responses((
+        status = 200,
+        description = "Credential save result",
+        body = crate::source::openapi::ActionResponse
+    ))
+)]
+async fn login_submit_route(
+    State(state): State<AppState>,
+    Form(form): Form<target::codex::admin::CallbackForm>,
+) -> impl IntoResponse {
+    target::codex::admin::login_submit(State(state), Form(form)).await
+}
+
+/// Deletes a saved credential file and reloads the in-memory token list.
+#[utoipa::path(
+    post,
+    path = "/credentials/delete",
+    request_body(
+        content = crate::source::openapi::DeleteCredentialRequest,
+        content_type = "application/x-www-form-urlencoded",
+        description = "Credential filename from the auth directory"
+    ),
+    security(("bearer_auth" = [])),
+    responses(
+        (
+            status = 200,
+            description = "Delete result",
+            body = crate::source::openapi::ActionResponse
+        ),
+        (
+            status = 401,
+            description = "Missing or invalid proxy API key",
+            body = crate::source::openapi::ActionResponse
+        )
+    )
+)]
+async fn delete_credential_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<target::codex::admin::DeleteForm>,
+) -> impl IntoResponse {
+    target::codex::admin::delete_credential(State(state), headers, Form(form)).await
+}
+
+/// Enables or disables a saved credential file and persists the disabled list.
+#[utoipa::path(
+    post,
+    path = "/credentials/toggle",
+    request_body(
+        content = crate::source::openapi::ToggleCredentialRequest,
+        content_type = "application/x-www-form-urlencoded",
+        description = "Credential filename and target enabled state"
+    ),
+    security(("bearer_auth" = [])),
+    responses(
+        (
+            status = 200,
+            description = "Toggle result",
+            body = crate::source::openapi::ActionResponse
+        ),
+        (
+            status = 401,
+            description = "Missing or invalid proxy API key",
+            body = crate::source::openapi::ActionResponse
+        )
+    )
+)]
+async fn toggle_credential_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<target::codex::admin::ToggleForm>,
+) -> impl IntoResponse {
+    target::codex::admin::toggle_credential(State(state), headers, Form(form)).await
 }
 
 async fn proxy(
