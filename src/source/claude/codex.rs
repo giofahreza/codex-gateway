@@ -1,8 +1,8 @@
 use axum::http::{HeaderMap, Method, Uri};
 use bytes::Bytes;
 
-use crate::source::{RoutedRequest, TargetModel};
 use crate::source::claude::response::resolve_mode;
+use crate::source::{RoutedRequest, TargetModel};
 
 pub fn convert(
     upstream_path: String,
@@ -48,7 +48,10 @@ fn convert_claude_bridge_body(headers: &HeaderMap, body: Bytes) -> Bytes {
         // Minimal bridge compatibility for Claude-style payloads.
         if let Some(serde_json::Value::String(system)) = map.get("system").cloned() {
             if !map.contains_key("instructions") {
-                map.insert("instructions".to_string(), serde_json::Value::String(system));
+                map.insert(
+                    "instructions".to_string(),
+                    serde_json::Value::String(system),
+                );
             }
         }
         if !map.contains_key("instructions") {
@@ -75,7 +78,11 @@ fn convert_claude_bridge_body(headers: &HeaderMap, body: Bytes) -> Bytes {
                                     joined.push_str(t);
                                 }
                             }
-                            if joined.is_empty() { None } else { Some(joined) }
+                            if joined.is_empty() {
+                                None
+                            } else {
+                                Some(joined)
+                            }
                         }
                         _ => None,
                     };

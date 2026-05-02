@@ -1,6 +1,10 @@
 use axum::http::{HeaderMap, Method};
 use bytes::Bytes;
 
+const DEFAULT_CODEX_CLIENT_VERSION: &str = "1.0.0";
+const DEFAULT_CODEX_USER_AGENT: &str =
+    "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal";
+
 pub fn build_upstream_url(base: &str, path: &str, query: Option<&str>) -> String {
     let mut base = base.trim_end_matches('/').to_string();
     if !path.is_empty() {
@@ -46,9 +50,9 @@ pub fn apply_default_headers(
     if !incoming.contains_key("openai-beta") {
         req = req.header("Openai-Beta", "responses=experimental");
     }
-    if !incoming.contains_key("version") {
-        req = req.header("Version", "0.21.0");
-    }
+    // Force upstream Codex API version to a modern baseline even when client
+    // sends an older `Version` header.
+    req = req.header("Version", DEFAULT_CODEX_CLIENT_VERSION);
     if !incoming.contains_key("session_id") {
         req = req.header("Session_id", session_id);
     }
@@ -56,10 +60,7 @@ pub fn apply_default_headers(
         req = req.header("Conversation_id", session_id);
     }
     if !incoming.contains_key("user-agent") {
-        req = req.header(
-            "User-Agent",
-            "codex_cli_rs/0.50.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464",
-        );
+        req = req.header("User-Agent", DEFAULT_CODEX_USER_AGENT);
     }
     if !incoming.contains_key("origin") {
         req = req.header("Origin", "https://chatgpt.com");

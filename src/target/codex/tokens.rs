@@ -81,8 +81,10 @@ pub fn load_tokens(cfg: &crate::Config, disabled: &HashSet<String>) -> Vec<Upstr
                 {
                     let tok = tok.trim();
                     if !tok.is_empty() {
-                        let file_name =
-                            path.file_name().and_then(|s| s.to_str()).map(|s| s.to_string());
+                        let file_name = path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_string());
                         let enabled = file_name
                             .as_ref()
                             .map(|f| !disabled.contains(f))

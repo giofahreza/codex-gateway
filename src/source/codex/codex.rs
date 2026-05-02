@@ -1,8 +1,8 @@
 use axum::http::{HeaderMap, Method, Uri};
 use bytes::Bytes;
 
-use crate::source::{RoutedRequest, TargetModel};
 use crate::source::codex::response::resolve_mode;
+use crate::source::{RoutedRequest, TargetModel};
 
 pub fn convert(
     upstream_path: String,

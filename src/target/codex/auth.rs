@@ -89,7 +89,9 @@ pub async fn exchange_code_for_tokens(
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("token exchange failed: {}", body));
     }
-    resp.json::<TokenResponse>().await.map_err(|e| e.to_string())
+    resp.json::<TokenResponse>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 pub fn save_auth(state: &crate::AppState, token_resp: &TokenResponse) -> Result<String, String> {

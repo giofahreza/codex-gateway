@@ -1,8 +1,10 @@
 use axum::http::{HeaderMap, Method, Uri};
 use bytes::Bytes;
 
-use crate::source::{RoutedRequest, TargetModel};
 use crate::source::v1::response::resolve_mode;
+use crate::source::{RoutedRequest, TargetModel};
+
+const DEFAULT_CLIENT_VERSION_QUERY: &str = "1.0.0";
 
 pub fn convert(
     upstream_path: String,
@@ -13,18 +15,7 @@ pub fn convert(
 ) -> RoutedRequest {
     let mut query = uri.query().unwrap_or("").to_string();
     if upstream_path == "models" {
-        // Codex upstream currently requires this query parameter.
-        let has_client_version = query
-            .split('&')
-            .any(|kv| kv.starts_with("client_version="));
-        if !has_client_version {
-            if query.is_empty() {
-                query = "client_version=0.0.0".to_string();
-            } else {
-                query.push('&');
-                query.push_str("client_version=0.0.0");
-            }
-        }
+        query = normalize_models_query(&query);
     }
 
     let is_responses_post = upstream_path == "responses" && *method == Method::POST;
@@ -43,6 +34,31 @@ pub fn convert(
         upstream_body,
         response_mode,
     }
+}
+
+fn normalize_models_query(query: &str) -> String {
+    let mut parts = Vec::new();
+    let mut has_client_version = false;
+
+    for part in query.split('&') {
+        if part.is_empty() {
+            continue;
+        }
+        if part.starts_with("client_version=") {
+            if !has_client_version {
+                parts.push(format!("client_version={DEFAULT_CLIENT_VERSION_QUERY}"));
+                has_client_version = true;
+            }
+            continue;
+        }
+        parts.push(part.to_string());
+    }
+
+    if !has_client_version {
+        parts.push(format!("client_version={DEFAULT_CLIENT_VERSION_QUERY}"));
+    }
+
+    parts.join("&")
 }
 
 fn convert_openai_compat_body_to_codex(headers: &HeaderMap, body: Bytes) -> Bytes {
