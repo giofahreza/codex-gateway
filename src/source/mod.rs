@@ -3,6 +3,7 @@ use bytes::Bytes;
 
 pub mod claude;
 pub mod codex;
+pub mod openapi;
 pub mod v1;
 
 #[derive(Debug, Clone, Copy)]
