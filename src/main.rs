@@ -1,3 +1,4 @@
+use axum::http::HeaderValue;
 use axum::{
     body::Body,
     extract::{OriginalUri, State},
@@ -6,7 +7,6 @@ use axum::{
     routing::any,
     Router,
 };
-use axum::http::HeaderValue;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -19,11 +19,11 @@ use tracing::{error, info};
 use uuid::Uuid;
 mod source;
 mod target;
-use source::{route_request, ResponseMode, TargetModel};
 use source::v1::response::{
     model_retrieve_to_openai_json, models_list_to_openai_json, openai_error_body,
     sse_to_response_json, upstream_error_to_openai,
 };
+use source::{route_request, ResponseMode, TargetModel};
 use target::codex::auth::PendingOAuth;
 use target::codex::quota::QuotaCacheEntry;
 use target::codex::tokens::UpstreamToken;
@@ -63,7 +63,6 @@ struct Config {
     disabled_files: Option<Vec<String>>,
 }
 
-
 #[derive(Default, Clone, Serialize)]
 struct UsageStats {
     per_account: Vec<AccountUsage>,
@@ -78,7 +77,6 @@ struct AccountUsage {
     requests: u64,
     errors: u64,
 }
-
 
 #[tokio::main]
 async fn main() {
@@ -104,9 +102,7 @@ async fn main() {
         total_errors: 0,
     };
     let quota_cache = vec![None; tokens.len()];
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     let client = reqwest::Client::builder()
         .http1_only()
@@ -135,18 +131,23 @@ async fn main() {
         .route("/dashboard", any(dashboard))
         .route("/dashboard.json", any(dashboard_json))
         .route("/quota.json", any(target::codex::admin::quota_json))
-        .route("/credentials/delete", any(target::codex::admin::delete_credential))
-        .route("/credentials/toggle", any(target::codex::admin::toggle_credential))
+        .route(
+            "/credentials/delete",
+            any(target::codex::admin::delete_credential),
+        )
+        .route(
+            "/credentials/toggle",
+            any(target::codex::admin::toggle_credential),
+        )
         .route("/login/codex/start", any(target::codex::admin::login_start))
-        .route("/login/codex/submit", any(target::codex::admin::login_submit))
+        .route(
+            "/login/codex/submit",
+            any(target::codex::admin::login_submit),
+        )
         .route("/*path", any(proxy))
         .with_state(state.clone());
 
-    let addr: SocketAddr = state
-        .cfg
-        .listen
-        .parse()
-        .expect("invalid listen address");
+    let addr: SocketAddr = state.cfg.listen.parse().expect("invalid listen address");
     info!("listening on {}", addr);
     axum::serve(tokio::net::TcpListener::bind(addr).await.unwrap(), app)
         .await
@@ -491,7 +492,10 @@ async fn proxy(
         return if matches!(source_api, SourceApi::V1) {
             (
                 StatusCode::UNAUTHORIZED,
-                [(axum::http::header::CONTENT_TYPE.as_str(), "application/json")],
+                [(
+                    axum::http::header::CONTENT_TYPE.as_str(),
+                    "application/json",
+                )],
                 openai_error_body(
                     "Missing bearer authentication in header",
                     "invalid_request_error",
@@ -511,7 +515,10 @@ async fn proxy(
             return if matches!(source_api, SourceApi::V1) {
                 (
                     StatusCode::BAD_REQUEST,
-                    [(axum::http::header::CONTENT_TYPE.as_str(), "application/json")],
+                    [(
+                        axum::http::header::CONTENT_TYPE.as_str(),
+                        "application/json",
+                    )],
                     openai_error_body("Invalid request body", "invalid_request_error", None),
                 )
                     .into_response()
@@ -527,7 +534,10 @@ async fn proxy(
             return if matches!(source_api, SourceApi::V1) {
                 (
                     e.status,
-                    [(axum::http::header::CONTENT_TYPE.as_str(), "application/json")],
+                    [(
+                        axum::http::header::CONTENT_TYPE.as_str(),
+                        "application/json",
+                    )],
                     openai_error_body(e.message, "invalid_request_error", None),
                 )
                     .into_response()
@@ -550,12 +560,19 @@ async fn proxy(
         return if matches!(source_api, SourceApi::V1) {
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                [(axum::http::header::CONTENT_TYPE.as_str(), "application/json")],
+                [(
+                    axum::http::header::CONTENT_TYPE.as_str(),
+                    "application/json",
+                )],
                 openai_error_body("No upstream credentials configured", "server_error", None),
             )
                 .into_response()
         } else {
-            (StatusCode::SERVICE_UNAVAILABLE, "no upstream tokens configured").into_response()
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no upstream tokens configured",
+            )
+                .into_response()
         };
     }
     let (token_idx, token) = picked.unwrap();
@@ -569,7 +586,10 @@ async fn proxy(
             &session_id,
         ),
     };
-    let mut req = state.client.request(method.clone(), upstream).body(body_bytes);
+    let mut req = state
+        .client
+        .request(method.clone(), upstream)
+        .body(body_bytes);
 
     // Copy headers except hop-by-hop/auth and proxy-edge client headers; set upstream auth
     for (k, v) in headers.iter() {
@@ -596,7 +616,10 @@ async fn proxy(
             return if matches!(source_api, SourceApi::V1) {
                 (
                     StatusCode::BAD_GATEWAY,
-                    [(axum::http::header::CONTENT_TYPE.as_str(), "application/json")],
+                    [(
+                        axum::http::header::CONTENT_TYPE.as_str(),
+                        "application/json",
+                    )],
                     openai_error_body("Upstream error", "server_error", None),
                 )
                     .into_response()
@@ -625,7 +648,10 @@ async fn proxy(
                 return if matches!(source_api, SourceApi::V1) {
                     (
                         StatusCode::BAD_GATEWAY,
-                        [(axum::http::header::CONTENT_TYPE.as_str(), "application/json")],
+                        [(
+                            axum::http::header::CONTENT_TYPE.as_str(),
+                            "application/json",
+                        )],
                         openai_error_body("Upstream error", "server_error", None),
                     )
                         .into_response()
@@ -644,7 +670,12 @@ async fn proxy(
                 axum::http::header::CONTENT_TYPE,
                 HeaderValue::from_static("application/json"),
             );
-            (status, headers, upstream_error_to_openai(status, &body_bytes)).into_response()
+            (
+                status,
+                headers,
+                upstream_error_to_openai(status, &body_bytes),
+            )
+                .into_response()
         } else {
             (status, out_headers, body_bytes).into_response()
         };
@@ -675,7 +706,10 @@ async fn proxy(
                     error!("upstream body read failed: {}", err);
                     return (
                         StatusCode::BAD_GATEWAY,
-                        [(axum::http::header::CONTENT_TYPE.as_str(), "application/json")],
+                        [(
+                            axum::http::header::CONTENT_TYPE.as_str(),
+                            "application/json",
+                        )],
                         openai_error_body("Upstream error", "server_error", None),
                     )
                         .into_response();
@@ -703,7 +737,10 @@ async fn proxy(
                 }
                 Err((mapped_status, mapped_message)) => (
                     mapped_status,
-                    [(axum::http::header::CONTENT_TYPE.as_str(), "application/json")],
+                    [(
+                        axum::http::header::CONTENT_TYPE.as_str(),
+                        "application/json",
+                    )],
                     openai_error_body(
                         &mapped_message,
                         if mapped_status == StatusCode::NOT_FOUND {
@@ -790,7 +827,6 @@ fn record_error(state: &AppState, idx: usize) {
     }
 }
 
-
 fn is_hop_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -811,6 +847,7 @@ fn should_drop_incoming_header(name: &str) -> bool {
         || lower == "authorization"
         || lower == "host"
         || lower == "content-length"
+        || lower == "version"
         || lower == "x-forwarded-for"
         || lower == "x-forwarded-host"
         || lower == "x-forwarded-proto"
