@@ -93,6 +93,49 @@ model_provider = "codex_gateway"
 
 Then run Codex CLI with that profile.
 
+## Quick API test with curl
+
+List available models:
+
+```bash
+curl http://127.0.0.1:8319/v1/models \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY"
+```
+
+Send a basic text request:
+
+```bash
+curl http://127.0.0.1:8319/v1/responses \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  --data '{
+    "model": "gpt-5.2",
+    "input": "Write a one-line hello from Codex Gateway."
+  }'
+```
+
+Generate an image and save the streamed PNG to `/tmp/codex-gateway.png`:
+
+```bash
+tmp=$(mktemp)
+curl -sS -N http://127.0.0.1:8319/v1/responses \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  --data '{
+    "model": "gpt-5.2",
+    "input": "Create a simple red square icon on a white background.",
+    "tools": [{"type": "image_generation"}],
+    "stream": true
+  }' > "$tmp"
+
+sed -n 's/^data: //p' "$tmp" \
+  | jq -r 'select(.type=="response.image_generation_call.partial_image") | .partial_image_b64' \
+  | tail -n 1 \
+  | base64 -d > /tmp/codex-gateway.png
+```
+
 ## Troubleshooting
 
 - `403 cloudflare`: usually missing headers or wrong upstream. Use the provided gateway build.
