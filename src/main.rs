@@ -7,10 +7,11 @@ use axum::{
     routing::any,
     Router,
 };
-use futures_util::StreamExt;
+use bytes::{Bytes, BytesMut};
+use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -902,6 +903,10 @@ async fn proxy(
     // Stream response body back
     let stats_state = state.clone();
     let stream_idx = token_idx;
+    let content_type = out_headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase());
     let stream = resp.bytes_stream().map(move |chunk| {
         if let Err(ref err) = chunk {
             error!("stream chunk error: {}", err);
@@ -909,6 +914,16 @@ async fn proxy(
         }
         chunk.map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "stream"))
     });
+    let stream = if matches!(source_api, SourceApi::V1)
+        && content_type
+            .as_deref()
+            .map(|value| value.contains("text/event-stream"))
+            .unwrap_or(false)
+    {
+        compat_v1_sse_stream(stream).left_stream()
+    } else {
+        stream.right_stream()
+    };
     let body = Body::from_stream(stream);
     if matches!(source_api, SourceApi::V1)
         && !out_headers.contains_key(axum::http::header::CONTENT_TYPE)
@@ -919,6 +934,220 @@ async fn proxy(
         );
     }
     (status, out_headers, body).into_response()
+}
+
+struct CompatSseState<S> {
+    upstream: S,
+    buffer: BytesMut,
+    output_items: Vec<serde_json::Value>,
+    queued: VecDeque<Bytes>,
+}
+
+fn compat_v1_sse_stream<S>(
+    stream: S,
+) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>>
+where
+    S: futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
+{
+    stream::try_unfold(
+        CompatSseState {
+            upstream: stream,
+            buffer: BytesMut::new(),
+            output_items: Vec::new(),
+            queued: VecDeque::new(),
+        },
+        |mut state| async move {
+            loop {
+                if let Some(chunk) = state.queued.pop_front() {
+                    return Ok(Some((chunk, state)));
+                }
+
+                match state.upstream.next().await {
+                    Some(Ok(chunk)) => queue_compat_sse_bytes(&mut state, &chunk),
+                    Some(Err(err)) => return Err(err),
+                    None => {
+                        flush_compat_sse_buffer(&mut state);
+                        if let Some(chunk) = state.queued.pop_front() {
+                            return Ok(Some((chunk, state)));
+                        }
+                        return Ok(None);
+                    }
+                }
+            }
+        },
+    )
+}
+
+fn queue_compat_sse_bytes<S>(state: &mut CompatSseState<S>, chunk: &Bytes) {
+    state.buffer.extend_from_slice(chunk);
+
+    while let Some((event_end, delimiter_len)) = find_sse_event_boundary(&state.buffer) {
+        let raw_event = state.buffer.split_to(event_end + delimiter_len);
+        let event = raw_event[..event_end].to_vec();
+        push_compat_sse_event(state, &event, delimiter_len == 4);
+    }
+}
+
+fn flush_compat_sse_buffer<S>(state: &mut CompatSseState<S>) {
+    if state.buffer.is_empty() {
+        return;
+    }
+    let remaining = state.buffer.split().to_vec();
+    push_compat_sse_event(state, &remaining, false);
+}
+
+fn push_compat_sse_event<S>(state: &mut CompatSseState<S>, raw_event: &[u8], use_crlf: bool) {
+    let event = rewrite_v1_sse_event(raw_event, &mut state.output_items, use_crlf);
+    state.queued.push_back(Bytes::from(event));
+}
+
+fn find_sse_event_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
+    buffer
+        .windows(4)
+        .position(|window| {
+            window
+                == b"
+
+"
+        })
+        .map(|idx| (idx, 4))
+        .or_else(|| {
+            buffer
+                .windows(2)
+                .position(|window| {
+                    window
+                        == b"
+
+"
+                })
+                .map(|idx| (idx, 2))
+        })
+}
+
+fn rewrite_v1_sse_event(
+    raw_event: &[u8],
+    output_items: &mut Vec<serde_json::Value>,
+    use_crlf: bool,
+) -> Vec<u8> {
+    let text = String::from_utf8_lossy(raw_event);
+    let mut event_name: Option<String> = None;
+    let mut data_lines = Vec::new();
+
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        if let Some(value) = line.strip_prefix("event:") {
+            event_name = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("data:") {
+            data_lines.push(value.trim_start().to_string());
+        }
+    }
+
+    if data_lines.is_empty() {
+        return append_sse_delimiter(raw_event.to_vec(), use_crlf);
+    }
+
+    let data_text = data_lines.join(
+        "
+",
+    );
+    if data_text == "[DONE]" {
+        return render_sse_event(event_name.as_deref(), "[DONE]", use_crlf);
+    }
+
+    let mut value: serde_json::Value = match serde_json::from_str(&data_text) {
+        Ok(value) => value,
+        Err(_) => return append_sse_delimiter(raw_event.to_vec(), use_crlf),
+    };
+
+    if let Some(kind) = value.get("type").and_then(|kind| kind.as_str()) {
+        match kind {
+            "response.output_item.done" => {
+                if let Some(item) = value.get("item").cloned() {
+                    let output_index = value
+                        .get("output_index")
+                        .and_then(|index| index.as_u64())
+                        .unwrap_or(output_items.len() as u64)
+                        as usize;
+                    if output_items.len() <= output_index {
+                        output_items.resize(output_index + 1, serde_json::Value::Null);
+                    }
+                    output_items[output_index] = item;
+                }
+            }
+            "response.completed" => {
+                if let Some(response) = value
+                    .get_mut("response")
+                    .and_then(|response| response.as_object_mut())
+                {
+                    let should_fill_output = response
+                        .get("output")
+                        .and_then(|output| output.as_array())
+                        .map(|output| output.is_empty())
+                        .unwrap_or(true);
+                    if should_fill_output && output_items.iter().any(|item| !item.is_null()) {
+                        response.insert(
+                            "output".to_string(),
+                            serde_json::Value::Array(
+                                output_items
+                                    .iter()
+                                    .filter(|item| !item.is_null())
+                                    .cloned()
+                                    .collect(),
+                            ),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let event_name = event_name.or_else(|| {
+        value
+            .get("type")
+            .and_then(|kind| kind.as_str())
+            .map(|kind| kind.to_string())
+    });
+    let data = serde_json::to_string(&value).unwrap_or(data_text);
+    render_sse_event(event_name.as_deref(), &data, use_crlf)
+}
+
+fn append_sse_delimiter(mut raw_event: Vec<u8>, use_crlf: bool) -> Vec<u8> {
+    if use_crlf {
+        raw_event.extend_from_slice(
+            b"
+
+",
+        );
+    } else {
+        raw_event.extend_from_slice(
+            b"
+
+",
+        );
+    }
+    raw_event
+}
+
+fn render_sse_event(event_name: Option<&str>, data: &str, use_crlf: bool) -> Vec<u8> {
+    let delimiter = if use_crlf {
+        "
+"
+    } else {
+        "
+"
+    };
+    let mut out = String::new();
+    if let Some(event_name) = event_name {
+        out.push_str("event: ");
+        out.push_str(event_name);
+        out.push_str(delimiter);
+    }
+    out.push_str("data: ");
+    out.push_str(data);
+    out.push_str(delimiter);
+    out.push_str(delimiter);
+    out.into_bytes()
 }
 
 fn check_api_key(headers: &HeaderMap, expected: &str) -> bool {
@@ -984,6 +1213,7 @@ fn should_drop_incoming_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     if is_hop_header(&lower)
         || lower == "authorization"
+        || lower == "accept-encoding"
         || lower == "host"
         || lower == "content-length"
         || lower == "version"
