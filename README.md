@@ -136,6 +136,44 @@ sed -n 's/^data: //p' "$tmp" \
   | base64 -d > /tmp/codex-gateway.png
 ```
 
+## Antigravity
+
+This repo now exposes a minimal Antigravity path beside the existing Codex gateway.
+
+- Add an Antigravity account from the homepage at `http://127.0.0.1:8319/`
+- Antigravity API base path: `http://127.0.0.1:8319/agw/v1`
+- Current minimal surface:
+  - `GET /agw/v1/models`
+  - `POST /agw/v1/responses`
+
+List Antigravity models:
+
+```bash
+curl http://127.0.0.1:8319/agw/v1/models \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY"
+```
+
+Generate an image with Antigravity and save the final streamed image:
+
+```bash
+tmp=$(mktemp)
+curl -sS -N http://127.0.0.1:8319/agw/v1/responses \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  --data '{
+    "model": "gemini-3-pro-image",
+    "input": "Create a flat orange cat icon on a white background.",
+    "tools": [{"type": "image_generation"}],
+    "stream": true
+  }' > "$tmp"
+
+sed -n 's/^data: //p' "$tmp" \
+  | jq -r 'select(.type=="response.image_generation_call.partial_image") | .partial_image_b64' \
+  | tail -n 1 \
+  | base64 -d > /tmp/antigravity-image.png
+```
+
 ## Troubleshooting
 
 - `403 cloudflare`: usually missing headers or wrong upstream. Use the provided gateway build.

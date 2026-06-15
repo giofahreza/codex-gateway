@@ -1,7 +1,7 @@
 use axum::http::HeaderValue;
 use axum::{
     body::Body,
-    extract::{Form, OriginalUri, State},
+    extract::{Form, OriginalUri, Path, Query, State},
     http::{HeaderMap, Method, StatusCode},
     response::IntoResponse,
     routing::any,
@@ -19,12 +19,15 @@ use std::{
 use tracing::{error, info};
 use uuid::Uuid;
 mod source;
+mod stats_store;
 mod target;
+mod usage_store;
 use source::v1::response::{
     model_retrieve_to_openai_json, models_list_to_openai_json, openai_error_body,
     sse_to_response_json, upstream_error_to_openai,
 };
 use source::{route_request, ResponseMode, TargetModel};
+use stats_store::{Provider, StatsStore};
 use target::codex::auth::PendingOAuth;
 use target::codex::quota::QuotaCacheEntry;
 use target::codex::tokens::UpstreamToken;
@@ -33,12 +36,21 @@ use target::codex::tokens::UpstreamToken;
 struct AppState {
     cfg: Arc<Config>,
     rr: Arc<Mutex<usize>>,
+    agw_rr: Arc<Mutex<usize>>,
+    qwen_rr: Arc<Mutex<usize>>,
     client: reqwest::Client,
     tokens: Arc<Mutex<Vec<UpstreamToken>>>,
+    agw_accounts: Arc<Mutex<Vec<target::antigravity::accounts::AntigravityAccount>>>,
+    qwen_accounts: Arc<Mutex<Vec<target::qwen::accounts::QwenAccount>>>,
     stats: Arc<Mutex<UsageStats>>,
+    persisted_stats: Arc<Mutex<StatsStore>>,
     quota_cache: Arc<Mutex<Vec<Option<QuotaCacheEntry>>>>,
+    agw_quota_cache: Arc<Mutex<HashMap<String, target::antigravity::quota::QuotaCacheEntry>>>,
     oauth_pending: Arc<Mutex<HashMap<String, PendingOAuth>>>,
+    agw_oauth_pending: Arc<Mutex<HashMap<String, target::antigravity::auth::PendingOAuth>>>,
+    qwen_oauth_pending: Arc<Mutex<HashMap<String, target::qwen::auth::PendingDeviceFlow>>>,
     disabled: Arc<Mutex<HashSet<String>>>,
+    usage_history_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,17 +78,87 @@ struct Config {
 
 #[derive(Default, Clone, Serialize)]
 struct UsageStats {
-    per_account: Vec<AccountUsage>,
+    codex_accounts: Vec<AccountUsage>,
+    agw_accounts: Vec<AccountUsage>,
+    qwen_accounts: Vec<AccountUsage>,
     total_requests: u64,
     total_errors: u64,
+    total_prompt_total: u64,
+    total_prompt_error_total: u64,
+    total_input_tokens: u64,
+    total_output_tokens: u64,
+    total_tokens_used: u64,
+    total_cache_tokens: u64,
+    total_reasoning_tokens: u64,
+    first_recorded_at: Option<String>,
+    last_recorded_at: Option<String>,
 }
 
 #[derive(Default, Clone, Serialize)]
 struct AccountUsage {
+    #[serde(skip_serializing)]
+    key: String,
     label: String,
     account_id: String,
     requests: u64,
     errors: u64,
+    prompt_total: u64,
+    prompt_error_total: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    total_tokens: u64,
+    cache_tokens: u64,
+    reasoning_tokens: u64,
+    first_seen_at: Option<String>,
+    last_seen_at: Option<String>,
+    last_success_at: Option<String>,
+    last_error_at: Option<String>,
+}
+
+#[derive(Default, Clone)]
+pub(crate) struct PromptMetrics {
+    input_chars: u64,
+    prompt_items: u64,
+    is_prompt: bool,
+}
+
+#[derive(Default, Clone)]
+pub(crate) struct UsageMetrics {
+    input_tokens: u64,
+    output_tokens: u64,
+    total_tokens: u64,
+    cache_tokens: u64,
+    reasoning_tokens: u64,
+    raw_usage: Option<serde_json::Value>,
+}
+
+#[derive(Clone)]
+pub(crate) struct UsageContext {
+    provider: Provider,
+    provider_name: &'static str,
+    key: String,
+    label: String,
+    account_id: String,
+    credential_file: Option<String>,
+    model: Option<String>,
+    request_path: String,
+    prompt: PromptMetrics,
+}
+
+#[derive(Default)]
+struct CounterDelta {
+    request_delta: u64,
+    error_delta: u64,
+    prompt_total_delta: u64,
+    prompt_error_total_delta: u64,
+    input_tokens_delta: u64,
+    output_tokens_delta: u64,
+    total_tokens_delta: u64,
+    cache_tokens_delta: u64,
+    reasoning_tokens_delta: u64,
+    observed_at: Option<String>,
+    success_at: Option<String>,
+    error_at: Option<String>,
 }
 
 #[tokio::main]
@@ -89,19 +171,10 @@ async fn main() {
         .into_iter()
         .collect::<HashSet<_>>();
     let tokens = target::codex::tokens::load_tokens(&cfg, &disabled);
-    let stats = UsageStats {
-        per_account: tokens
-            .iter()
-            .map(|t| AccountUsage {
-                label: t.label.clone(),
-                account_id: t.account_id.clone().unwrap_or_default(),
-                requests: 0,
-                errors: 0,
-            })
-            .collect(),
-        total_requests: 0,
-        total_errors: 0,
-    };
+    let agw_accounts = target::antigravity::accounts::load_accounts(&cfg, &disabled);
+    let qwen_accounts = target::qwen::accounts::load_accounts(&cfg, &disabled);
+    let persisted_stats = stats_store::load(&cfg);
+    let stats = build_usage_stats(&tokens, &agw_accounts, &qwen_accounts, &persisted_stats);
     let quota_cache = vec![None; tokens.len()];
     tracing_subscriber::fmt().with_env_filter("info").init();
 
@@ -118,13 +191,24 @@ async fn main() {
     let state = AppState {
         cfg: Arc::new(cfg),
         rr: Arc::new(Mutex::new(0)),
+        agw_rr: Arc::new(Mutex::new(0)),
+        qwen_rr: Arc::new(Mutex::new(0)),
         client,
         tokens: Arc::new(Mutex::new(tokens)),
+        agw_accounts: Arc::new(Mutex::new(agw_accounts)),
+        qwen_accounts: Arc::new(Mutex::new(qwen_accounts)),
         stats: Arc::new(Mutex::new(stats)),
+        persisted_stats: Arc::new(Mutex::new(persisted_stats)),
         quota_cache: Arc::new(Mutex::new(quota_cache)),
+        agw_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         oauth_pending: Arc::new(Mutex::new(HashMap::new())),
+        agw_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
+        qwen_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         disabled: Arc::new(Mutex::new(disabled)),
+        usage_history_lock: Arc::new(Mutex::new(())),
     };
+    migrate_qwen_usage_keys(&state);
+    sync_usage_stats(&state);
 
     let app = Router::new()
         .route("/health", any(health))
@@ -136,6 +220,20 @@ async fn main() {
         .route("/credentials/toggle", any(toggle_credential_route))
         .route("/login/codex/start", any(login_start_route))
         .route("/login/codex/submit", any(login_submit_route))
+        .route("/agw/accounts.json", any(agw_accounts_route))
+        .route("/agw/quota.json", any(agw_quota_json_route))
+        .route("/login/antigravity/start", any(agw_login_start_route))
+        .route("/login/antigravity/submit", any(agw_login_submit_route))
+        .route("/agw/v1/models", any(agw_models_route))
+        .route("/agw/v1/responses", any(agw_responses_route))
+        .route("/qwen/accounts.json", any(qwen_accounts_route))
+        .route("/login/qwen/start", any(qwen_login_start_route))
+        .route("/login/qwen/status", any(qwen_login_status_route))
+        .route("/qwen/v1/models", any(qwen_models_route))
+        .route("/qwen/v1/responses", any(qwen_responses_route))
+        .route("/usage/summary.json", any(usage_summary_route))
+        .route("/usage/history.json", any(usage_history_route))
+        .route("/temp-files/:name", any(temp_file_route))
         .route("/docs", any(source::openapi::swagger_ui_redirect))
         .route("/docs/", any(source::openapi::swagger_ui_root))
         .route("/docs/*rest", any(source::openapi::swagger_ui_asset))
@@ -234,8 +332,52 @@ async fn dashboard() -> impl IntoResponse {
       <tbody id="rows"></tbody>
       </table>
     </div>
+    <div style="margin-top:28px;">
+      <h2 style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;">
+        <span>Antigravity Accounts</span>
+        <button id="addAgwAccountBtn">Add Antigravity</button>
+      </h2>
+      <div class="muted" style="margin-bottom:8px;">Use these accounts through <code>/agw/v1/*</code>. This is the minimal Antigravity path added beside the existing Codex gateway.</div>
+      <div style="overflow-x:auto;">
+        <table>
+        <thead>
+          <tr>
+            <th>Account</th>
+            <th>Tier</th>
+            <th>Gemini Limits</th>
+            <th>Claude/GPT Limits</th>
+            <th>Access Token Expires</th>
+          </tr>
+        </thead>
+        <tbody id="agwRows"></tbody>
+        </table>
+      </div>
+    </div>
+    <div style="margin-top:28px;">
+      <h2 style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;">
+        <span>Qwen Accounts</span>
+        <button id="addQwenAccountBtn">Add Qwen</button>
+      </h2>
+      <div class="muted" style="margin-bottom:8px;">Use these accounts through <code>/qwen/v1/*</code>. Qwen login here uses the upstream device flow and polls automatically after you approve it in the browser.</div>
+      <div style="overflow-x:auto;">
+        <table>
+        <thead>
+          <tr>
+            <th>Account</th>
+            <th>Resource</th>
+            <th>Access Token Expires</th>
+          </tr>
+        </thead>
+        <tbody id="qwenRows"></tbody>
+        </table>
+      </div>
+    </div>
     <script>
       let lastQuota = new Map();
+      let lastAgwQuota = new Map();
+      let openAgwRows = new Set();
+      let qwenPollTimer = null;
+      let qwenLoginState = null;
       let activeTipEl = null;
       let activeTipTimer = null;
       function showTapTip(el, ev) {
@@ -278,6 +420,14 @@ async fn dashboard() -> impl IntoResponse {
           activeTipEl = null;
         }
       });
+      function toggleAgwModelRow(key) {
+        if (openAgwRows.has(key)) {
+          openAgwRows.delete(key);
+        } else {
+          openAgwRows.add(key);
+        }
+        refreshAgwAccounts();
+      }
       async function refresh() {
         const res = await fetch('/dashboard.json');
         const data = await res.json();
@@ -342,10 +492,130 @@ async fn dashboard() -> impl IntoResponse {
           if (kind === 'crw') td.textContent = fmt(crw);
         });
       }
+      async function refreshAgwAccounts() {
+        const res = await fetch('/agw/accounts.json');
+        const data = await res.json();
+        const fmtAgw = (bucket) => bucket && bucket.used_percent !== null && bucket.used_percent !== undefined
+          ? (bucket.used_percent.toFixed(1) + '% ' + (bucket.reset_label ? '(' + bucket.reset_label + ')' : ''))
+          : '…';
+        const rows = (data.accounts || []).map(a => {
+          const toggleLabel = a.enabled ? 'Disable' : 'Enable';
+          const dot = a.enabled ? '#2ecc71' : '#e74c3c';
+          const key = a.file_name || a.label;
+          const q = lastAgwQuota.get(key);
+          const groups = q?.groups || [];
+          const models = q?.models || [];
+          const hasModelRows = models.length > 0;
+          const isOpen = openAgwRows.has(key);
+          const gemini = groups.find(g => (g.display_name || '').toLowerCase().includes('gemini')) || {};
+          const thirdParty = groups.find(g => {
+            const name = (g.display_name || '').toLowerCase();
+            return name.includes('claude') || name.includes('gpt');
+          }) || {};
+          const tierTip = [
+            q?.tier_description || '',
+            q?.upgrade_text || '',
+            q?.description || ''
+          ].filter(Boolean).join(' | ');
+          const accountTip = [
+            'Email: ' + (a.email || ''),
+            'Project: ' + (a.project_id || '-'),
+            'Token expires: ' + (a.expired_at || '-')
+          ].join(' | ');
+          const toggleControl = a.file_name
+            ? `<button title="${toggleLabel}" onclick="event.stopPropagation();toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${dot};border:none;padding:0;cursor:pointer;"></button>`
+            : `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${dot};"></span>`;
+          const deleteControl = a.file_name
+            ? `<button title="Delete" onclick="event.stopPropagation();deleteCred('${a.file_name}')" style="border:none;background:transparent;cursor:pointer;padding:0 0 0 4px;line-height:1;">&#128465;</button>`
+            : '';
+          const tierLabel = q?.tier_name
+            ? `<span data-tip="${tierTip}" title="${tierTip}" onclick="showTapTip(this, event)" style="cursor:help;">${q.tier_name}</span>`
+            : '-';
+          const expandGlyph = hasModelRows ? (isOpen ? '&#9662;' : '&#9656;') : '';
+          const modelRows = models.map(m => {
+            const currentTip = m.group_display_name
+              ? `Shared group: ${m.group_display_name}`
+              : '';
+            return '<tr>' +
+              '<td>' + (m.display_name || m.model_id) + '</td>' +
+              '<td><span data-tip="' + currentTip + '" title="' + currentTip + '" onclick="showTapTip(this, event)" style="cursor:help;">' + fmtAgw(m.current) + '</span></td>' +
+              '<td>' + fmtAgw(m.five_hour) + '</td>' +
+              '<td>' + fmtAgw(m.weekly) + '</td>' +
+            '</tr>';
+          }).join('');
+          const detailRow = modelRows
+            ? '<tr style="display:' + (isOpen ? 'table-row' : 'none') + ';background:#fafafa;">' +
+                '<td colspan="5" style="padding:0;">' +
+                  '<div style="padding:12px 10px 14px 10px;">' +
+                    '<div class="muted">Current is the model-specific bucket from Antigravity. 5h and Weekly are the shared group limits Antigravity reports for that model family.</div>' +
+                    '<div style="overflow-x:auto;margin-top:8px;width:100%;">' +
+                      '<table style="width:100%;min-width:560px;">' +
+                        '<thead><tr><th>Model</th><th>Current</th><th>5h</th><th>Weekly</th></tr></thead>' +
+                        '<tbody>' + modelRows + '</tbody>' +
+                      '</table>' +
+                    '</div>' +
+                  '</div>' +
+                '</td>' +
+              '</tr>'
+            : '';
+          const summaryRow = '<tr' +
+            (hasModelRows ? ` onclick="toggleAgwModelRow('${key}')" style="cursor:pointer;"` : '') +
+          '>' +
+            '<td><span style="display:flex;align-items:center;gap:6px;">' + toggleControl + deleteControl + '<span style="color:#666;min-width:12px;text-align:center;">' + expandGlyph + '</span><span data-tip="' + accountTip + '" title="' + accountTip + '" onclick="showTapTip(this, event)" style="cursor:help;">' + a.label + '</span><span style="margin-left:auto;color:#666;font-size:12px;">(' + (a.requests || 0) + '/' + (a.errors || 0) + ')</span></span><div class="muted">project: ' + (a.project_id || '-') + (hasModelRows ? ' | click row to expand' : '') + '</div></td>' +
+            '<td>' + tierLabel + (q?.tier_id ? '<div class="muted">' + q.tier_id + '</div>' : '') + '</td>' +
+            '<td class="stacked">5h: ' + fmtAgw(gemini.five_hour) + '<br><span class="weekly-line">Weekly: ' + fmtAgw(gemini.weekly) + '</span></td>' +
+            '<td class="stacked">5h: ' + fmtAgw(thirdParty.five_hour) + '<br><span class="weekly-line">Weekly: ' + fmtAgw(thirdParty.weekly) + '</span></td>' +
+            '<td>' + (a.expired_at || '-') + '</td>' +
+          '</tr>';
+          return summaryRow + detailRow;
+        }).join('');
+        document.getElementById('agwRows').innerHTML = rows;
+      }
+      async function refreshAgwQuota() {
+        const res = await fetch('/agw/quota.json');
+        const quota = await res.json();
+        const quotaMap = new Map();
+        (quota.accounts || []).forEach(q => {
+          const key = q.file_name || q.label;
+          quotaMap.set(key, q);
+        });
+        lastAgwQuota = quotaMap;
+      }
+      async function refreshQwenAccounts() {
+        const res = await fetch('/qwen/accounts.json');
+        const data = await res.json();
+        const rows = (data.accounts || []).map(a => {
+          const toggleLabel = a.enabled ? 'Disable' : 'Enable';
+          const dot = a.enabled ? '#2ecc71' : '#e74c3c';
+          const resource = a.resource_url || 'https://portal.qwen.ai/v1';
+          const accountTip = [
+            'Alias: ' + (a.email || a.label || ''),
+            'Resource: ' + resource,
+            'Token expires: ' + (a.expired_at || '-')
+          ].join(' | ');
+          const toggleControl = a.file_name
+            ? `<button title="${toggleLabel}" onclick="toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${dot};border:none;padding:0;cursor:pointer;"></button>`
+            : `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${dot};"></span>`;
+          const deleteControl = a.file_name
+            ? `<button title="Delete" onclick="deleteCred('${a.file_name}')" style="border:none;background:transparent;cursor:pointer;padding:0 0 0 4px;line-height:1;">&#128465;</button>`
+            : '';
+          return '<tr>' +
+            '<td><span style="display:flex;align-items:center;gap:6px;">' + toggleControl + deleteControl + '<span data-tip="' + accountTip + '" title="' + accountTip + '" onclick="showTapTip(this, event)" style="cursor:help;">' + a.label + '</span><span style="margin-left:auto;color:#666;font-size:12px;">(' + (a.requests || 0) + '/' + (a.errors || 0) + ')</span></span></td>' +
+            '<td><code>' + resource + '</code></td>' +
+            '<td>' + (a.expired_at || '-') + '</td>' +
+          '</tr>';
+        }).join('');
+        document.getElementById('qwenRows').innerHTML = rows;
+      }
       refresh();
       refreshQuota();
+      refreshAgwQuota().then(() => refreshAgwAccounts());
+      refreshQwenAccounts();
       setInterval(refresh, 5000);
       setInterval(refreshQuota, 60000);
+      setInterval(refreshAgwQuota, 60000);
+      setInterval(refreshAgwAccounts, 10000);
+      setInterval(refreshQwenAccounts, 10000);
     </script>
     <div id="addModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);">
       <div style="background:#fff;max-width:720px;margin:8% auto;padding:16px;border-radius:8px;max-height:80vh;overflow:auto;">
@@ -360,6 +630,32 @@ async fn dashboard() -> impl IntoResponse {
           <button type="submit" style="margin-top:8px;">Submit</button>
           <button type="button" id="closeModalBtn" style="margin-top:8px;margin-left:8px;">Close</button>
         </form>
+      </div>
+    </div>
+    <div id="addAgwModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);">
+      <div style="background:#fff;max-width:720px;margin:8% auto;padding:16px;border-radius:8px;max-height:80vh;overflow:auto;">
+        <h2 style="margin-top:0;">Add Antigravity Account</h2>
+        <p>Click start, log in with Google, then paste the callback URL below.</p>
+        <button onclick="startAgwLogin()">Start Login</button>
+        <div id="agwStatus" class="muted" style="margin-top:8px;"></div>
+        <pre id="agwAuthUrl" style="display:none;white-space:pre-wrap;word-break:break-all;overflow-wrap:anywhere;"></pre>
+        <form id="agwLoginForm" style="margin-top:16px;">
+          <label>Callback URL</label>
+          <input name="redirect_url" placeholder="http://localhost:51121/oauth-callback?code=...&state=...">
+          <button type="submit" style="margin-top:8px;">Submit</button>
+          <button type="button" id="closeAgwModalBtn" style="margin-top:8px;margin-left:8px;">Close</button>
+        </form>
+      </div>
+    </div>
+    <div id="addQwenModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);">
+      <div style="background:#fff;max-width:720px;margin:8% auto;padding:16px;border-radius:8px;max-height:80vh;overflow:auto;">
+        <h2 style="margin-top:0;">Add Qwen Account</h2>
+        <p>Click start, approve the Qwen device login in a new tab, and this dialog will poll automatically until the auth file is saved.</p>
+        <button onclick="startQwenLogin()">Start Login</button>
+        <div id="qwenStatus" class="muted" style="margin-top:8px;"></div>
+        <pre id="qwenAuthUrl" style="display:none;white-space:pre-wrap;word-break:break-all;overflow-wrap:anywhere;"></pre>
+        <div id="qwenUserCode" class="muted" style="margin-top:8px;"></div>
+        <button type="button" id="closeQwenModalBtn" style="margin-top:16px;">Close</button>
       </div>
     </div>
     <script>
@@ -387,6 +683,83 @@ async fn dashboard() -> impl IntoResponse {
           document.getElementById('addModal').style.display = 'none';
         }
       });
+      async function startAgwLogin() {
+        const res = await fetch('/login/antigravity/start');
+        const data = await res.json();
+        if (data.url) {
+          window.open(data.url, '_blank');
+          document.getElementById('agwStatus').textContent = 'Opened login URL in new tab. If blocked, copy from below.';
+          const pre = document.getElementById('agwAuthUrl');
+          pre.textContent = data.url;
+          pre.style.display = 'block';
+        } else {
+          document.getElementById('agwStatus').textContent = data.message || 'Failed to start login';
+        }
+      }
+      document.getElementById('addAgwAccountBtn').addEventListener('click', () => {
+        document.getElementById('addAgwModal').style.display = 'block';
+      });
+      document.getElementById('closeAgwModalBtn').addEventListener('click', () => {
+        document.getElementById('addAgwModal').style.display = 'none';
+      });
+      document.getElementById('addAgwModal').addEventListener('click', (e) => {
+        if (e.target.id === 'addAgwModal') {
+          document.getElementById('addAgwModal').style.display = 'none';
+        }
+      });
+      function stopQwenPolling() {
+        if (qwenPollTimer) {
+          clearInterval(qwenPollTimer);
+          qwenPollTimer = null;
+        }
+      }
+      function closeQwenModal() {
+        stopQwenPolling();
+        document.getElementById('addQwenModal').style.display = 'none';
+      }
+      async function pollQwenLoginStatus() {
+        if (!qwenLoginState) return;
+        const res = await fetch('/login/qwen/status?state=' + encodeURIComponent(qwenLoginState));
+        const data = await res.json();
+        document.getElementById('qwenStatus').textContent = data.message || 'Waiting for Qwen authorization.';
+        if (data.status === 'completed') {
+          stopQwenPolling();
+          refreshQwenAccounts();
+          return;
+        }
+        if (data.status === 'error' || data.status === 'expired' || data.ok === false) {
+          stopQwenPolling();
+        }
+      }
+      async function startQwenLogin() {
+        stopQwenPolling();
+        const res = await fetch('/login/qwen/start');
+        const data = await res.json();
+        if (!data.ok || !data.url || !data.state) {
+          document.getElementById('qwenStatus').textContent = data.message || 'Failed to start Qwen login';
+          return;
+        }
+        qwenLoginState = data.state;
+        window.open(data.url, '_blank');
+        document.getElementById('qwenStatus').textContent = 'Opened login URL in new tab. Approve it there; this dialog will keep polling.';
+        const pre = document.getElementById('qwenAuthUrl');
+        pre.textContent = data.url;
+        pre.style.display = 'block';
+        document.getElementById('qwenUserCode').textContent = data.user_code ? ('User code: ' + data.user_code) : '';
+        qwenPollTimer = setInterval(pollQwenLoginStatus, Math.max(2000, (data.interval || 5) * 1000));
+        pollQwenLoginStatus();
+      }
+      document.getElementById('addQwenAccountBtn').addEventListener('click', () => {
+        document.getElementById('addQwenModal').style.display = 'block';
+      });
+      document.getElementById('closeQwenModalBtn').addEventListener('click', () => {
+        closeQwenModal();
+      });
+      document.getElementById('addQwenModal').addEventListener('click', (e) => {
+        if (e.target.id === 'addQwenModal') {
+          closeQwenModal();
+        }
+      });
       document.getElementById('loginForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         const form = e.target;
@@ -407,6 +780,27 @@ async fn dashboard() -> impl IntoResponse {
           refresh();
         }
       });
+      document.getElementById('agwLoginForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const form = e.target;
+        const input = form.querySelector('input[name="redirect_url"]');
+        const redirectUrl = input.value.trim();
+        if (!redirectUrl) {
+          document.getElementById('agwStatus').textContent = 'Callback URL is required.';
+          return;
+        }
+        const res = await fetch('/login/antigravity/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ redirect_url: redirectUrl })
+        });
+        const data = await res.json();
+        document.getElementById('agwStatus').textContent = data.message || 'Login completed.';
+        if (data.ok) {
+          refreshAgwQuota();
+          refreshAgwAccounts();
+        }
+      });
       async function deleteCred(fileName) {
         const key = prompt('Proxy API key for delete:');
         if (!key) return;
@@ -422,6 +816,9 @@ async fn dashboard() -> impl IntoResponse {
         alert(data.message || 'done');
         refresh();
         refreshQuota();
+        refreshAgwQuota();
+        refreshAgwAccounts();
+        refreshQwenAccounts();
       }
       async function toggleCred(fileName, enabled) {
         const key = prompt('Proxy API key for toggle:');
@@ -438,6 +835,9 @@ async fn dashboard() -> impl IntoResponse {
         alert(data.message || 'done');
         refresh();
         refreshQuota();
+        refreshAgwQuota();
+        refreshAgwAccounts();
+        refreshQwenAccounts();
       }
     </script>
   </body>
@@ -471,7 +871,7 @@ async fn dashboard_json(State(state): State<AppState>) -> impl IntoResponse {
         stats.clone()
     };
     let accounts: Vec<serde_json::Value> = snapshot
-        .per_account
+        .codex_accounts
         .into_iter()
         .enumerate()
         .map(|(i, a)| {
@@ -501,6 +901,15 @@ async fn dashboard_json(State(state): State<AppState>) -> impl IntoResponse {
     axum::Json(serde_json::json!({
         "total_requests": snapshot.total_requests,
         "total_errors": snapshot.total_errors,
+        "total_prompt_total": snapshot.total_prompt_total,
+        "total_prompt_error_total": snapshot.total_prompt_error_total,
+        "total_input_tokens": snapshot.total_input_tokens,
+        "total_output_tokens": snapshot.total_output_tokens,
+        "total_tokens_used": snapshot.total_tokens_used,
+        "total_cache_tokens": snapshot.total_cache_tokens,
+        "total_reasoning_tokens": snapshot.total_reasoning_tokens,
+        "first_recorded_at": snapshot.first_recorded_at,
+        "last_recorded_at": snapshot.last_recorded_at,
         "accounts": accounts
     }))
 }
@@ -553,6 +962,165 @@ async fn login_submit_route(
     Form(form): Form<target::codex::admin::CallbackForm>,
 ) -> impl IntoResponse {
     target::codex::admin::login_submit(State(state), Form(form)).await
+}
+
+async fn agw_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
+    target::antigravity::admin::accounts_json(State(state)).await
+}
+
+async fn agw_quota_json_route(State(state): State<AppState>) -> impl IntoResponse {
+    target::antigravity::admin::quota_json(State(state)).await
+}
+
+async fn agw_login_start_route(State(state): State<AppState>) -> impl IntoResponse {
+    target::antigravity::admin::login_start(State(state)).await
+}
+
+async fn agw_login_submit_route(
+    State(state): State<AppState>,
+    Form(form): Form<target::antigravity::admin::CallbackForm>,
+) -> impl IntoResponse {
+    target::antigravity::admin::login_submit(State(state), Form(form)).await
+}
+
+async fn agw_models_route(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    target::antigravity::api::models(State(state), headers).await
+}
+
+async fn agw_responses_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    target::antigravity::api::responses(State(state), headers, body).await
+}
+
+async fn qwen_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
+    target::qwen::admin::accounts_json(State(state)).await
+}
+
+async fn qwen_login_start_route(State(state): State<AppState>) -> impl IntoResponse {
+    target::qwen::admin::login_start(State(state)).await
+}
+
+async fn qwen_login_status_route(
+    State(state): State<AppState>,
+    Query(query): Query<target::qwen::admin::LoginStatusQuery>,
+) -> impl IntoResponse {
+    target::qwen::admin::login_status(State(state), Query(query)).await
+}
+
+async fn qwen_models_route(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    target::qwen::api::models(State(state), headers).await
+}
+
+async fn qwen_responses_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    target::qwen::api::responses(State(state), headers, body).await
+}
+
+async fn usage_summary_route(State(state): State<AppState>) -> impl IntoResponse {
+    let persisted = state.persisted_stats.lock().unwrap().clone();
+    let mut codex = persisted
+        .codex
+        .into_iter()
+        .map(|(key, usage)| serde_json::json!({ "key": key, "usage": usage }))
+        .collect::<Vec<_>>();
+    let mut antigravity = persisted
+        .antigravity
+        .into_iter()
+        .map(|(key, usage)| serde_json::json!({ "key": key, "usage": usage }))
+        .collect::<Vec<_>>();
+    let mut qwen = persisted
+        .qwen
+        .into_iter()
+        .map(|(key, usage)| serde_json::json!({ "key": key, "usage": usage }))
+        .collect::<Vec<_>>();
+    codex.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+    antigravity.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+    qwen.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+    axum::Json(serde_json::json!({
+        "totals": {
+            "requests": persisted.total_requests,
+            "errors": persisted.total_errors,
+            "prompt_total": persisted.total_prompt_total,
+            "prompt_error_total": persisted.total_prompt_error_total,
+            "input_tokens": persisted.total_input_tokens,
+            "output_tokens": persisted.total_output_tokens,
+            "total_tokens": persisted.total_tokens_used,
+            "cache_tokens": persisted.total_cache_tokens,
+            "reasoning_tokens": persisted.total_reasoning_tokens,
+            "first_recorded_at": persisted.first_recorded_at,
+            "last_recorded_at": persisted.last_recorded_at
+        },
+        "providers": {
+            "codex": codex,
+            "antigravity": antigravity,
+            "qwen": qwen
+        }
+    }))
+}
+
+async fn usage_history_route(
+    State(state): State<AppState>,
+    Query(query): Query<usage_store::UsageHistoryQuery>,
+) -> impl IntoResponse {
+    match usage_store::load(&state.cfg, &query) {
+        Ok(events) => axum::Json(serde_json::json!({ "events": events })).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [("Content-Type", "application/json")],
+            openai_error_body(&err, "server_error", None),
+        )
+            .into_response(),
+    }
+}
+
+async fn temp_file_route(Path(name): Path<String>) -> impl IntoResponse {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return (StatusCode::BAD_REQUEST, "invalid file name").into_response();
+    }
+
+    let path = std::path::Path::new("/tmp/gpt-gateway-downloads").join(&name);
+    let body = match std::fs::read(&path) {
+        Ok(body) => body,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return (StatusCode::NOT_FOUND, "file not found").into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to read temp file",
+            )
+                .into_response();
+        }
+    };
+
+    let content_type = if name.ends_with(".png") {
+        "image/png"
+    } else if name.ends_with(".jpg") || name.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if name.ends_with(".webp") {
+        "image/webp"
+    } else if name.ends_with(".gif") {
+        "image/gif"
+    } else {
+        "application/octet-stream"
+    };
+
+    (
+        StatusCode::OK,
+        [
+            ("Content-Type", content_type),
+            ("Content-Disposition", "attachment"),
+            ("Cache-Control", "no-store"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// Deletes a saved credential file and reloads the in-memory token list.
@@ -615,6 +1183,165 @@ async fn toggle_credential_route(
     Form(form): Form<target::codex::admin::ToggleForm>,
 ) -> impl IntoResponse {
     target::codex::admin::toggle_credential(State(state), headers, Form(form)).await
+}
+
+pub(crate) fn model_from_request_value(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("model")
+        .and_then(|model| model.as_str())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(|model| model.to_string())
+}
+
+pub(crate) fn prompt_metrics_from_request_value(value: &serde_json::Value) -> PromptMetrics {
+    let mut metrics = PromptMetrics::default();
+    if let Some(instructions) = value
+        .get("instructions")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        metrics.input_chars += instructions.chars().count() as u64;
+    }
+
+    if let Some(input) = value.get("input") {
+        append_prompt_value(&mut metrics, input);
+    }
+
+    if let Some(messages) = value.get("messages") {
+        append_prompt_value(&mut metrics, messages);
+    }
+
+    if !metrics.is_prompt {
+        metrics.is_prompt = metrics.input_chars > 0 || metrics.prompt_items > 0;
+    }
+
+    metrics
+}
+
+fn append_prompt_value(metrics: &mut PromptMetrics, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => {
+            let text = text.trim();
+            if !text.is_empty() {
+                metrics.input_chars += text.chars().count() as u64;
+                metrics.prompt_items += 1;
+                metrics.is_prompt = true;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                append_prompt_value(metrics, item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(text) = map
+                .get("text")
+                .and_then(|value| value.as_str())
+                .or_else(|| map.get("input_text").and_then(|value| value.as_str()))
+                .or_else(|| map.get("output_text").and_then(|value| value.as_str()))
+                .or_else(|| {
+                    map.get("content").and_then(|value| {
+                        if value.is_string() {
+                            value.as_str()
+                        } else {
+                            None
+                        }
+                    })
+                })
+            {
+                let text = text.trim();
+                if !text.is_empty() {
+                    metrics.input_chars += text.chars().count() as u64;
+                    metrics.prompt_items += 1;
+                    metrics.is_prompt = true;
+                }
+            }
+            if let Some(content) = map.get("content").filter(|value| value.is_array()) {
+                append_prompt_value(metrics, content);
+            }
+            if let Some(input) = map.get("input") {
+                append_prompt_value(metrics, input);
+            }
+            if let Some(messages) = map.get("messages") {
+                append_prompt_value(metrics, messages);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn usage_metrics_from_response_value(value: &serde_json::Value) -> UsageMetrics {
+    let usage = value
+        .get("usage")
+        .cloned()
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|resp| resp.get("usage"))
+                .cloned()
+        })
+        .unwrap_or(serde_json::Value::Null);
+
+    let input_tokens = usage
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .or_else(|| usage.get("prompt_tokens").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("output_tokens")
+        .and_then(|v| v.as_u64())
+        .or_else(|| usage.get("completion_tokens").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(input_tokens + output_tokens);
+    let cache_tokens = usage
+        .get("input_tokens_details")
+        .and_then(|v| v.get("cached_tokens"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| usage.get("cache_tokens").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+    let reasoning_tokens = usage
+        .get("output_tokens_details")
+        .and_then(|v| v.get("reasoning_tokens"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| usage.get("reasoning_tokens").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+
+    UsageMetrics {
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        cache_tokens,
+        reasoning_tokens,
+        raw_usage: if usage.is_null() { None } else { Some(usage) },
+    }
+}
+
+fn usage_metrics_from_sse_response_body(body: &Bytes) -> Option<UsageMetrics> {
+    let text = String::from_utf8_lossy(body);
+    for line in text.lines() {
+        let data = match line.strip_prefix("data: ") {
+            Some(data) => data.trim(),
+            None => continue,
+        };
+        if data == "[DONE]" {
+            break;
+        }
+        let value: serde_json::Value = match serde_json::from_str(data) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if value.get("type").and_then(|v| v.as_str()) == Some("response.completed") {
+            if let Some(response) = value.get("response") {
+                return Some(usage_metrics_from_response_value(response));
+            }
+        }
+    }
+    None
 }
 
 async fn proxy(
@@ -715,8 +1442,18 @@ async fn proxy(
                 .into_response()
         };
     }
-    let (token_idx, token) = picked.unwrap();
-    record_request(&state, token_idx);
+    let (_token_idx, token) = picked.unwrap();
+    let codex_context = {
+        let request_value: Option<serde_json::Value> =
+            serde_json::from_slice(&routed.upstream_body).ok();
+        let prompt = request_value
+            .as_ref()
+            .map(prompt_metrics_from_request_value)
+            .unwrap_or_default();
+        let model = request_value.as_ref().and_then(model_from_request_value);
+        codex_usage_context(&token, model, routed.upstream_path.clone(), prompt)
+    };
+    record_codex_request(&state, &codex_context);
     let body_bytes = match routed.target {
         TargetModel::Codex => target::codex::gateway::build_request_body(
             &method,
@@ -752,7 +1489,7 @@ async fn proxy(
         Ok(r) => r,
         Err(err) => {
             error!("upstream error: {}", err);
-            record_error(&state, token_idx);
+            record_codex_error(&state, &codex_context, "upstream send failed");
             return if matches!(source_api, SourceApi::V1) {
                 (
                     StatusCode::BAD_GATEWAY,
@@ -780,7 +1517,11 @@ async fn proxy(
     }
 
     if status.as_u16() >= 400 {
-        record_error(&state, token_idx);
+        record_codex_error(
+            &state,
+            &codex_context,
+            format!("upstream status {}", status),
+        );
         let body_bytes = match resp.bytes().await {
             Ok(b) => b,
             Err(err) => {
@@ -826,9 +1567,12 @@ async fn proxy(
             Ok(b) => b,
             Err(err) => {
                 error!("upstream body read failed: {}", err);
+                record_codex_error(&state, &codex_context, "failed to read upstream body");
                 return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
             }
         };
+        let metrics = usage_metrics_from_sse_response_body(&body_bytes).unwrap_or_default();
+        record_usage_success(&state, &codex_context, &metrics);
         let json_body = sse_to_response_json(&body_bytes);
         let mut headers = out_headers;
         headers.insert(
@@ -902,15 +1646,19 @@ async fn proxy(
 
     // Stream response body back
     let stats_state = state.clone();
-    let stream_idx = token_idx;
+    let stream_context = codex_context.clone();
     let content_type = out_headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_ascii_lowercase());
+    let mut usage_tracker = CodexSseUsageTracker::new(stats_state.clone(), stream_context.clone());
     let stream = resp.bytes_stream().map(move |chunk| {
         if let Err(ref err) = chunk {
             error!("stream chunk error: {}", err);
-            record_error(&stats_state, stream_idx);
+            record_codex_error(&stats_state, &stream_context, "stream chunk error");
+        }
+        if let Ok(ref bytes) = chunk {
+            usage_tracker.push(bytes);
         }
         chunk.map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "stream"))
     });
@@ -941,6 +1689,72 @@ struct CompatSseState<S> {
     buffer: BytesMut,
     output_items: Vec<serde_json::Value>,
     queued: VecDeque<Bytes>,
+}
+
+struct CodexSseUsageTracker {
+    state: AppState,
+    context: UsageContext,
+    buffer: BytesMut,
+    recorded: bool,
+}
+
+impl CodexSseUsageTracker {
+    fn new(state: AppState, context: UsageContext) -> Self {
+        Self {
+            state,
+            context,
+            buffer: BytesMut::new(),
+            recorded: false,
+        }
+    }
+
+    fn push(&mut self, chunk: &Bytes) {
+        if self.recorded || !self.context.prompt.is_prompt {
+            return;
+        }
+
+        self.buffer.extend_from_slice(chunk);
+        while let Some((event_end, delimiter_len)) = find_sse_event_boundary(&self.buffer) {
+            let raw_event = self.buffer.split_to(event_end + delimiter_len);
+            let event = raw_event[..event_end].to_vec();
+            self.handle_event(&event);
+            if self.recorded {
+                break;
+            }
+        }
+    }
+
+    fn handle_event(&mut self, raw_event: &[u8]) {
+        let text = String::from_utf8_lossy(raw_event);
+        let mut data_lines = Vec::new();
+        for line in text.lines() {
+            let line = line.trim_end_matches('\r');
+            if let Some(value) = line.strip_prefix("data:") {
+                data_lines.push(value.trim_start().to_string());
+            }
+        }
+        if data_lines.is_empty() {
+            return;
+        }
+
+        let data_text = data_lines.join("\n");
+        if data_text == "[DONE]" {
+            return;
+        }
+        let value: serde_json::Value = match serde_json::from_str(&data_text) {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        if value.get("type").and_then(|v| v.as_str()) != Some("response.completed") {
+            return;
+        }
+        let Some(response) = value.get("response") else {
+            return;
+        };
+        let metrics = usage_metrics_from_response_value(response);
+        record_usage_success(&self.state, &self.context, &metrics);
+        self.recorded = true;
+    }
 }
 
 fn compat_v1_sse_stream<S>(
@@ -1150,6 +1964,340 @@ fn render_sse_event(event_name: Option<&str>, data: &str, use_crlf: bool) -> Vec
     out.into_bytes()
 }
 
+fn build_usage_stats(
+    tokens: &[UpstreamToken],
+    agw_accounts: &[target::antigravity::accounts::AntigravityAccount],
+    qwen_accounts: &[target::qwen::accounts::QwenAccount],
+    persisted_stats: &StatsStore,
+) -> UsageStats {
+    let codex_accounts = tokens
+        .iter()
+        .map(|token| {
+            let key = codex_stats_key(token);
+            let stored = persisted_stats
+                .account_usage(Provider::Codex, &key)
+                .cloned()
+                .unwrap_or_default();
+            AccountUsage {
+                key,
+                label: token.label.clone(),
+                account_id: token.account_id.clone().unwrap_or_default(),
+                requests: stored.requests,
+                errors: stored.errors,
+                prompt_total: stored.prompt_total,
+                prompt_error_total: stored.prompt_error_total,
+                input_tokens: stored.input_tokens,
+                output_tokens: stored.output_tokens,
+                total_tokens: stored.total_tokens,
+                cache_tokens: stored.cache_tokens,
+                reasoning_tokens: stored.reasoning_tokens,
+                first_seen_at: stored.first_seen_at,
+                last_seen_at: stored.last_seen_at,
+                last_success_at: stored.last_success_at,
+                last_error_at: stored.last_error_at,
+            }
+        })
+        .collect();
+
+    let agw_accounts = agw_accounts
+        .iter()
+        .map(|account| {
+            let key = antigravity_stats_key(account);
+            let stored = persisted_stats
+                .account_usage(Provider::Antigravity, &key)
+                .cloned()
+                .unwrap_or_default();
+            AccountUsage {
+                key,
+                label: account.label.clone(),
+                account_id: account.email.clone(),
+                requests: stored.requests,
+                errors: stored.errors,
+                prompt_total: stored.prompt_total,
+                prompt_error_total: stored.prompt_error_total,
+                input_tokens: stored.input_tokens,
+                output_tokens: stored.output_tokens,
+                total_tokens: stored.total_tokens,
+                cache_tokens: stored.cache_tokens,
+                reasoning_tokens: stored.reasoning_tokens,
+                first_seen_at: stored.first_seen_at,
+                last_seen_at: stored.last_seen_at,
+                last_success_at: stored.last_success_at,
+                last_error_at: stored.last_error_at,
+            }
+        })
+        .collect();
+
+    let qwen_accounts = qwen_accounts
+        .iter()
+        .map(|account| {
+            let key = qwen_stats_key(account);
+            let stored = persisted_stats
+                .account_usage(Provider::Qwen, &key)
+                .cloned()
+                .unwrap_or_default();
+            AccountUsage {
+                key,
+                label: account.label.clone(),
+                account_id: account.email.clone(),
+                requests: stored.requests,
+                errors: stored.errors,
+                prompt_total: stored.prompt_total,
+                prompt_error_total: stored.prompt_error_total,
+                input_tokens: stored.input_tokens,
+                output_tokens: stored.output_tokens,
+                total_tokens: stored.total_tokens,
+                cache_tokens: stored.cache_tokens,
+                reasoning_tokens: stored.reasoning_tokens,
+                first_seen_at: stored.first_seen_at,
+                last_seen_at: stored.last_seen_at,
+                last_success_at: stored.last_success_at,
+                last_error_at: stored.last_error_at,
+            }
+        })
+        .collect();
+
+    UsageStats {
+        codex_accounts,
+        agw_accounts,
+        qwen_accounts,
+        total_requests: persisted_stats.total_requests,
+        total_errors: persisted_stats.total_errors,
+        total_prompt_total: persisted_stats.total_prompt_total,
+        total_prompt_error_total: persisted_stats.total_prompt_error_total,
+        total_input_tokens: persisted_stats.total_input_tokens,
+        total_output_tokens: persisted_stats.total_output_tokens,
+        total_tokens_used: persisted_stats.total_tokens_used,
+        total_cache_tokens: persisted_stats.total_cache_tokens,
+        total_reasoning_tokens: persisted_stats.total_reasoning_tokens,
+        first_recorded_at: persisted_stats.first_recorded_at.clone(),
+        last_recorded_at: persisted_stats.last_recorded_at.clone(),
+    }
+}
+
+pub(crate) fn sync_usage_stats(state: &AppState) {
+    let tokens = state.tokens.lock().unwrap().clone();
+    let agw_accounts = state.agw_accounts.lock().unwrap().clone();
+    let qwen_accounts = state.qwen_accounts.lock().unwrap().clone();
+    let persisted_stats = state.persisted_stats.lock().unwrap().clone();
+    let mut stats = state.stats.lock().unwrap();
+    *stats = build_usage_stats(&tokens, &agw_accounts, &qwen_accounts, &persisted_stats);
+}
+
+pub(crate) fn codex_stats_key(token: &UpstreamToken) -> String {
+    if let Some(account_id) = token.account_id.as_ref().filter(|s| !s.trim().is_empty()) {
+        return format!("codex:account_id:{}", account_id);
+    }
+    if let Some(file_name) = token.file_name.as_ref().filter(|s| !s.trim().is_empty()) {
+        return format!("codex:file:{}", file_name);
+    }
+    format!("codex:label:{}", token.label)
+}
+
+pub(crate) fn antigravity_stats_key(
+    account: &target::antigravity::accounts::AntigravityAccount,
+) -> String {
+    if !account.email.trim().is_empty() {
+        return format!("agw:email:{}", account.email);
+    }
+    if let Some(file_name) = account.file_name.as_ref().filter(|s| !s.trim().is_empty()) {
+        return format!("agw:file:{}", file_name);
+    }
+    if let Some(project_id) = account.project_id.as_ref().filter(|s| !s.trim().is_empty()) {
+        return format!("agw:project:{}", project_id);
+    }
+    format!("agw:label:{}", account.label)
+}
+
+pub(crate) fn qwen_stats_key(account: &target::qwen::accounts::QwenAccount) -> String {
+    if let Some(subject) = account.subject.as_ref().filter(|s| !s.trim().is_empty()) {
+        return format!("qwen:subject:{}", subject);
+    }
+    if !account.email.trim().is_empty() {
+        return format!("qwen:email:{}", account.email);
+    }
+    if let Some(file_name) = account.file_name.as_ref().filter(|s| !s.trim().is_empty()) {
+        return format!("qwen:file:{}", file_name);
+    }
+    if let Some(resource_url) = account
+        .resource_url
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        return format!("qwen:resource:{}", resource_url);
+    }
+    format!("qwen:label:{}", account.label)
+}
+
+fn qwen_fallback_stats_keys(account: &target::qwen::accounts::QwenAccount) -> Vec<String> {
+    let mut keys = Vec::new();
+    if !account.email.trim().is_empty() {
+        keys.push(format!("qwen:email:{}", account.email));
+    }
+    if let Some(file_name) = account.file_name.as_ref().filter(|s| !s.trim().is_empty()) {
+        keys.push(format!("qwen:file:{}", file_name));
+    }
+    if let Some(resource_url) = account
+        .resource_url
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        keys.push(format!("qwen:resource:{}", resource_url));
+    }
+    if !account.label.trim().is_empty() {
+        keys.push(format!("qwen:label:{}", account.label));
+    }
+    keys
+}
+
+fn migrate_qwen_usage_keys(state: &AppState) {
+    let accounts = state.qwen_accounts.lock().unwrap().clone();
+    let mut changed = false;
+    {
+        let mut persisted = state.persisted_stats.lock().unwrap();
+        for account in &accounts {
+            let stable_key = qwen_stats_key(account);
+            if persisted.qwen.contains_key(&stable_key) {
+                continue;
+            }
+
+            for fallback_key in qwen_fallback_stats_keys(account) {
+                if fallback_key == stable_key {
+                    continue;
+                }
+                let Some(old_usage) = persisted.qwen.remove(&fallback_key) else {
+                    continue;
+                };
+                let entry = persisted.qwen.entry(stable_key.clone()).or_default();
+                merge_usage(entry, old_usage);
+                changed = true;
+                break;
+            }
+        }
+    }
+    if changed {
+        persist_stats_store(state);
+    }
+}
+
+fn merge_usage(
+    target: &mut stats_store::StoredAccountUsage,
+    source: stats_store::StoredAccountUsage,
+) {
+    target.label = source.label;
+    target.account_id = source.account_id;
+    target.requests += source.requests;
+    target.errors += source.errors;
+    target.prompt_total += source.prompt_total;
+    target.prompt_error_total += source.prompt_error_total;
+    target.input_tokens += source.input_tokens;
+    target.output_tokens += source.output_tokens;
+    target.total_tokens += source.total_tokens;
+    target.cache_tokens += source.cache_tokens;
+    target.reasoning_tokens += source.reasoning_tokens;
+    target.first_seen_at = earliest_timestamp(target.first_seen_at.take(), source.first_seen_at);
+    target.last_seen_at = latest_timestamp(target.last_seen_at.take(), source.last_seen_at);
+    target.last_success_at =
+        latest_timestamp(target.last_success_at.take(), source.last_success_at);
+    target.last_error_at = latest_timestamp(target.last_error_at.take(), source.last_error_at);
+}
+
+pub(crate) fn codex_usage_context(
+    token: &UpstreamToken,
+    model: Option<String>,
+    request_path: impl Into<String>,
+    prompt: PromptMetrics,
+) -> UsageContext {
+    UsageContext {
+        provider: Provider::Codex,
+        provider_name: "codex",
+        key: codex_stats_key(token),
+        label: token.label.clone(),
+        account_id: token.account_id.clone().unwrap_or_default(),
+        credential_file: token.file_name.clone(),
+        model,
+        request_path: request_path.into(),
+        prompt,
+    }
+}
+
+pub(crate) fn antigravity_usage_context(
+    account: &target::antigravity::accounts::AntigravityAccount,
+    model: Option<String>,
+    request_path: impl Into<String>,
+    prompt: PromptMetrics,
+) -> UsageContext {
+    UsageContext {
+        provider: Provider::Antigravity,
+        provider_name: "antigravity",
+        key: antigravity_stats_key(account),
+        label: account.label.clone(),
+        account_id: account.email.clone(),
+        credential_file: account.file_name.clone(),
+        model,
+        request_path: request_path.into(),
+        prompt,
+    }
+}
+
+pub(crate) fn qwen_usage_context(
+    account: &target::qwen::accounts::QwenAccount,
+    model: Option<String>,
+    request_path: impl Into<String>,
+    prompt: PromptMetrics,
+) -> UsageContext {
+    UsageContext {
+        provider: Provider::Qwen,
+        provider_name: "qwen",
+        key: qwen_stats_key(account),
+        label: account.label.clone(),
+        account_id: account
+            .subject
+            .clone()
+            .unwrap_or_else(|| account.email.clone()),
+        credential_file: account.file_name.clone(),
+        model,
+        request_path: request_path.into(),
+        prompt,
+    }
+}
+
+fn append_usage_history(state: &AppState, entry: usage_store::UsageHistoryEntry) {
+    let _guard = state.usage_history_lock.lock().unwrap();
+    if let Err(err) = usage_store::append(&state.cfg, &entry) {
+        error!("failed to append usage history: {}", err);
+    }
+}
+
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn earliest_timestamp(current: Option<String>, incoming: Option<String>) -> Option<String> {
+    match (current, incoming) {
+        (Some(current), Some(incoming)) => Some(std::cmp::min(current, incoming)),
+        (Some(current), None) => Some(current),
+        (None, Some(incoming)) => Some(incoming),
+        (None, None) => None,
+    }
+}
+
+fn latest_timestamp(current: Option<String>, incoming: Option<String>) -> Option<String> {
+    match (current, incoming) {
+        (Some(current), Some(incoming)) => Some(std::cmp::max(current, incoming)),
+        (Some(current), None) => Some(current),
+        (None, Some(incoming)) => Some(incoming),
+        (None, None) => None,
+    }
+}
+
+fn persist_stats_store(state: &AppState) {
+    let snapshot = state.persisted_stats.lock().unwrap().clone();
+    if let Err(err) = stats_store::save(&state.cfg, &snapshot) {
+        error!("failed to persist usage stats: {}", err);
+    }
+}
+
 fn check_api_key(headers: &HeaderMap, expected: &str) -> bool {
     let auth = headers
         .get("authorization")
@@ -1179,20 +2327,223 @@ fn pick_token(state: &AppState) -> Option<(usize, UpstreamToken)> {
     None
 }
 
-fn record_request(state: &AppState, idx: usize) {
-    let mut stats = state.stats.lock().unwrap();
-    stats.total_requests += 1;
-    if let Some(a) = stats.per_account.get_mut(idx) {
-        a.requests += 1;
+fn update_account_counters(
+    state: &AppState,
+    provider: Provider,
+    key: String,
+    label: String,
+    account_id: String,
+    delta: CounterDelta,
+) {
+    {
+        let mut persisted = state.persisted_stats.lock().unwrap();
+        if delta.request_delta > 0 {
+            persisted.total_requests += delta.request_delta;
+        }
+        if delta.error_delta > 0 {
+            persisted.total_errors += delta.error_delta;
+        }
+        persisted.total_prompt_total += delta.prompt_total_delta;
+        persisted.total_prompt_error_total += delta.prompt_error_total_delta;
+        persisted.total_input_tokens += delta.input_tokens_delta;
+        persisted.total_output_tokens += delta.output_tokens_delta;
+        persisted.total_tokens_used += delta.total_tokens_delta;
+        persisted.total_cache_tokens += delta.cache_tokens_delta;
+        persisted.total_reasoning_tokens += delta.reasoning_tokens_delta;
+        if let Some(observed_at) = delta.observed_at.clone() {
+            if persisted.first_recorded_at.is_none() {
+                persisted.first_recorded_at = Some(observed_at.clone());
+            }
+            persisted.last_recorded_at = Some(observed_at);
+        }
+        let entry = persisted.account_usage_mut(provider, key);
+        entry.label = label;
+        entry.account_id = account_id;
+        entry.requests += delta.request_delta;
+        entry.errors += delta.error_delta;
+        entry.prompt_total += delta.prompt_total_delta;
+        entry.prompt_error_total += delta.prompt_error_total_delta;
+        entry.input_tokens += delta.input_tokens_delta;
+        entry.output_tokens += delta.output_tokens_delta;
+        entry.total_tokens += delta.total_tokens_delta;
+        entry.cache_tokens += delta.cache_tokens_delta;
+        entry.reasoning_tokens += delta.reasoning_tokens_delta;
+        if let Some(observed_at) = delta.observed_at {
+            if entry.first_seen_at.is_none() {
+                entry.first_seen_at = Some(observed_at.clone());
+            }
+            entry.last_seen_at = Some(observed_at);
+        }
+        if let Some(success_at) = delta.success_at {
+            entry.last_success_at = Some(success_at);
+        }
+        if let Some(error_at) = delta.error_at {
+            entry.last_error_at = Some(error_at);
+        }
+    }
+    persist_stats_store(state);
+    sync_usage_stats(state);
+}
+
+fn record_request_started(state: &AppState, context: &UsageContext) {
+    update_account_counters(
+        state,
+        context.provider,
+        context.key.clone(),
+        context.label.clone(),
+        context.account_id.clone(),
+        CounterDelta {
+            request_delta: 1,
+            prompt_total_delta: if context.prompt.is_prompt { 1 } else { 0 },
+            observed_at: Some(now_rfc3339()),
+            ..Default::default()
+        },
+    );
+}
+
+fn record_request_error(state: &AppState, context: &UsageContext, message: impl Into<String>) {
+    let observed_at = now_rfc3339();
+    update_account_counters(
+        state,
+        context.provider,
+        context.key.clone(),
+        context.label.clone(),
+        context.account_id.clone(),
+        CounterDelta {
+            error_delta: 1,
+            prompt_error_total_delta: if context.prompt.is_prompt { 1 } else { 0 },
+            observed_at: Some(observed_at.clone()),
+            error_at: Some(observed_at.clone()),
+            ..Default::default()
+        },
+    );
+    if context.prompt.is_prompt {
+        append_usage_history(
+            state,
+            usage_store::UsageHistoryEntry {
+                recorded_at: observed_at,
+                provider: context.provider_name.to_string(),
+                account_key: context.key.clone(),
+                account_label: context.label.clone(),
+                account_id: context.account_id.clone(),
+                credential_file: context.credential_file.clone(),
+                model: context.model.clone(),
+                request_path: context.request_path.clone(),
+                success: false,
+                error: true,
+                request_total: 1,
+                prompt_total: 1,
+                prompt_error_total: 1,
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                cache_tokens: 0,
+                reasoning_tokens: 0,
+                input_chars: context.prompt.input_chars,
+                prompt_items: context.prompt.prompt_items,
+                error_message: Some(message.into()),
+                raw_usage: None,
+            },
+        );
     }
 }
 
-fn record_error(state: &AppState, idx: usize) {
-    let mut stats = state.stats.lock().unwrap();
-    stats.total_errors += 1;
-    if let Some(a) = stats.per_account.get_mut(idx) {
-        a.errors += 1;
+fn record_usage_success(state: &AppState, context: &UsageContext, metrics: &UsageMetrics) {
+    let observed_at = now_rfc3339();
+    update_account_counters(
+        state,
+        context.provider,
+        context.key.clone(),
+        context.label.clone(),
+        context.account_id.clone(),
+        CounterDelta {
+            input_tokens_delta: metrics.input_tokens,
+            output_tokens_delta: metrics.output_tokens,
+            total_tokens_delta: metrics.total_tokens,
+            cache_tokens_delta: metrics.cache_tokens,
+            reasoning_tokens_delta: metrics.reasoning_tokens,
+            observed_at: Some(observed_at.clone()),
+            success_at: Some(observed_at.clone()),
+            ..Default::default()
+        },
+    );
+    if context.prompt.is_prompt {
+        append_usage_history(
+            state,
+            usage_store::UsageHistoryEntry {
+                recorded_at: observed_at,
+                provider: context.provider_name.to_string(),
+                account_key: context.key.clone(),
+                account_label: context.label.clone(),
+                account_id: context.account_id.clone(),
+                credential_file: context.credential_file.clone(),
+                model: context.model.clone(),
+                request_path: context.request_path.clone(),
+                success: true,
+                error: false,
+                request_total: 1,
+                prompt_total: 1,
+                prompt_error_total: 0,
+                input_tokens: metrics.input_tokens,
+                output_tokens: metrics.output_tokens,
+                total_tokens: metrics.total_tokens,
+                cache_tokens: metrics.cache_tokens,
+                reasoning_tokens: metrics.reasoning_tokens,
+                input_chars: context.prompt.input_chars,
+                prompt_items: context.prompt.prompt_items,
+                error_message: None,
+                raw_usage: metrics.raw_usage.clone(),
+            },
+        );
     }
+}
+
+fn record_codex_request(state: &AppState, context: &UsageContext) {
+    record_request_started(state, context);
+}
+
+fn record_codex_error(state: &AppState, context: &UsageContext, message: impl Into<String>) {
+    record_request_error(state, context, message);
+}
+
+pub(crate) fn record_antigravity_request(state: &AppState, context: &UsageContext) {
+    record_request_started(state, context);
+}
+
+pub(crate) fn record_antigravity_error(
+    state: &AppState,
+    context: &UsageContext,
+    message: impl Into<String>,
+) {
+    record_request_error(state, context, message);
+}
+
+pub(crate) fn record_antigravity_success(
+    state: &AppState,
+    context: &UsageContext,
+    metrics: &UsageMetrics,
+) {
+    record_usage_success(state, context, metrics);
+}
+
+pub(crate) fn record_qwen_request(state: &AppState, context: &UsageContext) {
+    record_request_started(state, context);
+}
+
+pub(crate) fn record_qwen_error(
+    state: &AppState,
+    context: &UsageContext,
+    message: impl Into<String>,
+) {
+    record_request_error(state, context, message);
+}
+
+pub(crate) fn record_qwen_success(
+    state: &AppState,
+    context: &UsageContext,
+    metrics: &UsageMetrics,
+) {
+    record_usage_success(state, context, metrics);
 }
 
 fn is_hop_header(name: &str) -> bool {

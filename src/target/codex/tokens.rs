@@ -116,23 +116,10 @@ pub fn reload_state(state: &crate::AppState) {
         *tlock = tokens.clone();
     }
     {
-        let mut stats = state.stats.lock().unwrap();
-        stats.per_account = tokens
-            .iter()
-            .map(|t| crate::AccountUsage {
-                label: t.label.clone(),
-                account_id: t.account_id.clone().unwrap_or_default(),
-                requests: 0,
-                errors: 0,
-            })
-            .collect();
-        stats.total_requests = 0;
-        stats.total_errors = 0;
-    }
-    {
         let mut cache = state.quota_cache.lock().unwrap();
         *cache = vec![None; tokens.len()];
     }
+    crate::sync_usage_stats(state);
 }
 
 fn parse_jwt_subscription_until(id_token: &str) -> Option<String> {

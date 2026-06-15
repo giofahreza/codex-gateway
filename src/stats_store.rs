@@ -1,0 +1,146 @@
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, path::PathBuf};
+
+#[derive(Clone, Copy)]
+pub enum Provider {
+    Codex,
+    Antigravity,
+    Qwen,
+}
+
+#[derive(Default, Clone, Serialize, Deserialize)]
+pub struct StoredAccountUsage {
+    pub label: String,
+    pub account_id: String,
+    pub requests: u64,
+    pub errors: u64,
+    #[serde(default)]
+    pub prompt_total: u64,
+    #[serde(default)]
+    pub prompt_error_total: u64,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default)]
+    pub cache_tokens: u64,
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+    #[serde(default)]
+    pub first_seen_at: Option<String>,
+    #[serde(default)]
+    pub last_seen_at: Option<String>,
+    #[serde(default)]
+    pub last_success_at: Option<String>,
+    #[serde(default)]
+    pub last_error_at: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct StatsStore {
+    #[serde(default = "default_store_type", rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub total_requests: u64,
+    #[serde(default)]
+    pub total_errors: u64,
+    #[serde(default)]
+    pub total_prompt_total: u64,
+    #[serde(default)]
+    pub total_prompt_error_total: u64,
+    #[serde(default)]
+    pub total_input_tokens: u64,
+    #[serde(default)]
+    pub total_output_tokens: u64,
+    #[serde(default)]
+    pub total_tokens_used: u64,
+    #[serde(default)]
+    pub total_cache_tokens: u64,
+    #[serde(default)]
+    pub total_reasoning_tokens: u64,
+    #[serde(default)]
+    pub first_recorded_at: Option<String>,
+    #[serde(default)]
+    pub last_recorded_at: Option<String>,
+    #[serde(default)]
+    pub codex: HashMap<String, StoredAccountUsage>,
+    #[serde(default)]
+    pub antigravity: HashMap<String, StoredAccountUsage>,
+    #[serde(default)]
+    pub qwen: HashMap<String, StoredAccountUsage>,
+}
+
+impl Default for StatsStore {
+    fn default() -> Self {
+        Self {
+            kind: default_store_type(),
+            total_requests: 0,
+            total_errors: 0,
+            total_prompt_total: 0,
+            total_prompt_error_total: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_tokens_used: 0,
+            total_cache_tokens: 0,
+            total_reasoning_tokens: 0,
+            first_recorded_at: None,
+            last_recorded_at: None,
+            codex: HashMap::new(),
+            antigravity: HashMap::new(),
+            qwen: HashMap::new(),
+        }
+    }
+}
+
+impl StatsStore {
+    pub fn account_usage(&self, provider: Provider, key: &str) -> Option<&StoredAccountUsage> {
+        match provider {
+            Provider::Codex => self.codex.get(key),
+            Provider::Antigravity => self.antigravity.get(key),
+            Provider::Qwen => self.qwen.get(key),
+        }
+    }
+
+    pub fn account_usage_mut(
+        &mut self,
+        provider: Provider,
+        key: String,
+    ) -> &mut StoredAccountUsage {
+        match provider {
+            Provider::Codex => self.codex.entry(key).or_default(),
+            Provider::Antigravity => self.antigravity.entry(key).or_default(),
+            Provider::Qwen => self.qwen.entry(key).or_default(),
+        }
+    }
+}
+
+pub fn load(cfg: &crate::Config) -> StatsStore {
+    let path = file_path(cfg);
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return StatsStore::default();
+    };
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+pub fn save(cfg: &crate::Config, store: &StatsStore) -> Result<(), String> {
+    let path = file_path(cfg);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(store).unwrap()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+fn file_path(cfg: &crate::Config) -> PathBuf {
+    if let Some(dir) = cfg.auth_dir.as_ref() {
+        return PathBuf::from(dir).join("gateway-stats.json");
+    }
+    PathBuf::from("gateway-stats.json")
+}
+
+fn default_store_type() -> String {
+    "gateway_stats".to_string()
+}
