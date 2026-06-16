@@ -329,12 +329,13 @@ async fn dashboard() -> impl IntoResponse {
       * { box-sizing: border-box; }
       body {
         font-family: Arial, sans-serif;
-        margin: 24px;
+        margin: 0;
         font-size: 16px;
         min-height: 100vh;
         background: var(--bg);
         color: var(--text);
       }
+      .page-shell { padding: 24px; }
       h1 { margin: 0 0 12px 0; }
       h2 { margin: 0; }
       table { border-collapse: collapse; width: 100%; background: var(--surface); }
@@ -509,7 +510,8 @@ async fn dashboard() -> impl IntoResponse {
         box-shadow: 0 4px 12px rgba(0,0,0,0.25);
       }
       @media (max-width: 768px) {
-        body { margin: 12px; font-size: 17px; }
+        body { font-size: 17px; }
+        .page-shell { padding: 12px; }
         h1 { font-size: 22px; }
         th, td { padding: 10px; font-size: 15px; }
         .muted { font-size: 13px; }
@@ -540,65 +542,67 @@ async fn dashboard() -> impl IntoResponse {
     </script>
   </head>
   <body>
-    <h1 class="page-header">
-      <span>Codex Gateway Usage</span>
-      <span class="header-actions">
-        <button type="button" id="themeToggleBtn" class="secondary-button">Theme: Dark</button>
-        <button id="addAccountBtn">Add account</button>
-      </span>
-    </h1>
-    <div id="totals" class="muted"></div>
-    <div class="table-wrap">
-      <table>
-      <thead>
-        <tr>
-          <th>Account</th>
-          <th>Code Gen</th>
-          <th>Code Review</th>
-          <th>Expired At</th>
-        </tr>
-      </thead>
-      <tbody id="rows"></tbody>
-      </table>
-    </div>
-    <div class="section">
-      <h2 class="section-header">
-        <span>Antigravity Accounts</span>
-        <button id="addAgwAccountBtn">Add Antigravity</button>
-      </h2>
-      <div class="muted panel-note">Use these accounts through <code>/agw/v1/*</code>. This is the minimal Antigravity path added beside the existing Codex gateway.</div>
+    <div class="page-shell">
+      <h1 class="page-header">
+        <span>Codex Gateway Usage</span>
+        <span class="header-actions">
+          <button type="button" id="themeToggleBtn" class="secondary-button">Theme: Dark</button>
+          <button id="addAccountBtn">Add account</button>
+        </span>
+      </h1>
+      <div id="totals" class="muted"></div>
       <div class="table-wrap">
         <table>
         <thead>
           <tr>
             <th>Account</th>
-            <th>Tier</th>
-            <th>Gemini Limits</th>
-            <th>Claude/GPT Limits</th>
-            <th>Access Token Expires</th>
+            <th>Code Gen</th>
+            <th>Code Review</th>
+            <th>Expired At</th>
           </tr>
         </thead>
-        <tbody id="agwRows"></tbody>
+        <tbody id="rows"></tbody>
         </table>
       </div>
-    </div>
-    <div class="section">
-      <h2 class="section-header">
-        <span>Qwen Accounts</span>
-        <button id="addQwenAccountBtn">Add Qwen</button>
-      </h2>
-      <div class="muted panel-note">Use these accounts through <code>/qwen/v1/*</code>. Qwen login here uses the upstream device flow and polls automatically after you approve it in the browser.</div>
-      <div class="table-wrap">
-        <table>
-        <thead>
-          <tr>
-            <th>Account</th>
-            <th>Resource</th>
-            <th>Access Token Expires</th>
-          </tr>
-        </thead>
-        <tbody id="qwenRows"></tbody>
-        </table>
+      <div class="section">
+        <h2 class="section-header">
+          <span>Antigravity Accounts</span>
+          <button id="addAgwAccountBtn">Add Antigravity</button>
+        </h2>
+        <div class="muted panel-note">Use these accounts through <code>/agw/v1/*</code>. This is the minimal Antigravity path added beside the existing Codex gateway.</div>
+        <div class="table-wrap">
+          <table>
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Tier</th>
+              <th>Gemini Limits</th>
+              <th>Claude/GPT Limits</th>
+              <th>Access Token Expires</th>
+            </tr>
+          </thead>
+          <tbody id="agwRows"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="section">
+        <h2 class="section-header">
+          <span>Qwen Accounts</span>
+          <button id="addQwenAccountBtn">Add Qwen</button>
+        </h2>
+        <div class="muted panel-note">Use these accounts through <code>/qwen/v1/*</code>. Qwen login here uses the upstream device flow and polls automatically after you approve it in the browser.</div>
+        <div class="table-wrap">
+          <table>
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Resource</th>
+              <th>Access Token Expires</th>
+            </tr>
+          </thead>
+          <tbody id="qwenRows"></tbody>
+          </table>
+        </div>
       </div>
     </div>
     <script>
