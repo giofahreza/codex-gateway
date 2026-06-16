@@ -282,20 +282,224 @@ async fn dashboard() -> impl IntoResponse {
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Codex Gateway Dashboard</title>
     <style>
-      :root { color-scheme: light; }
-      body { font-family: Arial, sans-serif; margin: 24px; font-size: 16px; }
+      :root {
+        color-scheme: dark;
+        --bg: #09111f;
+        --surface: #111b2e;
+        --surface-alt: #182338;
+        --surface-raised: #0f1729;
+        --border: #25314a;
+        --text: #ecf2ff;
+        --muted: #94a3b8;
+        --button-bg: #3b82f6;
+        --button-hover: #2563eb;
+        --button-text: #eff6ff;
+        --secondary-bg: #182338;
+        --secondary-hover: #22304a;
+        --secondary-text: #dbe7ff;
+        --code-bg: rgba(15, 23, 42, 0.85);
+        --overlay: rgba(2, 6, 23, 0.72);
+        --row-hover: rgba(148, 163, 184, 0.08);
+        --tip-bg: #e2e8f0;
+        --tip-text: #0f172a;
+        --shadow: 0 18px 40px rgba(2, 6, 23, 0.34);
+      }
+      :root[data-theme="light"] {
+        color-scheme: light;
+        --bg: #f3f6fb;
+        --surface: #ffffff;
+        --surface-alt: #eef2f7;
+        --surface-raised: #f8fafc;
+        --border: #d5ddeb;
+        --text: #111827;
+        --muted: #5b6474;
+        --button-bg: #111827;
+        --button-hover: #1f2937;
+        --button-text: #f9fafb;
+        --secondary-bg: #ffffff;
+        --secondary-hover: #eef2f7;
+        --secondary-text: #111827;
+        --code-bg: #edf2f8;
+        --overlay: rgba(15, 23, 42, 0.45);
+        --row-hover: rgba(15, 23, 42, 0.05);
+        --tip-bg: #111827;
+        --tip-text: #f8fafc;
+        --shadow: 0 18px 40px rgba(15, 23, 42, 0.12);
+      }
+      * { box-sizing: border-box; }
+      body {
+        font-family: Arial, sans-serif;
+        margin: 24px;
+        font-size: 16px;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+      }
       h1 { margin: 0 0 12px 0; }
-      table { border-collapse: collapse; width: 100%; }
-      th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-      th { background: #f2f2f2; }
-      .muted { color: #666; font-size: 12px; }
+      h2 { margin: 0; }
+      table { border-collapse: collapse; width: 100%; background: var(--surface); }
+      th, td { border: 1px solid var(--border); padding: 8px; text-align: left; }
+      th { background: var(--surface-alt); }
+      code, pre {
+        background: var(--code-bg);
+        color: var(--text);
+      }
+      code {
+        padding: 2px 6px;
+        border-radius: 6px;
+      }
+      pre {
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+      }
+      button, input {
+        font-size: 14px;
+        font-family: inherit;
+      }
+      button {
+        border: 1px solid transparent;
+        background: var(--button-bg);
+        color: var(--button-text);
+        padding: 9px 14px;
+        border-radius: 10px;
+        cursor: pointer;
+      }
+      button:hover {
+        background: var(--button-hover);
+      }
+      input {
+        width: min(100%, 560px);
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--text);
+      }
+      input::placeholder { color: var(--muted); }
+      label {
+        display: block;
+        font-weight: 600;
+      }
+      .page-header,
+      .section-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .section-header { margin-bottom: 8px; }
+      .header-actions,
+      .modal-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .section { margin-top: 28px; }
+      .table-wrap {
+        overflow-x: auto;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        box-shadow: var(--shadow);
+        background: var(--surface);
+      }
+      .muted { color: var(--muted); font-size: 12px; }
       .stacked { line-height: 1.35; white-space: nowrap; }
       .weekly-line { font-size: calc(1em - 4px); }
-      input, button { font-size: 14px; }
+      .row-label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        width: 100%;
+      }
+      .count-pill,
+      .expander {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .count-pill { margin-left: auto; }
+      .expander {
+        min-width: 12px;
+        text-align: center;
+      }
+      .help-trigger { cursor: help; }
+      .secondary-button {
+        background: var(--secondary-bg);
+        color: var(--secondary-text);
+        border-color: var(--border);
+      }
+      .secondary-button:hover { background: var(--secondary-hover); }
+      .dot-button,
+      .dot-indicator {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+      }
+      .dot-button {
+        border: none;
+        padding: 0;
+        min-width: 10px;
+      }
+      .dot-button:hover {
+        opacity: 0.85;
+      }
+      .icon-button {
+        border: none;
+        background: transparent;
+        color: var(--muted);
+        padding: 0 0 0 4px;
+        line-height: 1;
+      }
+      .icon-button:hover {
+        background: transparent;
+        color: var(--text);
+      }
+      .clickable-row { cursor: pointer; }
+      .clickable-row:hover { background: var(--row-hover); }
+      .detail-row > td { padding: 0; }
+      .detail-panel {
+        padding: 12px 10px 14px 10px;
+        background: var(--surface-raised);
+      }
+      .detail-table-wrap {
+        overflow-x: auto;
+        margin-top: 8px;
+        width: 100%;
+      }
+      .detail-table {
+        width: 100%;
+        min-width: 560px;
+      }
+      .modal {
+        position: fixed;
+        inset: 0;
+        background: var(--overlay);
+        padding: 24px 12px;
+      }
+      .modal-card {
+        background: var(--surface);
+        max-width: 720px;
+        margin: 8% auto;
+        padding: 16px;
+        border-radius: 16px;
+        max-height: 80vh;
+        overflow: auto;
+        border: 1px solid var(--border);
+        box-shadow: var(--shadow);
+      }
+      .panel-note { margin-bottom: 8px; }
+      .auth-url {
+        display: none;
+        white-space: pre-wrap;
+        word-break: break-all;
+        overflow-wrap: anywhere;
+      }
       .tap-tip {
         position: absolute;
-        background: #111827;
-        color: #fff;
+        background: var(--tip-bg);
+        color: var(--tip-text);
         border-radius: 6px;
         padding: 6px 8px;
         font-size: 12px;
@@ -310,16 +514,41 @@ async fn dashboard() -> impl IntoResponse {
         th, td { padding: 10px; font-size: 15px; }
         .muted { font-size: 13px; }
         input, button { font-size: 16px; }
+        .page-header,
+        .section-header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .modal {
+          padding: 12px;
+        }
+        .modal-card {
+          margin: 0 auto;
+          max-height: calc(100vh - 24px);
+        }
       }
     </style>
+    <script>
+      (() => {
+        try {
+          const savedTheme = localStorage.getItem('gpt-gateway-theme');
+          document.documentElement.setAttribute('data-theme', savedTheme === 'light' ? 'light' : 'dark');
+        } catch (_) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
+      })();
+    </script>
   </head>
   <body>
-    <h1 style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+    <h1 class="page-header">
       <span>Codex Gateway Usage</span>
-      <button id="addAccountBtn">Add account</button>
+      <span class="header-actions">
+        <button type="button" id="themeToggleBtn" class="secondary-button">Theme: Dark</button>
+        <button id="addAccountBtn">Add account</button>
+      </span>
     </h1>
     <div id="totals" class="muted"></div>
-    <div style="overflow-x:auto;">
+    <div class="table-wrap">
       <table>
       <thead>
         <tr>
@@ -332,13 +561,13 @@ async fn dashboard() -> impl IntoResponse {
       <tbody id="rows"></tbody>
       </table>
     </div>
-    <div style="margin-top:28px;">
-      <h2 style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;">
+    <div class="section">
+      <h2 class="section-header">
         <span>Antigravity Accounts</span>
         <button id="addAgwAccountBtn">Add Antigravity</button>
       </h2>
-      <div class="muted" style="margin-bottom:8px;">Use these accounts through <code>/agw/v1/*</code>. This is the minimal Antigravity path added beside the existing Codex gateway.</div>
-      <div style="overflow-x:auto;">
+      <div class="muted panel-note">Use these accounts through <code>/agw/v1/*</code>. This is the minimal Antigravity path added beside the existing Codex gateway.</div>
+      <div class="table-wrap">
         <table>
         <thead>
           <tr>
@@ -353,13 +582,13 @@ async fn dashboard() -> impl IntoResponse {
         </table>
       </div>
     </div>
-    <div style="margin-top:28px;">
-      <h2 style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;">
+    <div class="section">
+      <h2 class="section-header">
         <span>Qwen Accounts</span>
         <button id="addQwenAccountBtn">Add Qwen</button>
       </h2>
-      <div class="muted" style="margin-bottom:8px;">Use these accounts through <code>/qwen/v1/*</code>. Qwen login here uses the upstream device flow and polls automatically after you approve it in the browser.</div>
-      <div style="overflow-x:auto;">
+      <div class="muted panel-note">Use these accounts through <code>/qwen/v1/*</code>. Qwen login here uses the upstream device flow and polls automatically after you approve it in the browser.</div>
+      <div class="table-wrap">
         <table>
         <thead>
           <tr>
@@ -380,6 +609,43 @@ async fn dashboard() -> impl IntoResponse {
       let qwenLoginState = null;
       let activeTipEl = null;
       let activeTipTimer = null;
+      const THEME_KEY = 'gpt-gateway-theme';
+      function normalizeTheme(theme) {
+        return theme === 'light' ? 'light' : 'dark';
+      }
+      function readStoredTheme() {
+        try {
+          return localStorage.getItem(THEME_KEY);
+        } catch (_) {
+          return null;
+        }
+      }
+      function writeStoredTheme(theme) {
+        try {
+          localStorage.setItem(THEME_KEY, theme);
+        } catch (_) {}
+      }
+      function setThemeToggleLabel(theme) {
+        const btn = document.getElementById('themeToggleBtn');
+        if (!btn) return;
+        btn.textContent = theme === 'light' ? 'Theme: Light' : 'Theme: Dark';
+      }
+      function applyTheme(theme) {
+        const resolved = normalizeTheme(theme);
+        document.documentElement.setAttribute('data-theme', resolved);
+        setThemeToggleLabel(resolved);
+        return resolved;
+      }
+      function loadTheme() {
+        return applyTheme(readStoredTheme());
+      }
+      function toggleTheme() {
+        const current = normalizeTheme(document.documentElement.getAttribute('data-theme'));
+        const next = current === 'dark' ? 'light' : 'dark';
+        writeStoredTheme(next);
+        applyTheme(next);
+      }
+      loadTheme();
       function showTapTip(el, ev) {
         if (ev) {
           ev.preventDefault();
@@ -438,13 +704,13 @@ async fn dashboard() -> impl IntoResponse {
           const dot = a.enabled ? '#2ecc71' : '#e74c3c';
           const key = a.file_name || a.label;
           const toggleControl = a.file_name
-            ? `<button title="${toggleLabel}" onclick="toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${dot};border:none;padding:0;cursor:pointer;"></button>`
-            : `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${dot};"></span>`;
+            ? `<button title="${toggleLabel}" onclick="toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" class="dot-button" style="background:${dot};"></button>`
+            : `<span class="dot-indicator" style="background:${dot};"></span>`;
           const deleteControl = a.file_name
-            ? `<button title="Delete" onclick="deleteCred('${a.file_name}')" style="border:none;background:transparent;cursor:pointer;padding:0 0 0 4px;line-height:1;">&#128465;</button>`
+            ? `<button title="Delete" onclick="deleteCred('${a.file_name}')" class="icon-button">&#128465;</button>`
             : '';
           const expiredAt = a.expired_at || '-';
-          const label = `<span style="display:flex;align-items:center;gap:6px;width:100%;">${toggleControl}${deleteControl}<span data-tip="Account ID: ${a.account_id || ''} | Expired at: ${expiredAt}" title="Account ID: ${a.account_id || ''} | Expired at: ${expiredAt}" onclick="showTapTip(this, event)" style="cursor:help;">${a.label}</span><span style="margin-left:auto;color:#666;font-size:12px;">(${a.requests}/${a.errors})</span></span>`;
+          const label = `<span class="row-label">${toggleControl}${deleteControl}<span data-tip="Account ID: ${a.account_id || ''} | Expired at: ${expiredAt}" title="Account ID: ${a.account_id || ''} | Expired at: ${expiredAt}" onclick="showTapTip(this, event)" class="help-trigger">${a.label}</span><span class="count-pill">(${a.requests}/${a.errors})</span></span>`;
           const q = lastQuota.get(key);
           const qcg5 = q?.code_generation?.five_hour;
           const qcgw = q?.code_generation?.weekly;
@@ -523,13 +789,13 @@ async fn dashboard() -> impl IntoResponse {
             'Token expires: ' + (a.expired_at || '-')
           ].join(' | ');
           const toggleControl = a.file_name
-            ? `<button title="${toggleLabel}" onclick="event.stopPropagation();toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${dot};border:none;padding:0;cursor:pointer;"></button>`
-            : `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${dot};"></span>`;
+            ? `<button title="${toggleLabel}" onclick="event.stopPropagation();toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" class="dot-button" style="background:${dot};"></button>`
+            : `<span class="dot-indicator" style="background:${dot};"></span>`;
           const deleteControl = a.file_name
-            ? `<button title="Delete" onclick="event.stopPropagation();deleteCred('${a.file_name}')" style="border:none;background:transparent;cursor:pointer;padding:0 0 0 4px;line-height:1;">&#128465;</button>`
+            ? `<button title="Delete" onclick="event.stopPropagation();deleteCred('${a.file_name}')" class="icon-button">&#128465;</button>`
             : '';
           const tierLabel = q?.tier_name
-            ? `<span data-tip="${tierTip}" title="${tierTip}" onclick="showTapTip(this, event)" style="cursor:help;">${q.tier_name}</span>`
+            ? `<span data-tip="${tierTip}" title="${tierTip}" onclick="showTapTip(this, event)" class="help-trigger">${q.tier_name}</span>`
             : '-';
           const expandGlyph = hasModelRows ? (isOpen ? '&#9662;' : '&#9656;') : '';
           const modelRows = models.map(m => {
@@ -538,18 +804,18 @@ async fn dashboard() -> impl IntoResponse {
               : '';
             return '<tr>' +
               '<td>' + (m.display_name || m.model_id) + '</td>' +
-              '<td><span data-tip="' + currentTip + '" title="' + currentTip + '" onclick="showTapTip(this, event)" style="cursor:help;">' + fmtAgw(m.current) + '</span></td>' +
+              '<td><span data-tip="' + currentTip + '" title="' + currentTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + fmtAgw(m.current) + '</span></td>' +
               '<td>' + fmtAgw(m.five_hour) + '</td>' +
               '<td>' + fmtAgw(m.weekly) + '</td>' +
             '</tr>';
           }).join('');
           const detailRow = modelRows
-            ? '<tr style="display:' + (isOpen ? 'table-row' : 'none') + ';background:#fafafa;">' +
-                '<td colspan="5" style="padding:0;">' +
-                  '<div style="padding:12px 10px 14px 10px;">' +
+            ? '<tr class="detail-row" style="display:' + (isOpen ? 'table-row' : 'none') + ';">' +
+                '<td colspan="5">' +
+                  '<div class="detail-panel">' +
                     '<div class="muted">Current is the model-specific bucket from Antigravity. 5h and Weekly are the shared group limits Antigravity reports for that model family.</div>' +
-                    '<div style="overflow-x:auto;margin-top:8px;width:100%;">' +
-                      '<table style="width:100%;min-width:560px;">' +
+                    '<div class="detail-table-wrap">' +
+                      '<table class="detail-table">' +
                         '<thead><tr><th>Model</th><th>Current</th><th>5h</th><th>Weekly</th></tr></thead>' +
                         '<tbody>' + modelRows + '</tbody>' +
                       '</table>' +
@@ -559,9 +825,9 @@ async fn dashboard() -> impl IntoResponse {
               '</tr>'
             : '';
           const summaryRow = '<tr' +
-            (hasModelRows ? ` onclick="toggleAgwModelRow('${key}')" style="cursor:pointer;"` : '') +
+            (hasModelRows ? ` onclick="toggleAgwModelRow('${key}')" class="clickable-row"` : '') +
           '>' +
-            '<td><span style="display:flex;align-items:center;gap:6px;">' + toggleControl + deleteControl + '<span style="color:#666;min-width:12px;text-align:center;">' + expandGlyph + '</span><span data-tip="' + accountTip + '" title="' + accountTip + '" onclick="showTapTip(this, event)" style="cursor:help;">' + a.label + '</span><span style="margin-left:auto;color:#666;font-size:12px;">(' + (a.requests || 0) + '/' + (a.errors || 0) + ')</span></span><div class="muted">project: ' + (a.project_id || '-') + (hasModelRows ? ' | click row to expand' : '') + '</div></td>' +
+            '<td><span class="row-label">' + toggleControl + deleteControl + '<span class="expander">' + expandGlyph + '</span><span data-tip="' + accountTip + '" title="' + accountTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + a.label + '</span><span class="count-pill">(' + (a.requests || 0) + '/' + (a.errors || 0) + ')</span></span><div class="muted">project: ' + (a.project_id || '-') + (hasModelRows ? ' | click row to expand' : '') + '</div></td>' +
             '<td>' + tierLabel + (q?.tier_id ? '<div class="muted">' + q.tier_id + '</div>' : '') + '</td>' +
             '<td class="stacked">5h: ' + fmtAgw(gemini.five_hour) + '<br><span class="weekly-line">Weekly: ' + fmtAgw(gemini.weekly) + '</span></td>' +
             '<td class="stacked">5h: ' + fmtAgw(thirdParty.five_hour) + '<br><span class="weekly-line">Weekly: ' + fmtAgw(thirdParty.weekly) + '</span></td>' +
@@ -594,13 +860,13 @@ async fn dashboard() -> impl IntoResponse {
             'Token expires: ' + (a.expired_at || '-')
           ].join(' | ');
           const toggleControl = a.file_name
-            ? `<button title="${toggleLabel}" onclick="toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${dot};border:none;padding:0;cursor:pointer;"></button>`
-            : `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${dot};"></span>`;
+            ? `<button title="${toggleLabel}" onclick="toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" class="dot-button" style="background:${dot};"></button>`
+            : `<span class="dot-indicator" style="background:${dot};"></span>`;
           const deleteControl = a.file_name
-            ? `<button title="Delete" onclick="deleteCred('${a.file_name}')" style="border:none;background:transparent;cursor:pointer;padding:0 0 0 4px;line-height:1;">&#128465;</button>`
+            ? `<button title="Delete" onclick="deleteCred('${a.file_name}')" class="icon-button">&#128465;</button>`
             : '';
           return '<tr>' +
-            '<td><span style="display:flex;align-items:center;gap:6px;">' + toggleControl + deleteControl + '<span data-tip="' + accountTip + '" title="' + accountTip + '" onclick="showTapTip(this, event)" style="cursor:help;">' + a.label + '</span><span style="margin-left:auto;color:#666;font-size:12px;">(' + (a.requests || 0) + '/' + (a.errors || 0) + ')</span></span></td>' +
+            '<td><span class="row-label">' + toggleControl + deleteControl + '<span data-tip="' + accountTip + '" title="' + accountTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + a.label + '</span><span class="count-pill">(' + (a.requests || 0) + '/' + (a.errors || 0) + ')</span></span></td>' +
             '<td><code>' + resource + '</code></td>' +
             '<td>' + (a.expired_at || '-') + '</td>' +
           '</tr>';
@@ -617,45 +883,51 @@ async fn dashboard() -> impl IntoResponse {
       setInterval(refreshAgwAccounts, 10000);
       setInterval(refreshQwenAccounts, 10000);
     </script>
-    <div id="addModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);">
-      <div style="background:#fff;max-width:720px;margin:8% auto;padding:16px;border-radius:8px;max-height:80vh;overflow:auto;">
+    <div id="addModal" class="modal" style="display:none;">
+      <div class="modal-card">
         <h2 style="margin-top:0;">Add Codex Account</h2>
         <p>Click start, open the URL in a new tab, complete login, then paste the callback URL below.</p>
         <button onclick="startLogin()">Start Login</button>
         <div id="status" class="muted" style="margin-top:8px;"></div>
-        <pre id="authUrl" style="display:none;white-space:pre-wrap;word-break:break-all;overflow-wrap:anywhere;"></pre>
+        <pre id="authUrl" class="auth-url"></pre>
         <form id="loginForm" style="margin-top:16px;">
           <label>Callback URL</label>
           <input name="redirect_url" placeholder="http://localhost:1455/auth/callback?code=...&state=...">
-          <button type="submit" style="margin-top:8px;">Submit</button>
-          <button type="button" id="closeModalBtn" style="margin-top:8px;margin-left:8px;">Close</button>
+          <div class="modal-actions" style="margin-top:8px;">
+            <button type="submit">Submit</button>
+            <button type="button" id="closeModalBtn" class="secondary-button">Close</button>
+          </div>
         </form>
       </div>
     </div>
-    <div id="addAgwModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);">
-      <div style="background:#fff;max-width:720px;margin:8% auto;padding:16px;border-radius:8px;max-height:80vh;overflow:auto;">
+    <div id="addAgwModal" class="modal" style="display:none;">
+      <div class="modal-card">
         <h2 style="margin-top:0;">Add Antigravity Account</h2>
         <p>Click start, log in with Google, then paste the callback URL below.</p>
         <button onclick="startAgwLogin()">Start Login</button>
         <div id="agwStatus" class="muted" style="margin-top:8px;"></div>
-        <pre id="agwAuthUrl" style="display:none;white-space:pre-wrap;word-break:break-all;overflow-wrap:anywhere;"></pre>
+        <pre id="agwAuthUrl" class="auth-url"></pre>
         <form id="agwLoginForm" style="margin-top:16px;">
           <label>Callback URL</label>
           <input name="redirect_url" placeholder="http://localhost:51121/oauth-callback?code=...&state=...">
-          <button type="submit" style="margin-top:8px;">Submit</button>
-          <button type="button" id="closeAgwModalBtn" style="margin-top:8px;margin-left:8px;">Close</button>
+          <div class="modal-actions" style="margin-top:8px;">
+            <button type="submit">Submit</button>
+            <button type="button" id="closeAgwModalBtn" class="secondary-button">Close</button>
+          </div>
         </form>
       </div>
     </div>
-    <div id="addQwenModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);">
-      <div style="background:#fff;max-width:720px;margin:8% auto;padding:16px;border-radius:8px;max-height:80vh;overflow:auto;">
+    <div id="addQwenModal" class="modal" style="display:none;">
+      <div class="modal-card">
         <h2 style="margin-top:0;">Add Qwen Account</h2>
         <p>Click start, approve the Qwen device login in a new tab, and this dialog will poll automatically until the auth file is saved.</p>
         <button onclick="startQwenLogin()">Start Login</button>
         <div id="qwenStatus" class="muted" style="margin-top:8px;"></div>
-        <pre id="qwenAuthUrl" style="display:none;white-space:pre-wrap;word-break:break-all;overflow-wrap:anywhere;"></pre>
+        <pre id="qwenAuthUrl" class="auth-url"></pre>
         <div id="qwenUserCode" class="muted" style="margin-top:8px;"></div>
-        <button type="button" id="closeQwenModalBtn" style="margin-top:16px;">Close</button>
+        <div class="modal-actions" style="margin-top:16px;">
+          <button type="button" id="closeQwenModalBtn" class="secondary-button">Close</button>
+        </div>
       </div>
     </div>
     <script>
@@ -672,6 +944,7 @@ async fn dashboard() -> impl IntoResponse {
           document.getElementById('status').textContent = 'Failed to start login';
         }
       }
+      document.getElementById('themeToggleBtn').addEventListener('click', toggleTheme);
       document.getElementById('addAccountBtn').addEventListener('click', () => {
         document.getElementById('addModal').style.display = 'block';
       });
