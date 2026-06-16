@@ -49,6 +49,7 @@ struct AppState {
     quota_cache: Arc<Mutex<Vec<Option<QuotaCacheEntry>>>>,
     agw_quota_cache: Arc<Mutex<HashMap<String, target::antigravity::quota::QuotaCacheEntry>>>,
     gemini_quota_cache: Arc<Mutex<HashMap<String, target::gemini::quota::QuotaCacheEntry>>>,
+    qwen_quota_cache: Arc<Mutex<HashMap<String, target::qwen::quota::QuotaCacheEntry>>>,
     oauth_pending: Arc<Mutex<HashMap<String, PendingOAuth>>>,
     agw_oauth_pending: Arc<Mutex<HashMap<String, target::antigravity::auth::PendingOAuth>>>,
     gemini_oauth_pending: Arc<Mutex<HashSet<String>>>,
@@ -216,6 +217,7 @@ async fn main() {
         quota_cache: Arc::new(Mutex::new(quota_cache)),
         agw_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         gemini_quota_cache: Arc::new(Mutex::new(HashMap::new())),
+        qwen_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         agw_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),
@@ -249,6 +251,7 @@ async fn main() {
         .route("/gemini/v1/models", any(gemini_models_route))
         .route("/gemini/v1/responses", any(gemini_responses_route))
         .route("/qwen/accounts.json", any(qwen_accounts_route))
+        .route("/qwen/quota.json", any(qwen_quota_json_route))
         .route("/login/qwen/start", any(qwen_login_start_route))
         .route("/login/qwen/status", any(qwen_login_status_route))
         .route("/qwen/v1/models", any(qwen_models_route))
@@ -638,7 +641,8 @@ async fn dashboard() -> impl IntoResponse {
           <thead>
             <tr>
               <th>Account</th>
-              <th>Resource</th>
+              <th>Tier</th>
+              <th>Limits</th>
               <th>Access Token Expires</th>
             </tr>
           </thead>
@@ -651,8 +655,10 @@ async fn dashboard() -> impl IntoResponse {
       let lastQuota = new Map();
       let lastAgwQuota = new Map();
       let lastGeminiQuota = new Map();
+      let lastQwenQuota = new Map();
       let openAgwRows = new Set();
       let openGeminiRows = new Set();
+      let openQwenRows = new Set();
       let qwenPollTimer = null;
       let qwenLoginState = null;
       let activeTipEl = null;
@@ -749,6 +755,14 @@ async fn dashboard() -> impl IntoResponse {
           openGeminiRows.add(key);
         }
         refreshGeminiAccounts();
+      }
+      function toggleQwenModelRow(key) {
+        if (openQwenRows.has(key)) {
+          openQwenRows.delete(key);
+        } else {
+          openQwenRows.add(key);
+        }
+        refreshQwenAccounts();
       }
       async function refresh() {
         const res = await fetch('/dashboard.json');
@@ -1019,38 +1033,156 @@ async fn dashboard() -> impl IntoResponse {
       async function refreshQwenAccounts() {
         const res = await fetch('/qwen/accounts.json');
         const data = await res.json();
+        const fmtQwen = (limit) => {
+          if (!limit) return '...';
+          const used = limit.used_text || (limit.used !== null && limit.used !== undefined ? String(limit.used) : '');
+          const limitValue = limit.limit_text || (limit.limit !== null && limit.limit !== undefined ? String(limit.limit) : '');
+          const remaining = limit.remaining_text || (limit.remaining !== null && limit.remaining !== undefined ? String(limit.remaining) : '');
+          const percent = limit.used_percent !== null && limit.used_percent !== undefined
+            ? limit.used_percent.toFixed(1) + '% used'
+            : '';
+          const counts = used && limitValue
+            ? `${used}/${limitValue}`
+            : (remaining ? `${remaining} left` : 'available');
+          return [counts, percent, limit.reset_label].filter(Boolean).join(' | ');
+        };
         const rows = (data.accounts || []).map(a => {
           const toggleLabel = a.enabled ? 'Disable' : 'Enable';
           const dot = a.enabled ? '#2ecc71' : '#e74c3c';
-          const resource = a.resource_url || 'https://portal.qwen.ai/v1';
+          const key = a.file_name || a.label;
+          const q = lastQwenQuota.get(key);
+          const resource = q?.resource_url || a.resource_url || 'https://portal.qwen.ai/v1';
+          const limits = q?.limits || [];
+          const models = q?.models || [];
+          const rawHeaders = q?.raw_headers || [];
+          const hasDetails = limits.length > 0 || models.length > 0 || rawHeaders.length > 0 || !!q?.description || !!q?.error;
+          const isOpen = openQwenRows.has(key);
+          const requestLimit = limits.find(l => l.scope === 'requests') || limits[0] || null;
+          const tokenLimit = limits.find(l => l.scope === 'tokens')
+            || limits.find(l => l.scope === 'input-tokens')
+            || limits.find(l => l.scope === 'output-tokens')
+            || null;
           const accountTip = [
             'Alias: ' + (a.email || a.label || ''),
             'Resource: ' + resource,
             'Token expires: ' + (a.expired_at || '-')
           ].join(' | ');
           const toggleControl = a.file_name
-            ? `<button title="${toggleLabel}" onclick="toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" class="dot-button" style="background:${dot};"></button>`
+            ? `<button title="${toggleLabel}" onclick="event.stopPropagation();toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" class="dot-button" style="background:${dot};"></button>`
             : `<span class="dot-indicator" style="background:${dot};"></span>`;
           const deleteControl = a.file_name
-            ? `<button title="Delete" onclick="deleteCred('${a.file_name}')" class="icon-button">&#128465;</button>`
+            ? `<button title="Delete" onclick="event.stopPropagation();deleteCred('${a.file_name}')" class="icon-button">&#128465;</button>`
             : '';
-          return '<tr>' +
-            '<td><span class="row-label">' + toggleControl + deleteControl + '<span data-tip="' + accountTip + '" title="' + accountTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + a.label + '</span><span class="count-pill">(' + (a.requests || 0) + '/' + (a.errors || 0) + ')</span></span></td>' +
-            '<td><code>' + resource + '</code></td>' +
+          const tierTip = [
+            q?.tier_description || '',
+            q?.description || '',
+            q?.error || ''
+          ].filter(Boolean).join(' | ');
+          const tierLabel = q?.tier_name
+            ? `<span data-tip="${tierTip}" title="${tierTip}" onclick="showTapTip(this, event)" class="help-trigger">${q.tier_name}</span>`
+            : '-';
+          const expandGlyph = hasDetails ? (isOpen ? '&#9662;' : '&#9656;') : '';
+          const limitRows = limits.map(limit => {
+            return '<tr>' +
+              '<td>' + (limit.label || limit.scope || '-') + '</td>' +
+              '<td>' + (limit.used_text || (limit.used !== null && limit.used !== undefined ? limit.used : '-')) + '</td>' +
+              '<td>' + (limit.remaining_text || (limit.remaining !== null && limit.remaining !== undefined ? limit.remaining : '-')) + '</td>' +
+              '<td>' + (limit.limit_text || (limit.limit !== null && limit.limit !== undefined ? limit.limit : '-')) + '</td>' +
+              '<td>' + (limit.reset_label || '-') + '</td>' +
+            '</tr>';
+          }).join('');
+          const modelRows = models.map(model => {
+            const modelTip = [
+              model.description || '',
+              model.capabilities && model.capabilities.length ? ('Capabilities: ' + model.capabilities.join(', ')) : ''
+            ].filter(Boolean).join(' | ');
+            return '<tr>' +
+              '<td><span data-tip="' + modelTip + '" title="' + modelTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + (model.display_name || model.model_id) + '</span></td>' +
+              '<td>' + (model.owned_by || '-') + '</td>' +
+              '<td>' + (model.context_window || '-') + '</td>' +
+              '<td>' + (model.max_output_tokens || '-') + '</td>' +
+            '</tr>';
+          }).join('');
+          const headerRows = rawHeaders.map(header => {
+            return '<tr><td><code>' + header.name + '</code></td><td><code>' + header.value + '</code></td></tr>';
+          }).join('');
+          const noteLines = []
+            .concat(q?.description ? [q.description] : [])
+            .concat((q?.notes || []));
+          const detailParts = [];
+          if (noteLines.length) {
+            detailParts.push('<div class="muted">' + noteLines.join('<br>') + '</div>');
+          }
+          if (limitRows) {
+            detailParts.push(
+              '<div class="detail-table-wrap">' +
+                '<table class="detail-table">' +
+                  '<thead><tr><th>Limit</th><th>Used</th><th>Remaining</th><th>Total</th><th>Reset</th></tr></thead>' +
+                  '<tbody>' + limitRows + '</tbody>' +
+                '</table>' +
+              '</div>'
+            );
+          }
+          if (modelRows) {
+            detailParts.push(
+              '<div class="detail-table-wrap">' +
+                '<table class="detail-table">' +
+                  '<thead><tr><th>Model</th><th>Owner</th><th>Context</th><th>Max Output</th></tr></thead>' +
+                  '<tbody>' + modelRows + '</tbody>' +
+                '</table>' +
+              '</div>'
+            );
+          }
+          if (headerRows) {
+            detailParts.push(
+              '<div class="detail-table-wrap">' +
+                '<table class="detail-table">' +
+                  '<thead><tr><th>Header</th><th>Value</th></tr></thead>' +
+                  '<tbody>' + headerRows + '</tbody>' +
+                '</table>' +
+              '</div>'
+            );
+          }
+          const detailRow = detailParts.length
+            ? '<tr class="detail-row" style="display:' + (isOpen ? 'table-row' : 'none') + ';">' +
+                '<td colspan="4"><div class="detail-panel">' + detailParts.join('') + '</div></td>' +
+              '</tr>'
+            : '';
+          const noteSuffix = q?.error
+            ? ' | live lookup failed'
+            : (hasDetails ? ' | click row to expand' : '');
+          const summaryRow = '<tr' +
+            (hasDetails ? ` onclick="toggleQwenModelRow('${key}')" class="clickable-row"` : '') +
+          '>' +
+            '<td><span class="row-label">' + toggleControl + deleteControl + '<span class="expander">' + expandGlyph + '</span><span data-tip="' + accountTip + '" title="' + accountTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + a.label + '</span><span class="count-pill">(' + (a.requests || 0) + '/' + (a.errors || 0) + ')</span></span><div class="muted">resource: <code>' + resource + '</code>' + noteSuffix + '</div></td>' +
+            '<td>' + tierLabel + (q?.tier_id ? '<div class="muted">' + q.tier_id + '</div>' : '') + '</td>' +
+            '<td class="stacked">Requests: ' + fmtQwen(requestLimit) + '<br><span class="weekly-line">Tokens: ' + fmtQwen(tokenLimit) + '</span></td>' +
             '<td>' + (a.expired_at || '-') + '</td>' +
           '</tr>';
+          return summaryRow + detailRow;
         }).join('');
         document.getElementById('qwenRows').innerHTML = rows;
+      }
+      async function refreshQwenQuota() {
+        const res = await fetch('/qwen/quota.json');
+        const quota = await res.json();
+        const quotaMap = new Map();
+        (quota.accounts || []).forEach(q => {
+          const key = q.file_name || q.label;
+          quotaMap.set(key, q);
+        });
+        lastQwenQuota = quotaMap;
       }
       refresh();
       refreshQuota();
       refreshAgwQuota().then(() => refreshAgwAccounts());
       refreshGeminiQuota().then(() => refreshGeminiAccounts());
-      refreshQwenAccounts();
+      refreshQwenQuota().then(() => refreshQwenAccounts());
       setInterval(refresh, 5000);
       setInterval(refreshQuota, 60000);
       setInterval(refreshAgwQuota, 60000);
       setInterval(refreshGeminiQuota, 60000);
+      setInterval(refreshQwenQuota, 60000);
       setInterval(refreshAgwAccounts, 10000);
       setInterval(refreshGeminiAccounts, 10000);
       setInterval(refreshQwenAccounts, 10000);
@@ -1547,6 +1679,10 @@ async fn gemini_responses_route(
 
 async fn qwen_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
     target::qwen::admin::accounts_json(State(state)).await
+}
+
+async fn qwen_quota_json_route(State(state): State<AppState>) -> impl IntoResponse {
+    target::qwen::admin::quota_json(State(state)).await
 }
 
 async fn qwen_login_start_route(State(state): State<AppState>) -> impl IntoResponse {

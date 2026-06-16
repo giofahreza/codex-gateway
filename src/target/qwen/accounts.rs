@@ -135,8 +135,11 @@ pub fn reload_state(state: &crate::AppState) {
     let accounts = load_accounts(&state.cfg, &disabled);
     {
         let mut lock = state.qwen_accounts.lock().unwrap();
-        *lock = accounts;
+        *lock = accounts.clone();
     }
+    let mut quota_cache = state.qwen_quota_cache.lock().unwrap();
+    super::quota::prune_cache(&mut quota_cache, &accounts);
+    drop(quota_cache);
     crate::migrate_qwen_usage_keys(state);
     crate::sync_usage_stats(state);
 }
