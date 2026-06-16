@@ -48,6 +48,7 @@ struct AppState {
     persisted_stats: Arc<Mutex<StatsStore>>,
     quota_cache: Arc<Mutex<Vec<Option<QuotaCacheEntry>>>>,
     agw_quota_cache: Arc<Mutex<HashMap<String, target::antigravity::quota::QuotaCacheEntry>>>,
+    gemini_quota_cache: Arc<Mutex<HashMap<String, target::gemini::quota::QuotaCacheEntry>>>,
     oauth_pending: Arc<Mutex<HashMap<String, PendingOAuth>>>,
     agw_oauth_pending: Arc<Mutex<HashMap<String, target::antigravity::auth::PendingOAuth>>>,
     gemini_oauth_pending: Arc<Mutex<HashSet<String>>>,
@@ -214,6 +215,7 @@ async fn main() {
         persisted_stats: Arc::new(Mutex::new(persisted_stats)),
         quota_cache: Arc::new(Mutex::new(quota_cache)),
         agw_quota_cache: Arc::new(Mutex::new(HashMap::new())),
+        gemini_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         agw_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),
@@ -241,6 +243,7 @@ async fn main() {
         .route("/agw/v1/models", any(agw_models_route))
         .route("/agw/v1/responses", any(agw_responses_route))
         .route("/gemini/accounts.json", any(gemini_accounts_route))
+        .route("/gemini/quota.json", any(gemini_quota_json_route))
         .route("/login/gemini/start", any(gemini_login_start_route))
         .route("/login/gemini/submit", any(gemini_login_submit_route))
         .route("/gemini/v1/models", any(gemini_models_route))
@@ -615,7 +618,8 @@ async fn dashboard() -> impl IntoResponse {
           <thead>
             <tr>
               <th>Account</th>
-              <th>Project</th>
+              <th>Tier</th>
+              <th>Limits</th>
               <th>Access Token Expires</th>
             </tr>
           </thead>
@@ -646,7 +650,9 @@ async fn dashboard() -> impl IntoResponse {
     <script>
       let lastQuota = new Map();
       let lastAgwQuota = new Map();
+      let lastGeminiQuota = new Map();
       let openAgwRows = new Set();
+      let openGeminiRows = new Set();
       let qwenPollTimer = null;
       let qwenLoginState = null;
       let activeTipEl = null;
@@ -735,6 +741,14 @@ async fn dashboard() -> impl IntoResponse {
           openAgwRows.add(key);
         }
         refreshAgwAccounts();
+      }
+      function toggleGeminiModelRow(key) {
+        if (openGeminiRows.has(key)) {
+          openGeminiRows.delete(key);
+        } else {
+          openGeminiRows.add(key);
+        }
+        refreshGeminiAccounts();
       }
       async function refresh() {
         const res = await fetch('/dashboard.json');
@@ -892,9 +906,25 @@ async fn dashboard() -> impl IntoResponse {
       async function refreshGeminiAccounts() {
         const res = await fetch('/gemini/accounts.json');
         const data = await res.json();
+        const fmtGemini = (bucket) => bucket && bucket.used_percent !== null && bucket.used_percent !== undefined
+          ? (bucket.used_percent.toFixed(1) + '% ' + (bucket.reset_label ? '(' + bucket.reset_label + ')' : ''))
+          : '…';
         const rows = (data.accounts || []).map(a => {
           const toggleLabel = a.enabled ? 'Disable' : 'Enable';
           const dot = a.enabled ? '#2ecc71' : '#e74c3c';
+          const key = a.file_name || a.label;
+          const q = lastGeminiQuota.get(key);
+          const groups = q?.groups || [];
+          const models = q?.models || [];
+          const hasDetails = groups.length > 0 || models.length > 0;
+          const isOpen = openGeminiRows.has(key);
+          const primaryGroup = groups.find(g => (g.display_name || '').toLowerCase().includes('gemini')) || groups[0] || {};
+          const tierTip = [
+            q?.tier_description || '',
+            q?.upgrade_text || '',
+            q?.description || '',
+            q?.error || ''
+          ].filter(Boolean).join(' | ');
           const accountTip = [
             'Email: ' + (a.email || a.label || ''),
             'Project: ' + (a.project_id || '-'),
@@ -903,18 +933,88 @@ async fn dashboard() -> impl IntoResponse {
             'Cloud API checked: ' + (a.checked ? 'yes' : 'no')
           ].join(' | ');
           const toggleControl = a.file_name
-            ? `<button title="${toggleLabel}" onclick="toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" class="dot-button" style="background:${dot};"></button>`
+            ? `<button title="${toggleLabel}" onclick="event.stopPropagation();toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" class="dot-button" style="background:${dot};"></button>`
             : `<span class="dot-indicator" style="background:${dot};"></span>`;
           const deleteControl = a.file_name
-            ? `<button title="Delete" onclick="deleteCred('${a.file_name}')" class="icon-button">&#128465;</button>`
+            ? `<button title="Delete" onclick="event.stopPropagation();deleteCred('${a.file_name}')" class="icon-button">&#128465;</button>`
             : '';
-          return '<tr>' +
-            '<td><span class="row-label">' + toggleControl + deleteControl + '<span data-tip="' + accountTip + '" title="' + accountTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + a.label + '</span><span class="count-pill">(' + (a.requests || 0) + '/' + (a.errors || 0) + ')</span></span></td>' +
-            '<td><code>' + (a.project_id || '-') + '</code></td>' +
+          const tierLabel = q?.tier_name
+            ? `<span data-tip="${tierTip}" title="${tierTip}" onclick="showTapTip(this, event)" class="help-trigger">${q.tier_name}</span>`
+            : '-';
+          const expandGlyph = hasDetails ? (isOpen ? '&#9662;' : '&#9656;') : '';
+          const groupRows = groups.map(g => {
+            const groupTip = g.description || '';
+            return '<tr>' +
+              '<td><span data-tip="' + groupTip + '" title="' + groupTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + (g.display_name || '-') + '</span></td>' +
+              '<td>' + fmtGemini(g.five_hour) + '</td>' +
+              '<td>' + fmtGemini(g.weekly) + '</td>' +
+            '</tr>';
+          }).join('');
+          const modelRows = models.map(m => {
+            const currentTip = m.group_display_name
+              ? `Shared group: ${m.group_display_name}`
+              : '';
+            return '<tr>' +
+              '<td>' + (m.display_name || m.model_id) + '</td>' +
+              '<td><span data-tip="' + currentTip + '" title="' + currentTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + fmtGemini(m.current) + '</span></td>' +
+              '<td>' + fmtGemini(m.five_hour) + '</td>' +
+              '<td>' + fmtGemini(m.weekly) + '</td>' +
+            '</tr>';
+          }).join('');
+          const detailParts = [];
+          if (groupRows) {
+            detailParts.push(
+              '<div class="muted">Shared Gemini quota groups reported for this account.</div>' +
+              '<div class="detail-table-wrap">' +
+                '<table class="detail-table">' +
+                  '<thead><tr><th>Group</th><th>5h</th><th>Weekly</th></tr></thead>' +
+                  '<tbody>' + groupRows + '</tbody>' +
+                '</table>' +
+              '</div>'
+            );
+          }
+          if (modelRows) {
+            detailParts.push(
+              '<div class="muted">Current is the model-specific bucket from Gemini. 5h and Weekly are the shared group limits Gemini reports for that model family.</div>' +
+              '<div class="detail-table-wrap">' +
+                '<table class="detail-table">' +
+                  '<thead><tr><th>Model</th><th>Current</th><th>5h</th><th>Weekly</th></tr></thead>' +
+                  '<tbody>' + modelRows + '</tbody>' +
+                '</table>' +
+              '</div>'
+            );
+          }
+          const detailRow = detailParts.length
+            ? '<tr class="detail-row" style="display:' + (isOpen ? 'table-row' : 'none') + ';">' +
+                '<td colspan="4">' +
+                  '<div class="detail-panel">' + detailParts.join('') + '</div>' +
+                '</td>' +
+              '</tr>'
+            : '';
+          const noteSuffix = q?.error
+            ? ' | quota lookup failed'
+            : (hasDetails ? ' | click row to expand' : '');
+          const summaryRow = '<tr' +
+            (hasDetails ? ` onclick="toggleGeminiModelRow('${key}')" class="clickable-row"` : '') +
+          '>' +
+            '<td><span class="row-label">' + toggleControl + deleteControl + '<span class="expander">' + expandGlyph + '</span><span data-tip="' + accountTip + '" title="' + accountTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + a.label + '</span><span class="count-pill">(' + (a.requests || 0) + '/' + (a.errors || 0) + ')</span></span><div class="muted">project: ' + (a.project_id || '-') + noteSuffix + '</div></td>' +
+            '<td>' + tierLabel + (q?.tier_id ? '<div class="muted">' + q.tier_id + '</div>' : '') + '</td>' +
+            '<td class="stacked">5h: ' + fmtGemini(primaryGroup.five_hour) + '<br><span class="weekly-line">Weekly: ' + fmtGemini(primaryGroup.weekly) + '</span></td>' +
             '<td>' + (a.expired_at || '-') + '</td>' +
           '</tr>';
+          return summaryRow + detailRow;
         }).join('');
         document.getElementById('geminiRows').innerHTML = rows;
+      }
+      async function refreshGeminiQuota() {
+        const res = await fetch('/gemini/quota.json');
+        const quota = await res.json();
+        const quotaMap = new Map();
+        (quota.accounts || []).forEach(q => {
+          const key = q.file_name || q.label;
+          quotaMap.set(key, q);
+        });
+        lastGeminiQuota = quotaMap;
       }
       async function refreshQwenAccounts() {
         const res = await fetch('/qwen/accounts.json');
@@ -945,11 +1045,12 @@ async fn dashboard() -> impl IntoResponse {
       refresh();
       refreshQuota();
       refreshAgwQuota().then(() => refreshAgwAccounts());
-      refreshGeminiAccounts();
+      refreshGeminiQuota().then(() => refreshGeminiAccounts());
       refreshQwenAccounts();
       setInterval(refresh, 5000);
       setInterval(refreshQuota, 60000);
       setInterval(refreshAgwQuota, 60000);
+      setInterval(refreshGeminiQuota, 60000);
       setInterval(refreshAgwAccounts, 10000);
       setInterval(refreshGeminiAccounts, 10000);
       setInterval(refreshQwenAccounts, 10000);
@@ -1208,6 +1309,7 @@ async fn dashboard() -> impl IntoResponse {
         const data = await res.json();
         document.getElementById('geminiStatus').textContent = data.message || 'Login completed.';
         if (data.ok) {
+          refreshGeminiQuota();
           refreshGeminiAccounts();
         }
       });
@@ -1228,6 +1330,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshQuota();
         refreshAgwQuota();
         refreshAgwAccounts();
+        refreshGeminiQuota();
         refreshGeminiAccounts();
         refreshQwenAccounts();
       }
@@ -1248,6 +1351,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshQuota();
         refreshAgwQuota();
         refreshAgwAccounts();
+        refreshGeminiQuota();
         refreshGeminiAccounts();
         refreshQwenAccounts();
       }
@@ -1409,6 +1513,10 @@ async fn agw_responses_route(
 
 async fn gemini_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
     target::gemini::admin::accounts_json(State(state)).await
+}
+
+async fn gemini_quota_json_route(State(state): State<AppState>) -> impl IntoResponse {
+    target::gemini::admin::quota_json(State(state)).await
 }
 
 async fn gemini_login_start_route(State(state): State<AppState>) -> impl IntoResponse {
