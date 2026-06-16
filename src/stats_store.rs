@@ -5,6 +5,7 @@ use std::{collections::HashMap, path::PathBuf};
 pub enum Provider {
     Codex,
     Antigravity,
+    Gemini,
     Qwen,
 }
 
@@ -69,6 +70,8 @@ pub struct StatsStore {
     #[serde(default)]
     pub antigravity: HashMap<String, StoredAccountUsage>,
     #[serde(default)]
+    pub gemini: HashMap<String, StoredAccountUsage>,
+    #[serde(default)]
     pub qwen: HashMap<String, StoredAccountUsage>,
 }
 
@@ -89,6 +92,7 @@ impl Default for StatsStore {
             last_recorded_at: None,
             codex: HashMap::new(),
             antigravity: HashMap::new(),
+            gemini: HashMap::new(),
             qwen: HashMap::new(),
         }
     }
@@ -99,6 +103,7 @@ impl StatsStore {
         match provider {
             Provider::Codex => self.codex.get(key),
             Provider::Antigravity => self.antigravity.get(key),
+            Provider::Gemini => self.gemini.get(key),
             Provider::Qwen => self.qwen.get(key),
         }
     }
@@ -111,6 +116,7 @@ impl StatsStore {
         match provider {
             Provider::Codex => self.codex.entry(key).or_default(),
             Provider::Antigravity => self.antigravity.entry(key).or_default(),
+            Provider::Gemini => self.gemini.entry(key).or_default(),
             Provider::Qwen => self.qwen.entry(key).or_default(),
         }
     }

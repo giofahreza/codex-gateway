@@ -143,6 +143,7 @@ pub async fn delete_credential(
         Ok(_) => {
             tokens::reload_state(&state);
             super::super::antigravity::accounts::reload_state(&state);
+            super::super::gemini::accounts::reload_state(&state);
             super::super::qwen::accounts::reload_state(&state);
             axum::Json(serde_json::json!({
                 "ok": true,
@@ -199,6 +200,7 @@ pub async fn toggle_credential(
 
     tokens::reload_state(&state);
     super::super::antigravity::accounts::reload_state(&state);
+    super::super::gemini::accounts::reload_state(&state);
     super::super::qwen::accounts::reload_state(&state);
 
     axum::Json(serde_json::json!({

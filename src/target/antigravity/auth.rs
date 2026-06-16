@@ -395,9 +395,8 @@ fn sanitize_label(s: &str) -> String {
 }
 
 fn google_client_id() -> Result<String, String> {
-    std::env::var("ANTIGRAVITY_GOOGLE_CLIENT_ID").map_err(|_| {
-        "ANTIGRAVITY_GOOGLE_CLIENT_ID is required for Antigravity OAuth".to_string()
-    })
+    std::env::var("ANTIGRAVITY_GOOGLE_CLIENT_ID")
+        .map_err(|_| "ANTIGRAVITY_GOOGLE_CLIENT_ID is required for Antigravity OAuth".to_string())
 }
 
 fn google_client_secret() -> Result<String, String> {

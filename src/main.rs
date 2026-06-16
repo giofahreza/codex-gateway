@@ -37,10 +37,12 @@ struct AppState {
     cfg: Arc<Config>,
     rr: Arc<Mutex<usize>>,
     agw_rr: Arc<Mutex<usize>>,
+    gemini_rr: Arc<Mutex<usize>>,
     qwen_rr: Arc<Mutex<usize>>,
     client: reqwest::Client,
     tokens: Arc<Mutex<Vec<UpstreamToken>>>,
     agw_accounts: Arc<Mutex<Vec<target::antigravity::accounts::AntigravityAccount>>>,
+    gemini_accounts: Arc<Mutex<Vec<target::gemini::accounts::GeminiAccount>>>,
     qwen_accounts: Arc<Mutex<Vec<target::qwen::accounts::QwenAccount>>>,
     stats: Arc<Mutex<UsageStats>>,
     persisted_stats: Arc<Mutex<StatsStore>>,
@@ -48,6 +50,7 @@ struct AppState {
     agw_quota_cache: Arc<Mutex<HashMap<String, target::antigravity::quota::QuotaCacheEntry>>>,
     oauth_pending: Arc<Mutex<HashMap<String, PendingOAuth>>>,
     agw_oauth_pending: Arc<Mutex<HashMap<String, target::antigravity::auth::PendingOAuth>>>,
+    gemini_oauth_pending: Arc<Mutex<HashSet<String>>>,
     qwen_oauth_pending: Arc<Mutex<HashMap<String, target::qwen::auth::PendingDeviceFlow>>>,
     disabled: Arc<Mutex<HashSet<String>>>,
     usage_history_lock: Arc<Mutex<()>>,
@@ -80,6 +83,7 @@ struct Config {
 struct UsageStats {
     codex_accounts: Vec<AccountUsage>,
     agw_accounts: Vec<AccountUsage>,
+    gemini_accounts: Vec<AccountUsage>,
     qwen_accounts: Vec<AccountUsage>,
     total_requests: u64,
     total_errors: u64,
@@ -172,9 +176,16 @@ async fn main() {
         .collect::<HashSet<_>>();
     let tokens = target::codex::tokens::load_tokens(&cfg, &disabled);
     let agw_accounts = target::antigravity::accounts::load_accounts(&cfg, &disabled);
+    let gemini_accounts = target::gemini::accounts::load_accounts(&cfg, &disabled);
     let qwen_accounts = target::qwen::accounts::load_accounts(&cfg, &disabled);
     let persisted_stats = stats_store::load(&cfg);
-    let stats = build_usage_stats(&tokens, &agw_accounts, &qwen_accounts, &persisted_stats);
+    let stats = build_usage_stats(
+        &tokens,
+        &agw_accounts,
+        &gemini_accounts,
+        &qwen_accounts,
+        &persisted_stats,
+    );
     let quota_cache = vec![None; tokens.len()];
     tracing_subscriber::fmt().with_env_filter("info").init();
 
@@ -192,10 +203,12 @@ async fn main() {
         cfg: Arc::new(cfg),
         rr: Arc::new(Mutex::new(0)),
         agw_rr: Arc::new(Mutex::new(0)),
+        gemini_rr: Arc::new(Mutex::new(0)),
         qwen_rr: Arc::new(Mutex::new(0)),
         client,
         tokens: Arc::new(Mutex::new(tokens)),
         agw_accounts: Arc::new(Mutex::new(agw_accounts)),
+        gemini_accounts: Arc::new(Mutex::new(gemini_accounts)),
         qwen_accounts: Arc::new(Mutex::new(qwen_accounts)),
         stats: Arc::new(Mutex::new(stats)),
         persisted_stats: Arc::new(Mutex::new(persisted_stats)),
@@ -203,6 +216,7 @@ async fn main() {
         agw_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         agw_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
+        gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),
         qwen_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         disabled: Arc::new(Mutex::new(disabled)),
         usage_history_lock: Arc::new(Mutex::new(())),
@@ -226,6 +240,11 @@ async fn main() {
         .route("/login/antigravity/submit", any(agw_login_submit_route))
         .route("/agw/v1/models", any(agw_models_route))
         .route("/agw/v1/responses", any(agw_responses_route))
+        .route("/gemini/accounts.json", any(gemini_accounts_route))
+        .route("/login/gemini/start", any(gemini_login_start_route))
+        .route("/login/gemini/submit", any(gemini_login_submit_route))
+        .route("/gemini/v1/models", any(gemini_models_route))
+        .route("/gemini/v1/responses", any(gemini_responses_route))
         .route("/qwen/accounts.json", any(qwen_accounts_route))
         .route("/login/qwen/start", any(qwen_login_start_route))
         .route("/login/qwen/status", any(qwen_login_status_route))
@@ -587,6 +606,25 @@ async fn dashboard() -> impl IntoResponse {
       </div>
       <div class="section">
         <h2 class="section-header">
+          <span>Gemini Accounts</span>
+          <button id="addGeminiAccountBtn">Add Gemini</button>
+        </h2>
+        <div class="muted panel-note">Use these accounts through <code>/gemini/v1/*</code>. Gemini login here uses Google OAuth and then onboards one Google Cloud project for Cloud Code Assist.</div>
+        <div class="table-wrap">
+          <table>
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Project</th>
+              <th>Access Token Expires</th>
+            </tr>
+          </thead>
+          <tbody id="geminiRows"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="section">
+        <h2 class="section-header">
           <span>Qwen Accounts</span>
           <button id="addQwenAccountBtn">Add Qwen</button>
         </h2>
@@ -851,6 +889,33 @@ async fn dashboard() -> impl IntoResponse {
         });
         lastAgwQuota = quotaMap;
       }
+      async function refreshGeminiAccounts() {
+        const res = await fetch('/gemini/accounts.json');
+        const data = await res.json();
+        const rows = (data.accounts || []).map(a => {
+          const toggleLabel = a.enabled ? 'Disable' : 'Enable';
+          const dot = a.enabled ? '#2ecc71' : '#e74c3c';
+          const accountTip = [
+            'Email: ' + (a.email || a.label || ''),
+            'Project: ' + (a.project_id || '-'),
+            'Token expires: ' + (a.expired_at || '-'),
+            'Auto project selection: ' + (a.auto ? 'yes' : 'no'),
+            'Cloud API checked: ' + (a.checked ? 'yes' : 'no')
+          ].join(' | ');
+          const toggleControl = a.file_name
+            ? `<button title="${toggleLabel}" onclick="toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" class="dot-button" style="background:${dot};"></button>`
+            : `<span class="dot-indicator" style="background:${dot};"></span>`;
+          const deleteControl = a.file_name
+            ? `<button title="Delete" onclick="deleteCred('${a.file_name}')" class="icon-button">&#128465;</button>`
+            : '';
+          return '<tr>' +
+            '<td><span class="row-label">' + toggleControl + deleteControl + '<span data-tip="' + accountTip + '" title="' + accountTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + a.label + '</span><span class="count-pill">(' + (a.requests || 0) + '/' + (a.errors || 0) + ')</span></span></td>' +
+            '<td><code>' + (a.project_id || '-') + '</code></td>' +
+            '<td>' + (a.expired_at || '-') + '</td>' +
+          '</tr>';
+        }).join('');
+        document.getElementById('geminiRows').innerHTML = rows;
+      }
       async function refreshQwenAccounts() {
         const res = await fetch('/qwen/accounts.json');
         const data = await res.json();
@@ -880,11 +945,13 @@ async fn dashboard() -> impl IntoResponse {
       refresh();
       refreshQuota();
       refreshAgwQuota().then(() => refreshAgwAccounts());
+      refreshGeminiAccounts();
       refreshQwenAccounts();
       setInterval(refresh, 5000);
       setInterval(refreshQuota, 60000);
       setInterval(refreshAgwQuota, 60000);
       setInterval(refreshAgwAccounts, 10000);
+      setInterval(refreshGeminiAccounts, 10000);
       setInterval(refreshQwenAccounts, 10000);
     </script>
     <div id="addModal" class="modal" style="display:none;">
@@ -917,6 +984,26 @@ async fn dashboard() -> impl IntoResponse {
           <div class="modal-actions" style="margin-top:8px;">
             <button type="submit">Submit</button>
             <button type="button" id="closeAgwModalBtn" class="secondary-button">Close</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    <div id="addGeminiModal" class="modal" style="display:none;">
+      <div class="modal-card">
+        <h2 style="margin-top:0;">Add Gemini Account</h2>
+        <p>Click start, complete Google OAuth, then paste the final callback URL below. If your Google account has multiple Cloud projects, provide one project ID.</p>
+        <button onclick="startGeminiLogin()">Start Login</button>
+        <div id="geminiStatus" class="muted" style="margin-top:8px;"></div>
+        <pre id="geminiAuthUrl" class="auth-url"></pre>
+        <form id="geminiLoginForm" style="margin-top:16px;">
+          <label>Callback URL</label>
+          <input name="redirect_url" placeholder="http://localhost:8085/oauth2callback?code=...&state=...">
+          <label style="margin-top:12px;">Project ID</label>
+          <input name="project_id" placeholder="optional, but recommended when multiple GCP projects exist">
+          <div class="muted" style="margin-top:8px;">Leave Project ID empty to let the gateway use the detected project. If multiple projects exist and no default is exposed, login will ask you to retry with one explicit project ID.</div>
+          <div class="modal-actions" style="margin-top:8px;">
+            <button type="submit">Submit</button>
+            <button type="button" id="closeGeminiModalBtn" class="secondary-button">Close</button>
           </div>
         </form>
       </div>
@@ -982,6 +1069,30 @@ async fn dashboard() -> impl IntoResponse {
       document.getElementById('addAgwModal').addEventListener('click', (e) => {
         if (e.target.id === 'addAgwModal') {
           document.getElementById('addAgwModal').style.display = 'none';
+        }
+      });
+      async function startGeminiLogin() {
+        const res = await fetch('/login/gemini/start');
+        const data = await res.json();
+        if (data.url) {
+          window.open(data.url, '_blank');
+          document.getElementById('geminiStatus').textContent = 'Opened login URL in new tab. If blocked, copy from below.';
+          const pre = document.getElementById('geminiAuthUrl');
+          pre.textContent = data.url;
+          pre.style.display = 'block';
+        } else {
+          document.getElementById('geminiStatus').textContent = data.message || 'Failed to start Gemini login';
+        }
+      }
+      document.getElementById('addGeminiAccountBtn').addEventListener('click', () => {
+        document.getElementById('addGeminiModal').style.display = 'block';
+      });
+      document.getElementById('closeGeminiModalBtn').addEventListener('click', () => {
+        document.getElementById('addGeminiModal').style.display = 'none';
+      });
+      document.getElementById('addGeminiModal').addEventListener('click', (e) => {
+        if (e.target.id === 'addGeminiModal') {
+          document.getElementById('addGeminiModal').style.display = 'none';
         }
       });
       function stopQwenPolling() {
@@ -1078,6 +1189,28 @@ async fn dashboard() -> impl IntoResponse {
           refreshAgwAccounts();
         }
       });
+      document.getElementById('geminiLoginForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const form = e.target;
+        const redirectInput = form.querySelector('input[name="redirect_url"]');
+        const projectInput = form.querySelector('input[name="project_id"]');
+        const redirectUrl = redirectInput.value.trim();
+        const projectId = projectInput.value.trim();
+        if (!redirectUrl) {
+          document.getElementById('geminiStatus').textContent = 'Callback URL is required.';
+          return;
+        }
+        const res = await fetch('/login/gemini/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ redirect_url: redirectUrl, project_id: projectId })
+        });
+        const data = await res.json();
+        document.getElementById('geminiStatus').textContent = data.message || 'Login completed.';
+        if (data.ok) {
+          refreshGeminiAccounts();
+        }
+      });
       async function deleteCred(fileName) {
         const key = prompt('Proxy API key for delete:');
         if (!key) return;
@@ -1095,6 +1228,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshQuota();
         refreshAgwQuota();
         refreshAgwAccounts();
+        refreshGeminiAccounts();
         refreshQwenAccounts();
       }
       async function toggleCred(fileName, enabled) {
@@ -1114,6 +1248,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshQuota();
         refreshAgwQuota();
         refreshAgwAccounts();
+        refreshGeminiAccounts();
         refreshQwenAccounts();
       }
     </script>
@@ -1272,6 +1407,36 @@ async fn agw_responses_route(
     target::antigravity::api::responses(State(state), headers, body).await
 }
 
+async fn gemini_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
+    target::gemini::admin::accounts_json(State(state)).await
+}
+
+async fn gemini_login_start_route(State(state): State<AppState>) -> impl IntoResponse {
+    target::gemini::admin::login_start(State(state)).await
+}
+
+async fn gemini_login_submit_route(
+    State(state): State<AppState>,
+    Form(form): Form<target::gemini::admin::CallbackForm>,
+) -> impl IntoResponse {
+    target::gemini::admin::login_submit(State(state), Form(form)).await
+}
+
+async fn gemini_models_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    target::gemini::api::models(State(state), headers).await
+}
+
+async fn gemini_responses_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    target::gemini::api::responses(State(state), headers, body).await
+}
+
 async fn qwen_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
     target::qwen::admin::accounts_json(State(state)).await
 }
@@ -1311,6 +1476,11 @@ async fn usage_summary_route(State(state): State<AppState>) -> impl IntoResponse
         .into_iter()
         .map(|(key, usage)| serde_json::json!({ "key": key, "usage": usage }))
         .collect::<Vec<_>>();
+    let mut gemini = persisted
+        .gemini
+        .into_iter()
+        .map(|(key, usage)| serde_json::json!({ "key": key, "usage": usage }))
+        .collect::<Vec<_>>();
     let mut qwen = persisted
         .qwen
         .into_iter()
@@ -1318,6 +1488,7 @@ async fn usage_summary_route(State(state): State<AppState>) -> impl IntoResponse
         .collect::<Vec<_>>();
     codex.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     antigravity.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+    gemini.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     qwen.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     axum::Json(serde_json::json!({
         "totals": {
@@ -1336,6 +1507,7 @@ async fn usage_summary_route(State(state): State<AppState>) -> impl IntoResponse
         "providers": {
             "codex": codex,
             "antigravity": antigravity,
+            "gemini": gemini,
             "qwen": qwen
         }
     }))
@@ -2244,6 +2416,7 @@ fn render_sse_event(event_name: Option<&str>, data: &str, use_crlf: bool) -> Vec
 fn build_usage_stats(
     tokens: &[UpstreamToken],
     agw_accounts: &[target::antigravity::accounts::AntigravityAccount],
+    gemini_accounts: &[target::gemini::accounts::GeminiAccount],
     qwen_accounts: &[target::qwen::accounts::QwenAccount],
     persisted_stats: &StatsStore,
 ) -> UsageStats {
@@ -2334,9 +2507,39 @@ fn build_usage_stats(
         })
         .collect();
 
+    let gemini_accounts = gemini_accounts
+        .iter()
+        .map(|account| {
+            let key = gemini_stats_key(account);
+            let stored = persisted_stats
+                .account_usage(Provider::Gemini, &key)
+                .cloned()
+                .unwrap_or_default();
+            AccountUsage {
+                key,
+                label: account.label.clone(),
+                account_id: account.email.clone(),
+                requests: stored.requests,
+                errors: stored.errors,
+                prompt_total: stored.prompt_total,
+                prompt_error_total: stored.prompt_error_total,
+                input_tokens: stored.input_tokens,
+                output_tokens: stored.output_tokens,
+                total_tokens: stored.total_tokens,
+                cache_tokens: stored.cache_tokens,
+                reasoning_tokens: stored.reasoning_tokens,
+                first_seen_at: stored.first_seen_at,
+                last_seen_at: stored.last_seen_at,
+                last_success_at: stored.last_success_at,
+                last_error_at: stored.last_error_at,
+            }
+        })
+        .collect();
+
     UsageStats {
         codex_accounts,
         agw_accounts,
+        gemini_accounts,
         qwen_accounts,
         total_requests: persisted_stats.total_requests,
         total_errors: persisted_stats.total_errors,
@@ -2355,10 +2558,17 @@ fn build_usage_stats(
 pub(crate) fn sync_usage_stats(state: &AppState) {
     let tokens = state.tokens.lock().unwrap().clone();
     let agw_accounts = state.agw_accounts.lock().unwrap().clone();
+    let gemini_accounts = state.gemini_accounts.lock().unwrap().clone();
     let qwen_accounts = state.qwen_accounts.lock().unwrap().clone();
     let persisted_stats = state.persisted_stats.lock().unwrap().clone();
     let mut stats = state.stats.lock().unwrap();
-    *stats = build_usage_stats(&tokens, &agw_accounts, &qwen_accounts, &persisted_stats);
+    *stats = build_usage_stats(
+        &tokens,
+        &agw_accounts,
+        &gemini_accounts,
+        &qwen_accounts,
+        &persisted_stats,
+    );
 }
 
 pub(crate) fn codex_stats_key(token: &UpstreamToken) -> String {
@@ -2404,6 +2614,19 @@ pub(crate) fn qwen_stats_key(account: &target::qwen::accounts::QwenAccount) -> S
         return format!("qwen:resource:{}", resource_url);
     }
     format!("qwen:label:{}", account.label)
+}
+
+pub(crate) fn gemini_stats_key(account: &target::gemini::accounts::GeminiAccount) -> String {
+    if !account.email.trim().is_empty() {
+        if let Some(project_id) = account.project_id.as_ref().filter(|s| !s.trim().is_empty()) {
+            return format!("gemini:email:{}|project:{}", account.email, project_id);
+        }
+        return format!("gemini:email:{}", account.email);
+    }
+    if let Some(file_name) = account.file_name.as_ref().filter(|s| !s.trim().is_empty()) {
+        return format!("gemini:file:{}", file_name);
+    }
+    format!("gemini:label:{}", account.label)
 }
 
 fn qwen_fallback_stats_keys(account: &target::qwen::accounts::QwenAccount) -> Vec<String> {
@@ -2532,6 +2755,25 @@ pub(crate) fn qwen_usage_context(
             .subject
             .clone()
             .unwrap_or_else(|| account.email.clone()),
+        credential_file: account.file_name.clone(),
+        model,
+        request_path: request_path.into(),
+        prompt,
+    }
+}
+
+pub(crate) fn gemini_usage_context(
+    account: &target::gemini::accounts::GeminiAccount,
+    model: Option<String>,
+    request_path: impl Into<String>,
+    prompt: PromptMetrics,
+) -> UsageContext {
+    UsageContext {
+        provider: Provider::Gemini,
+        provider_name: "gemini",
+        key: gemini_stats_key(account),
+        label: account.label.clone(),
+        account_id: account.email.clone(),
         credential_file: account.file_name.clone(),
         model,
         request_path: request_path.into(),
@@ -2816,6 +3058,26 @@ pub(crate) fn record_qwen_error(
 }
 
 pub(crate) fn record_qwen_success(
+    state: &AppState,
+    context: &UsageContext,
+    metrics: &UsageMetrics,
+) {
+    record_usage_success(state, context, metrics);
+}
+
+pub(crate) fn record_gemini_request(state: &AppState, context: &UsageContext) {
+    record_request_started(state, context);
+}
+
+pub(crate) fn record_gemini_error(
+    state: &AppState,
+    context: &UsageContext,
+    message: impl Into<String>,
+) {
+    record_request_error(state, context, message);
+}
+
+pub(crate) fn record_gemini_success(
     state: &AppState,
     context: &UsageContext,
     metrics: &UsageMetrics,
