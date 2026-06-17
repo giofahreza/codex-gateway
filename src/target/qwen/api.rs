@@ -68,7 +68,7 @@ pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) ->
     match fetch_models(
         &state.client,
         &access_token,
-        &super::auth::base_url(&account),
+        &super::auth::base_url(&state, &account),
     )
     .await
     {
@@ -200,7 +200,7 @@ pub async fn responses(
     let upstream = match send_chat_request(
         &state.client,
         &access_token,
-        &super::auth::base_url(&account),
+        &super::auth::base_url(&state, &account),
         &payload,
     )
     .await

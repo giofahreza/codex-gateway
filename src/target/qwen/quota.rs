@@ -174,7 +174,7 @@ async fn fetch_account_quota(
     state: &crate::AppState,
     account: &super::accounts::QwenAccount,
 ) -> QuotaCacheEntry {
-    let resource_url = super::auth::base_url(account);
+    let resource_url = super::auth::base_url(state, account);
     let auth_value = load_auth_value(state, account.file_name.as_deref());
 
     let access_token = match super::auth::ensure_access_token(state, account).await {
@@ -245,9 +245,13 @@ fn build_summary(
     notes.push(format!("Resource: {}", resource_url));
 
     if let Some(subject) = account.subject.clone().or_else(|| {
-        claims
-            .and_then(|value| value.get("sub"))
-            .and_then(value_to_string)
+        if !account.account_id.trim().is_empty() {
+            Some(account.account_id.clone())
+        } else {
+            claims
+                .and_then(|value| value.get("sub"))
+                .and_then(value_to_string)
+        }
     }) {
         if !subject.trim().is_empty() {
             notes.push(format!("Subject: {}", subject));

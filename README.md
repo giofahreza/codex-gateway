@@ -66,13 +66,56 @@ cargo run
   "upstream_base": "https://chatgpt.com/backend-api/codex",
   "proxy_api_key": "your-shared-proxy-key",
   "tokens": [],
-  "auth_dir": "/root/dev/yow/gpt-gateway/auths"
+  "auth_dir": "/root/dev/yow/gpt-gateway/auths",
+  "oauth": {
+    "providers": {
+      "qwen": {
+        "client_id": "f0304373b74a44d2b584a3fb70ca9e56",
+        "client_secret": "",
+        "redirect_uri": "http://127.0.0.1:8319/login/qwen/callback",
+        "scopes": ["openid", "profile", "email", "model.completion"],
+        "authorize_url": "https://chat.qwen.ai/oauth/authorize",
+        "token_url": "https://chat.qwen.ai/api/v1/oauth2/token",
+        "validate_url": "https://chat.qwen.ai/api/v1/auths/",
+        "refresh_url": "https://chat.qwen.ai/api/v1/auths/",
+        "session_url": "https://chat.qwen.ai/api/v1/auths/",
+        "base_url": "https://chat.qwen.ai/api/v1"
+      }
+    }
+  }
 }
 ```
 
 Notes:
 - `tokens` is optional. If empty, tokens are loaded from `auth_dir`.
 - Tokens are de‑duplicated and rotated in round‑robin order.
+- `oauth.providers.qwen` is optional. Built-in defaults are used when omitted, and any field can also be overridden with `QWEN_OAUTH_*` environment variables from `.env.example`.
+
+## Qwen Browser Token Flow
+
+This gateway now follows the same Qwen login model used by [`encryptarun/qwen-api`](https://github.com/encryptarun/qwen-api): it validates a browser token from `chat.qwen.ai` instead of sending the user into a normal OAuth authorize/callback flow.
+
+Local setup:
+
+1. Start the gateway with `cargo run`.
+2. Open `http://127.0.0.1:8319/login/qwen/start`.
+3. The helper page will tell you to open `https://chat.qwen.ai`, sign in, and run the browser token extractor against `localStorage.token`.
+4. Paste that token back into the helper page, or paste it into the dashboard Qwen modal.
+5. Confirm a `type: "qwen"` auth file appears under `auth_dir`, then verify the account with `curl http://127.0.0.1:8319/qwen/accounts.json`.
+
+Relevant Qwen environment variables for this flow:
+
+- `QWEN_OAUTH_VALIDATE_URL`
+- `QWEN_OAUTH_REFRESH_URL`
+- `QWEN_OAUTH_SESSION_URL`
+- `QWEN_OAUTH_BASE_URL`
+
+Operational notes:
+
+- The local helper route is `GET /login/qwen/start`. It serves instructions and the extractor snippet; it does not redirect into `https://chat.qwen.ai/oauth/authorize`.
+- Direct token submission still uses `POST /login/qwen/start` with `{"token":"..."}`.
+- Browser-token-backed Qwen accounts refresh through the upstream `/auths/` session endpoint and keep the original browser token unless the upstream explicitly returns a replacement refresh token.
+- The legacy device-code flow is no longer used.
 
 ## Codex CLI config
 
@@ -173,6 +216,49 @@ sed -n 's/^data: //p' "$tmp" \
   | tail -n 1 \
   | base64 -d > /tmp/antigravity-image.png
 ```
+
+## DeepSeek
+
+This repo now also exposes a DeepSeek provider that accepts saved DeepSeek API keys and bridges OpenAI Responses-style requests into DeepSeek Chat Completions.
+
+- Add a DeepSeek account from the homepage at `http://127.0.0.1:8319/`
+- Or submit a key directly to `POST /login/deepseek/start` as JSON:
+
+```json
+{
+  "api_key": "sk-...",
+  "label": "optional",
+  "base_url": "https://api.deepseek.com"
+}
+```
+
+- DeepSeek API base path: `http://127.0.0.1:8319/deepseek/v1`
+- Current minimal surface:
+  - `GET /deepseek/v1/models`
+  - `POST /deepseek/v1/responses`
+
+List DeepSeek models:
+
+```bash
+curl http://127.0.0.1:8319/deepseek/v1/models \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY"
+```
+
+Send a basic DeepSeek request through the Responses bridge:
+
+```bash
+curl http://127.0.0.1:8319/deepseek/v1/responses \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "model": "deepseek-v4-pro",
+    "input": "Reply with one short line."
+  }'
+```
+
+Notes:
+- The gateway validates the key against DeepSeek `GET /models` before saving it.
+- Tool-call turns and reasoning summaries are translated into DeepSeek’s chat-completions format so Codex CLI can keep using the Responses API against the gateway instead of talking to DeepSeek directly.
 
 ## Troubleshooting
 

@@ -7,6 +7,7 @@ pub enum Provider {
     Antigravity,
     Gemini,
     Qwen,
+    DeepSeek,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -73,6 +74,8 @@ pub struct StatsStore {
     pub gemini: HashMap<String, StoredAccountUsage>,
     #[serde(default)]
     pub qwen: HashMap<String, StoredAccountUsage>,
+    #[serde(default)]
+    pub deepseek: HashMap<String, StoredAccountUsage>,
 }
 
 impl Default for StatsStore {
@@ -94,6 +97,7 @@ impl Default for StatsStore {
             antigravity: HashMap::new(),
             gemini: HashMap::new(),
             qwen: HashMap::new(),
+            deepseek: HashMap::new(),
         }
     }
 }
@@ -105,6 +109,7 @@ impl StatsStore {
             Provider::Antigravity => self.antigravity.get(key),
             Provider::Gemini => self.gemini.get(key),
             Provider::Qwen => self.qwen.get(key),
+            Provider::DeepSeek => self.deepseek.get(key),
         }
     }
 
@@ -118,6 +123,7 @@ impl StatsStore {
             Provider::Antigravity => self.antigravity.entry(key).or_default(),
             Provider::Gemini => self.gemini.entry(key).or_default(),
             Provider::Qwen => self.qwen.entry(key).or_default(),
+            Provider::DeepSeek => self.deepseek.entry(key).or_default(),
         }
     }
 }

@@ -39,11 +39,13 @@ struct AppState {
     agw_rr: Arc<Mutex<usize>>,
     gemini_rr: Arc<Mutex<usize>>,
     qwen_rr: Arc<Mutex<usize>>,
+    deepseek_rr: Arc<Mutex<usize>>,
     client: reqwest::Client,
     tokens: Arc<Mutex<Vec<UpstreamToken>>>,
     agw_accounts: Arc<Mutex<Vec<target::antigravity::accounts::AntigravityAccount>>>,
     gemini_accounts: Arc<Mutex<Vec<target::gemini::accounts::GeminiAccount>>>,
     qwen_accounts: Arc<Mutex<Vec<target::qwen::accounts::QwenAccount>>>,
+    deepseek_accounts: Arc<Mutex<Vec<target::deepseek::accounts::DeepSeekAccount>>>,
     stats: Arc<Mutex<UsageStats>>,
     persisted_stats: Arc<Mutex<StatsStore>>,
     quota_cache: Arc<Mutex<Vec<Option<QuotaCacheEntry>>>>,
@@ -53,7 +55,7 @@ struct AppState {
     oauth_pending: Arc<Mutex<HashMap<String, PendingOAuth>>>,
     agw_oauth_pending: Arc<Mutex<HashMap<String, target::antigravity::auth::PendingOAuth>>>,
     gemini_oauth_pending: Arc<Mutex<HashSet<String>>>,
-    qwen_oauth_pending: Arc<Mutex<HashMap<String, target::qwen::auth::PendingDeviceFlow>>>,
+    qwen_oauth_pending: Arc<Mutex<HashMap<String, target::qwen::auth::PendingOAuth>>>,
     disabled: Arc<Mutex<HashSet<String>>>,
     usage_history_lock: Arc<Mutex<()>>,
 }
@@ -79,6 +81,8 @@ struct Config {
     auth_dir: Option<String>,
     // Optional list of disabled credential filenames
     disabled_files: Option<Vec<String>>,
+    #[serde(default)]
+    oauth: target::oauth::OAuthConfig,
 }
 
 #[derive(Default, Clone, Serialize)]
@@ -87,6 +91,7 @@ struct UsageStats {
     agw_accounts: Vec<AccountUsage>,
     gemini_accounts: Vec<AccountUsage>,
     qwen_accounts: Vec<AccountUsage>,
+    deepseek_accounts: Vec<AccountUsage>,
     total_requests: u64,
     total_errors: u64,
     total_prompt_total: u64,
@@ -180,12 +185,14 @@ async fn main() {
     let agw_accounts = target::antigravity::accounts::load_accounts(&cfg, &disabled);
     let gemini_accounts = target::gemini::accounts::load_accounts(&cfg, &disabled);
     let qwen_accounts = target::qwen::accounts::load_accounts(&cfg, &disabled);
+    let deepseek_accounts = target::deepseek::accounts::load_accounts(&cfg, &disabled);
     let persisted_stats = stats_store::load(&cfg);
     let stats = build_usage_stats(
         &tokens,
         &agw_accounts,
         &gemini_accounts,
         &qwen_accounts,
+        &deepseek_accounts,
         &persisted_stats,
     );
     let quota_cache = vec![None; tokens.len()];
@@ -207,11 +214,13 @@ async fn main() {
         agw_rr: Arc::new(Mutex::new(0)),
         gemini_rr: Arc::new(Mutex::new(0)),
         qwen_rr: Arc::new(Mutex::new(0)),
+        deepseek_rr: Arc::new(Mutex::new(0)),
         client,
         tokens: Arc::new(Mutex::new(tokens)),
         agw_accounts: Arc::new(Mutex::new(agw_accounts)),
         gemini_accounts: Arc::new(Mutex::new(gemini_accounts)),
         qwen_accounts: Arc::new(Mutex::new(qwen_accounts)),
+        deepseek_accounts: Arc::new(Mutex::new(deepseek_accounts)),
         stats: Arc::new(Mutex::new(stats)),
         persisted_stats: Arc::new(Mutex::new(persisted_stats)),
         quota_cache: Arc::new(Mutex::new(quota_cache)),
@@ -253,9 +262,15 @@ async fn main() {
         .route("/qwen/accounts.json", any(qwen_accounts_route))
         .route("/qwen/quota.json", any(qwen_quota_json_route))
         .route("/login/qwen/start", any(qwen_login_start_route))
+        .route("/login/qwen/submit", any(qwen_login_submit_route))
         .route("/login/qwen/status", any(qwen_login_status_route))
+        .route("/login/:provider/callback", any(oauth_login_callback_route))
         .route("/qwen/v1/models", any(qwen_models_route))
         .route("/qwen/v1/responses", any(qwen_responses_route))
+        .route("/deepseek/accounts.json", any(deepseek_accounts_route))
+        .route("/login/deepseek/start", any(deepseek_login_start_route))
+        .route("/deepseek/v1/models", any(deepseek_models_route))
+        .route("/deepseek/v1/responses", any(deepseek_responses_route))
         .route("/usage/summary.json", any(usage_summary_route))
         .route("/usage/history.json", any(usage_history_route))
         .route("/temp-files/:name", any(temp_file_route))
@@ -635,7 +650,7 @@ async fn dashboard() -> impl IntoResponse {
           <span>Qwen Accounts</span>
           <button id="addQwenAccountBtn">Add Qwen</button>
         </h2>
-        <div class="muted panel-note">Use these accounts through <code>/qwen/v1/*</code>. Qwen login here uses the upstream device flow and polls automatically after you approve it in the browser.</div>
+        <div class="muted panel-note">Use these accounts through <code>/qwen/v1/*</code>. Qwen login here follows the browser-token flow used by <code>qwen-api</code>: open the local helper, extract <code>localStorage.token</code> from <code>chat.qwen.ai</code>, then save it back to this gateway.</div>
         <div class="table-wrap">
           <table>
           <thead>
@@ -650,6 +665,25 @@ async fn dashboard() -> impl IntoResponse {
           </table>
         </div>
       </div>
+      <div class="section">
+        <h2 class="section-header">
+          <span>DeepSeek Accounts</span>
+          <button id="addDeepSeekAccountBtn">Add DeepSeek</button>
+        </h2>
+        <div class="muted panel-note">Use these accounts through <code>/deepseek/v1/*</code>. This provider accepts a DeepSeek API key and translates OpenAI Responses requests into DeepSeek chat-completions requests.</div>
+        <div class="table-wrap">
+          <table>
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Base URL</th>
+              <th>Type</th>
+            </tr>
+          </thead>
+          <tbody id="deepseekRows"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
     <script>
       let lastQuota = new Map();
@@ -659,8 +693,6 @@ async fn dashboard() -> impl IntoResponse {
       let openAgwRows = new Set();
       let openGeminiRows = new Set();
       let openQwenRows = new Set();
-      let qwenPollTimer = null;
-      let qwenLoginState = null;
       let activeTipEl = null;
       let activeTipTimer = null;
       const THEME_KEY = 'gpt-gateway-theme';
@@ -1063,6 +1095,7 @@ async fn dashboard() -> impl IntoResponse {
             || limits.find(l => l.scope === 'output-tokens')
             || null;
           const accountTip = [
+            'Account ID: ' + (a.account_id || a.subject || '-'),
             'Alias: ' + (a.email || a.label || ''),
             'Resource: ' + resource,
             'Token expires: ' + (a.expired_at || '-')
@@ -1173,11 +1206,36 @@ async fn dashboard() -> impl IntoResponse {
         });
         lastQwenQuota = quotaMap;
       }
+      async function refreshDeepSeekAccounts() {
+        const res = await fetch('/deepseek/accounts.json');
+        const data = await res.json();
+        const rows = (data.accounts || []).map(a => {
+          const toggleLabel = a.enabled ? 'Disable' : 'Enable';
+          const dot = a.enabled ? '#2ecc71' : '#e74c3c';
+          const toggleControl = a.file_name
+            ? `<button title="${toggleLabel}" onclick="event.stopPropagation();toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" class="dot-button" style="background:${dot};"></button>`
+            : `<span class="dot-indicator" style="background:${dot};"></span>`;
+          const deleteControl = a.file_name
+            ? `<button title="Delete" onclick="event.stopPropagation();deleteCred('${a.file_name}')" class="icon-button">&#128465;</button>`
+            : '';
+          const accountTip = [
+            'Account ID: ' + (a.account_id || a.label || '-'),
+            'Base URL: ' + (a.base_url || 'https://api.deepseek.com')
+          ].join(' | ');
+          return '<tr>' +
+            '<td><span class="row-label">' + toggleControl + deleteControl + '<span data-tip="' + accountTip + '" title="' + accountTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + a.label + '</span><span class="count-pill">(' + (a.requests || 0) + '/' + (a.errors || 0) + ')</span></span></td>' +
+            '<td><code>' + (a.base_url || 'https://api.deepseek.com') + '</code></td>' +
+            '<td>API key</td>' +
+          '</tr>';
+        }).join('');
+        document.getElementById('deepseekRows').innerHTML = rows;
+      }
       refresh();
       refreshQuota();
       refreshAgwQuota().then(() => refreshAgwAccounts());
       refreshGeminiQuota().then(() => refreshGeminiAccounts());
       refreshQwenQuota().then(() => refreshQwenAccounts());
+      refreshDeepSeekAccounts();
       setInterval(refresh, 5000);
       setInterval(refreshQuota, 60000);
       setInterval(refreshAgwQuota, 60000);
@@ -1186,6 +1244,7 @@ async fn dashboard() -> impl IntoResponse {
       setInterval(refreshAgwAccounts, 10000);
       setInterval(refreshGeminiAccounts, 10000);
       setInterval(refreshQwenAccounts, 10000);
+      setInterval(refreshDeepSeekAccounts, 10000);
     </script>
     <div id="addModal" class="modal" style="display:none;">
       <div class="modal-card">
@@ -1244,13 +1303,36 @@ async fn dashboard() -> impl IntoResponse {
     <div id="addQwenModal" class="modal" style="display:none;">
       <div class="modal-card">
         <h2 style="margin-top:0;">Add Qwen Account</h2>
-        <p>Click start, approve the Qwen device login in a new tab, and this dialog will poll automatically until the auth file is saved.</p>
-        <button onclick="startQwenLogin()">Start Login</button>
+        <p>Open the local Qwen token helper first. It explains the same browser-token flow used by <code>qwen-api</code> and gives you the extractor snippet for <code>chat.qwen.ai</code>.</p>
+        <div class="modal-actions" style="margin-top:8px;">
+          <button type="button" onclick="startQwenLogin()">Open Token Helper</button>
+        </div>
+        <p class="muted" style="margin-top:12px;">Direct fallback: open <code>chat.qwen.ai</code>, copy <code>localStorage.token</code> from the browser console, and paste it here.</p>
+        <textarea id="qwenTokenInput" rows="6" placeholder="Paste chat.qwen.ai token here" style="width:100%;box-sizing:border-box;font-family:monospace;"></textarea>
+        <button onclick="submitQwenToken()" style="margin-top:12px;">Save Token</button>
         <div id="qwenStatus" class="muted" style="margin-top:8px;"></div>
-        <pre id="qwenAuthUrl" class="auth-url"></pre>
-        <div id="qwenUserCode" class="muted" style="margin-top:8px;"></div>
         <div class="modal-actions" style="margin-top:16px;">
           <button type="button" id="closeQwenModalBtn" class="secondary-button">Close</button>
+        </div>
+      </div>
+    </div>
+    <div id="addDeepSeekModal" class="modal" style="display:none;">
+      <div class="modal-card">
+        <h2 style="margin-top:0;">Add DeepSeek Account</h2>
+        <p>Paste a DeepSeek API key. The gateway validates it against <code>/models</code> before saving it.</p>
+        <div class="modal-actions" style="margin-top:8px;">
+          <button type="button" onclick="window.open('/login/deepseek/start', '_blank', 'noopener')">Open Helper</button>
+        </div>
+        <label style="margin-top:12px;">API Key</label>
+        <textarea id="deepseekKeyInput" rows="6" placeholder="Paste DeepSeek API key here" style="width:100%;box-sizing:border-box;font-family:monospace;"></textarea>
+        <label style="margin-top:12px;">Label</label>
+        <input id="deepseekLabelInput" placeholder="optional label">
+        <label style="margin-top:12px;">Base URL</label>
+        <input id="deepseekBaseUrlInput" placeholder="https://api.deepseek.com">
+        <button onclick="submitDeepSeekKey()" style="margin-top:12px;">Save Key</button>
+        <div id="deepseekStatus" class="muted" style="margin-top:8px;"></div>
+        <div class="modal-actions" style="margin-top:16px;">
+          <button type="button" id="closeDeepSeekModalBtn" class="secondary-button">Close</button>
         </div>
       </div>
     </div>
@@ -1328,49 +1410,41 @@ async fn dashboard() -> impl IntoResponse {
           document.getElementById('addGeminiModal').style.display = 'none';
         }
       });
-      function stopQwenPolling() {
-        if (qwenPollTimer) {
-          clearInterval(qwenPollTimer);
-          qwenPollTimer = null;
-        }
-      }
       function closeQwenModal() {
-        stopQwenPolling();
         document.getElementById('addQwenModal').style.display = 'none';
       }
-      async function pollQwenLoginStatus() {
-        if (!qwenLoginState) return;
-        const res = await fetch('/login/qwen/status?state=' + encodeURIComponent(qwenLoginState));
-        const data = await res.json();
-        document.getElementById('qwenStatus').textContent = data.message || 'Waiting for Qwen authorization.';
-        if (data.status === 'completed') {
-          stopQwenPolling();
-          refreshQwenAccounts();
+      function startQwenLogin() {
+        const popup = window.open('/login/qwen/start', '_blank', 'noopener');
+        if (!popup) {
+          window.location.href = '/login/qwen/start';
           return;
         }
-        if (data.status === 'error' || data.status === 'expired' || data.ok === false) {
-          stopQwenPolling();
-        }
+        document.getElementById('qwenStatus').textContent = 'Opened the Qwen token helper in a new tab. Follow the browser-token steps there, or use the direct token fallback below.';
       }
-      async function startQwenLogin() {
-        stopQwenPolling();
-        const res = await fetch('/login/qwen/start');
-        const data = await res.json();
-        if (!data.ok || !data.url || !data.state) {
-          document.getElementById('qwenStatus').textContent = data.message || 'Failed to start Qwen login';
+      async function submitQwenToken() {
+        const token = document.getElementById('qwenTokenInput').value.trim();
+        if (!token) {
+          document.getElementById('qwenStatus').textContent = 'Paste a Qwen browser token first.';
           return;
         }
-        qwenLoginState = data.state;
-        window.open(data.url, '_blank');
-        document.getElementById('qwenStatus').textContent = 'Opened login URL in new tab. Approve it there; this dialog will keep polling.';
-        const pre = document.getElementById('qwenAuthUrl');
-        pre.textContent = data.url;
-        pre.style.display = 'block';
-        document.getElementById('qwenUserCode').textContent = data.user_code ? ('User code: ' + data.user_code) : '';
-        qwenPollTimer = setInterval(pollQwenLoginStatus, Math.max(2000, (data.interval || 5) * 1000));
-        pollQwenLoginStatus();
+        const res = await fetch('/login/qwen/start', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ token })
+        });
+        const data = await res.json();
+        document.getElementById('qwenStatus').textContent = data.message || 'Failed to save Qwen token';
+        if (!data.ok) {
+          return;
+        }
+        document.getElementById('qwenTokenInput').value = '';
+        refreshQwenAccounts();
       }
       document.getElementById('addQwenAccountBtn').addEventListener('click', () => {
+        document.getElementById('qwenStatus').textContent = '';
+        document.getElementById('qwenTokenInput').value = '';
         document.getElementById('addQwenModal').style.display = 'block';
       });
       document.getElementById('closeQwenModalBtn').addEventListener('click', () => {
@@ -1379,6 +1453,53 @@ async fn dashboard() -> impl IntoResponse {
       document.getElementById('addQwenModal').addEventListener('click', (e) => {
         if (e.target.id === 'addQwenModal') {
           closeQwenModal();
+        }
+      });
+      function closeDeepSeekModal() {
+        document.getElementById('addDeepSeekModal').style.display = 'none';
+      }
+      async function submitDeepSeekKey() {
+        const apiKey = document.getElementById('deepseekKeyInput').value.trim();
+        const label = document.getElementById('deepseekLabelInput').value.trim();
+        const baseUrl = document.getElementById('deepseekBaseUrlInput').value.trim();
+        if (!apiKey) {
+          document.getElementById('deepseekStatus').textContent = 'Paste a DeepSeek API key first.';
+          return;
+        }
+        const res = await fetch('/login/deepseek/start', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            api_key: apiKey,
+            label: label || undefined,
+            base_url: baseUrl || undefined
+          })
+        });
+        const data = await res.json();
+        document.getElementById('deepseekStatus').textContent = data.message || 'Failed to save DeepSeek key';
+        if (!data.ok) {
+          return;
+        }
+        document.getElementById('deepseekKeyInput').value = '';
+        document.getElementById('deepseekLabelInput').value = '';
+        document.getElementById('deepseekBaseUrlInput').value = '';
+        refreshDeepSeekAccounts();
+      }
+      document.getElementById('addDeepSeekAccountBtn').addEventListener('click', () => {
+        document.getElementById('deepseekStatus').textContent = '';
+        document.getElementById('deepseekKeyInput').value = '';
+        document.getElementById('deepseekLabelInput').value = '';
+        document.getElementById('deepseekBaseUrlInput').value = '';
+        document.getElementById('addDeepSeekModal').style.display = 'block';
+      });
+      document.getElementById('closeDeepSeekModalBtn').addEventListener('click', () => {
+        closeDeepSeekModal();
+      });
+      document.getElementById('addDeepSeekModal').addEventListener('click', (e) => {
+        if (e.target.id === 'addDeepSeekModal') {
+          closeDeepSeekModal();
         }
       });
       document.getElementById('loginForm').addEventListener('submit', async (e) => {
@@ -1465,6 +1586,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshGeminiQuota();
         refreshGeminiAccounts();
         refreshQwenAccounts();
+        refreshDeepSeekAccounts();
       }
       async function toggleCred(fileName, enabled) {
         const key = prompt('Proxy API key for toggle:');
@@ -1486,6 +1608,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshGeminiQuota();
         refreshGeminiAccounts();
         refreshQwenAccounts();
+        refreshDeepSeekAccounts();
       }
     </script>
   </body>
@@ -1685,8 +1808,20 @@ async fn qwen_quota_json_route(State(state): State<AppState>) -> impl IntoRespon
     target::qwen::admin::quota_json(State(state)).await
 }
 
-async fn qwen_login_start_route(State(state): State<AppState>) -> impl IntoResponse {
-    target::qwen::admin::login_start(State(state)).await
+async fn qwen_login_start_route(
+    State(state): State<AppState>,
+    method: Method,
+    body: Bytes,
+) -> impl IntoResponse {
+    target::qwen::admin::login_start(State(state), method, body).await
+}
+
+async fn qwen_login_submit_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<target::qwen::admin::CallbackForm>,
+) -> impl IntoResponse {
+    target::qwen::admin::login_submit(State(state), headers, Form(form)).await
 }
 
 async fn qwen_login_status_route(
@@ -1694,6 +1829,16 @@ async fn qwen_login_status_route(
     Query(query): Query<target::qwen::admin::LoginStatusQuery>,
 ) -> impl IntoResponse {
     target::qwen::admin::login_status(State(state), Query(query)).await
+}
+
+async fn oauth_login_callback_route(
+    Path(provider): Path<String>,
+    State(state): State<AppState>,
+    method: Method,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+) -> impl IntoResponse {
+    target::oauth::login_callback_route(state, provider, method, headers, uri).await
 }
 
 async fn qwen_models_route(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -1706,6 +1851,33 @@ async fn qwen_responses_route(
     body: Bytes,
 ) -> impl IntoResponse {
     target::qwen::api::responses(State(state), headers, body).await
+}
+
+async fn deepseek_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
+    target::deepseek::admin::accounts_json(State(state)).await
+}
+
+async fn deepseek_login_start_route(
+    State(state): State<AppState>,
+    method: Method,
+    body: Bytes,
+) -> impl IntoResponse {
+    target::deepseek::admin::login_start(State(state), method, body).await
+}
+
+async fn deepseek_models_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    target::deepseek::api::models(State(state), headers).await
+}
+
+async fn deepseek_responses_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    target::deepseek::api::responses(State(state), headers, body).await
 }
 
 async fn usage_summary_route(State(state): State<AppState>) -> impl IntoResponse {
@@ -1730,10 +1902,16 @@ async fn usage_summary_route(State(state): State<AppState>) -> impl IntoResponse
         .into_iter()
         .map(|(key, usage)| serde_json::json!({ "key": key, "usage": usage }))
         .collect::<Vec<_>>();
+    let mut deepseek = persisted
+        .deepseek
+        .into_iter()
+        .map(|(key, usage)| serde_json::json!({ "key": key, "usage": usage }))
+        .collect::<Vec<_>>();
     codex.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     antigravity.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     gemini.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     qwen.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+    deepseek.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     axum::Json(serde_json::json!({
         "totals": {
             "requests": persisted.total_requests,
@@ -1752,7 +1930,8 @@ async fn usage_summary_route(State(state): State<AppState>) -> impl IntoResponse
             "codex": codex,
             "antigravity": antigravity,
             "gemini": gemini,
-            "qwen": qwen
+            "qwen": qwen,
+            "deepseek": deepseek
         }
     }))
 }
@@ -2662,6 +2841,7 @@ fn build_usage_stats(
     agw_accounts: &[target::antigravity::accounts::AntigravityAccount],
     gemini_accounts: &[target::gemini::accounts::GeminiAccount],
     qwen_accounts: &[target::qwen::accounts::QwenAccount],
+    deepseek_accounts: &[target::deepseek::accounts::DeepSeekAccount],
     persisted_stats: &StatsStore,
 ) -> UsageStats {
     let codex_accounts = tokens
@@ -2780,11 +2960,41 @@ fn build_usage_stats(
         })
         .collect();
 
+    let deepseek_accounts = deepseek_accounts
+        .iter()
+        .map(|account| {
+            let key = deepseek_stats_key(account);
+            let stored = persisted_stats
+                .account_usage(Provider::DeepSeek, &key)
+                .cloned()
+                .unwrap_or_default();
+            AccountUsage {
+                key,
+                label: account.label.clone(),
+                account_id: account.account_id.clone(),
+                requests: stored.requests,
+                errors: stored.errors,
+                prompt_total: stored.prompt_total,
+                prompt_error_total: stored.prompt_error_total,
+                input_tokens: stored.input_tokens,
+                output_tokens: stored.output_tokens,
+                total_tokens: stored.total_tokens,
+                cache_tokens: stored.cache_tokens,
+                reasoning_tokens: stored.reasoning_tokens,
+                first_seen_at: stored.first_seen_at,
+                last_seen_at: stored.last_seen_at,
+                last_success_at: stored.last_success_at,
+                last_error_at: stored.last_error_at,
+            }
+        })
+        .collect();
+
     UsageStats {
         codex_accounts,
         agw_accounts,
         gemini_accounts,
         qwen_accounts,
+        deepseek_accounts,
         total_requests: persisted_stats.total_requests,
         total_errors: persisted_stats.total_errors,
         total_prompt_total: persisted_stats.total_prompt_total,
@@ -2804,6 +3014,7 @@ pub(crate) fn sync_usage_stats(state: &AppState) {
     let agw_accounts = state.agw_accounts.lock().unwrap().clone();
     let gemini_accounts = state.gemini_accounts.lock().unwrap().clone();
     let qwen_accounts = state.qwen_accounts.lock().unwrap().clone();
+    let deepseek_accounts = state.deepseek_accounts.lock().unwrap().clone();
     let persisted_stats = state.persisted_stats.lock().unwrap().clone();
     let mut stats = state.stats.lock().unwrap();
     *stats = build_usage_stats(
@@ -2811,6 +3022,7 @@ pub(crate) fn sync_usage_stats(state: &AppState) {
         &agw_accounts,
         &gemini_accounts,
         &qwen_accounts,
+        &deepseek_accounts,
         &persisted_stats,
     );
 }
@@ -2844,6 +3056,9 @@ pub(crate) fn qwen_stats_key(account: &target::qwen::accounts::QwenAccount) -> S
     if let Some(subject) = account.subject.as_ref().filter(|s| !s.trim().is_empty()) {
         return format!("qwen:subject:{}", subject);
     }
+    if !account.account_id.trim().is_empty() {
+        return format!("qwen:subject:{}", account.account_id);
+    }
     if !account.email.trim().is_empty() {
         return format!("qwen:email:{}", account.email);
     }
@@ -2871,6 +3086,16 @@ pub(crate) fn gemini_stats_key(account: &target::gemini::accounts::GeminiAccount
         return format!("gemini:file:{}", file_name);
     }
     format!("gemini:label:{}", account.label)
+}
+
+pub(crate) fn deepseek_stats_key(account: &target::deepseek::accounts::DeepSeekAccount) -> String {
+    if !account.account_id.trim().is_empty() {
+        return format!("deepseek:account_id:{}", account.account_id);
+    }
+    if let Some(file_name) = account.file_name.as_ref().filter(|s| !s.trim().is_empty()) {
+        return format!("deepseek:file:{}", file_name);
+    }
+    format!("deepseek:label:{}", account.label)
 }
 
 fn qwen_fallback_stats_keys(account: &target::qwen::accounts::QwenAccount) -> Vec<String> {
@@ -2995,10 +3220,14 @@ pub(crate) fn qwen_usage_context(
         provider_name: "qwen",
         key: qwen_stats_key(account),
         label: account.label.clone(),
-        account_id: account
-            .subject
-            .clone()
-            .unwrap_or_else(|| account.email.clone()),
+        account_id: if !account.account_id.trim().is_empty() {
+            account.account_id.clone()
+        } else {
+            account
+                .subject
+                .clone()
+                .unwrap_or_else(|| account.email.clone())
+        },
         credential_file: account.file_name.clone(),
         model,
         request_path: request_path.into(),
@@ -3018,6 +3247,25 @@ pub(crate) fn gemini_usage_context(
         key: gemini_stats_key(account),
         label: account.label.clone(),
         account_id: account.email.clone(),
+        credential_file: account.file_name.clone(),
+        model,
+        request_path: request_path.into(),
+        prompt,
+    }
+}
+
+pub(crate) fn deepseek_usage_context(
+    account: &target::deepseek::accounts::DeepSeekAccount,
+    model: Option<String>,
+    request_path: impl Into<String>,
+    prompt: PromptMetrics,
+) -> UsageContext {
+    UsageContext {
+        provider: Provider::DeepSeek,
+        provider_name: "deepseek",
+        key: deepseek_stats_key(account),
+        label: account.label.clone(),
+        account_id: account.account_id.clone(),
         credential_file: account.file_name.clone(),
         model,
         request_path: request_path.into(),
@@ -3322,6 +3570,26 @@ pub(crate) fn record_gemini_error(
 }
 
 pub(crate) fn record_gemini_success(
+    state: &AppState,
+    context: &UsageContext,
+    metrics: &UsageMetrics,
+) {
+    record_usage_success(state, context, metrics);
+}
+
+pub(crate) fn record_deepseek_request(state: &AppState, context: &UsageContext) {
+    record_request_started(state, context);
+}
+
+pub(crate) fn record_deepseek_error(
+    state: &AppState,
+    context: &UsageContext,
+    message: impl Into<String>,
+) {
+    record_request_error(state, context, message);
+}
+
+pub(crate) fn record_deepseek_success(
     state: &AppState,
     context: &UsageContext,
     metrics: &UsageMetrics,

@@ -6,12 +6,10 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 use url::Url;
 
+use super::super::oauth::{provider_config, OAuthProvider};
 use super::accounts::AntigravityAccount;
 
-const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
-const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_USER_INFO_URL: &str = "https://www.googleapis.com/oauth2/v1/userinfo";
-const GOOGLE_REDIRECT_URI: &str = "http://localhost:51121/oauth-callback";
 const USER_AGENT_VERSION: &str = "antigravity/1.11.5";
 
 pub const ANTIGRAVITY_ENDPOINTS: &[&str] = &[
@@ -33,7 +31,17 @@ pub struct TokenResponse {
 }
 
 pub fn build_auth_url() -> Result<(String, String, String), String> {
-    let google_client_id = google_client_id()?;
+    let provider = provider_config(None, OAuthProvider::Antigravity);
+    let google_client_id =
+        required_config(&provider.client_id, "oauth.providers.antigravity.client_id")?;
+    let redirect_uri = required_config(
+        &provider.redirect_uri,
+        "oauth.providers.antigravity.redirect_uri",
+    )?;
+    let authorize_url = required_config(
+        &provider.authorize_url,
+        "oauth.providers.antigravity.authorize_url",
+    )?;
     let code_verifier: String = rand::rng()
         .sample_iter(&Alphanumeric)
         .take(64)
@@ -49,21 +57,12 @@ pub fn build_auth_url() -> Result<(String, String, String), String> {
         .map(char::from)
         .collect();
 
-    let scopes = [
-        "https://www.googleapis.com/auth/cloud-platform",
-        "https://www.googleapis.com/auth/userinfo.email",
-        "https://www.googleapis.com/auth/userinfo.profile",
-        "https://www.googleapis.com/auth/cclog",
-        "https://www.googleapis.com/auth/experimentsandconfigs",
-    ]
-    .join(" ");
-
-    let mut url = Url::parse(GOOGLE_AUTH_URL).map_err(|e| e.to_string())?;
+    let mut url = Url::parse(&authorize_url).map_err(|e| e.to_string())?;
     url.query_pairs_mut()
         .append_pair("client_id", &google_client_id)
-        .append_pair("redirect_uri", GOOGLE_REDIRECT_URI)
+        .append_pair("redirect_uri", &redirect_uri)
         .append_pair("response_type", "code")
-        .append_pair("scope", &scopes)
+        .append_pair("scope", &provider.scopes.join(" "))
         .append_pair("access_type", "offline")
         .append_pair("prompt", "consent")
         .append_pair("code_challenge", &code_challenge)
@@ -105,19 +104,29 @@ pub async fn exchange_code_for_tokens(
     code: &str,
     code_verifier: &str,
 ) -> Result<TokenResponse, String> {
-    let google_client_id = google_client_id()?;
-    let google_client_secret = google_client_secret()?;
+    let provider = provider_config(None, OAuthProvider::Antigravity);
+    let google_client_id =
+        required_config(&provider.client_id, "oauth.providers.antigravity.client_id")?;
+    let google_client_secret = required_config(
+        &provider.client_secret,
+        "oauth.providers.antigravity.client_secret",
+    )?;
+    let redirect_uri = required_config(
+        &provider.redirect_uri,
+        "oauth.providers.antigravity.redirect_uri",
+    )?;
+    let token_url = required_config(&provider.token_url, "oauth.providers.antigravity.token_url")?;
     let params = [
         ("client_id", google_client_id.as_str()),
         ("client_secret", google_client_secret.as_str()),
         ("code", code),
         ("code_verifier", code_verifier),
         ("grant_type", "authorization_code"),
-        ("redirect_uri", GOOGLE_REDIRECT_URI),
+        ("redirect_uri", redirect_uri.as_str()),
     ];
 
     let resp = client
-        .post(GOOGLE_TOKEN_URL)
+        .post(token_url)
         .form(&params)
         .timeout(Duration::from_secs(30))
         .send()
@@ -137,8 +146,14 @@ pub async fn refresh_access_token(
     client: &reqwest::Client,
     refresh_token: &str,
 ) -> Result<TokenResponse, String> {
-    let google_client_id = google_client_id()?;
-    let google_client_secret = google_client_secret()?;
+    let provider = provider_config(None, OAuthProvider::Antigravity);
+    let google_client_id =
+        required_config(&provider.client_id, "oauth.providers.antigravity.client_id")?;
+    let google_client_secret = required_config(
+        &provider.client_secret,
+        "oauth.providers.antigravity.client_secret",
+    )?;
+    let token_url = required_config(&provider.token_url, "oauth.providers.antigravity.token_url")?;
     let params = [
         ("client_id", google_client_id.as_str()),
         ("client_secret", google_client_secret.as_str()),
@@ -147,7 +162,7 @@ pub async fn refresh_access_token(
     ];
 
     let resp = client
-        .post(GOOGLE_TOKEN_URL)
+        .post(token_url)
         .form(&params)
         .timeout(Duration::from_secs(30))
         .send()
@@ -394,13 +409,11 @@ fn sanitize_label(s: &str) -> String {
         .collect()
 }
 
-fn google_client_id() -> Result<String, String> {
-    std::env::var("ANTIGRAVITY_GOOGLE_CLIENT_ID")
-        .map_err(|_| "ANTIGRAVITY_GOOGLE_CLIENT_ID is required for Antigravity OAuth".to_string())
-}
-
-fn google_client_secret() -> Result<String, String> {
-    std::env::var("ANTIGRAVITY_GOOGLE_CLIENT_SECRET").map_err(|_| {
-        "ANTIGRAVITY_GOOGLE_CLIENT_SECRET is required for Antigravity OAuth".to_string()
-    })
+fn required_config(value: &Option<String>, field_name: &str) -> Result<String, String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .ok_or_else(|| format!("{} is required for Antigravity OAuth", field_name))
 }

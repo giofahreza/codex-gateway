@@ -3,6 +3,7 @@ use std::collections::HashSet;
 
 #[derive(Clone, Default, Serialize)]
 pub struct QwenAccount {
+    pub account_id: String,
     pub email: String,
     pub subject: Option<String>,
     pub label: String,
@@ -64,24 +65,41 @@ pub fn load_accounts(cfg: &crate::Config, disabled: &HashSet<String>) -> Vec<Qwe
                     .get("access_token")
                     .and_then(|v| v.as_str())
                     .map(|value| value.to_string());
-                let fallback_email = value
+                let fallback_identity = value
                     .get("email")
                     .and_then(|v| v.as_str())
                     .or_else(|| value.get("label").and_then(|v| v.as_str()))
                     .unwrap_or("qwen-account")
                     .to_string();
-                let identity = access_token
-                    .as_deref()
-                    .map(|token| super::auth::identity_from_access_token(token, &fallback_email));
+                let identity = access_token.as_deref().map(|token| {
+                    super::auth::identity_from_access_token(token, &fallback_identity)
+                });
                 let subject = value
                     .get("subject")
                     .and_then(|v| v.as_str())
                     .map(|value| value.to_string())
                     .or_else(|| {
+                        value
+                            .get("account_id")
+                            .and_then(|v| v.as_str())
+                            .map(|value| value.to_string())
+                    })
+                    .or_else(|| {
                         identity
                             .as_ref()
                             .and_then(|identity| identity.subject.clone())
                     });
+                let account_id = value
+                    .get("account_id")
+                    .and_then(|v| v.as_str())
+                    .map(|value| value.to_string())
+                    .or_else(|| subject.clone())
+                    .or_else(|| {
+                        identity
+                            .as_ref()
+                            .map(|identity| identity.account_id.clone())
+                    })
+                    .unwrap_or_else(|| fallback_identity.clone());
                 let email = value
                     .get("email")
                     .and_then(|v| v.as_str())
@@ -91,7 +109,7 @@ pub fn load_accounts(cfg: &crate::Config, disabled: &HashSet<String>) -> Vec<Qwe
                             .as_ref()
                             .and_then(|identity| identity.email.clone())
                     })
-                    .unwrap_or(fallback_email);
+                    .unwrap_or_else(|| fallback_identity.clone());
                 let label = value
                     .get("label")
                     .and_then(|v| v.as_str())
@@ -107,6 +125,7 @@ pub fn load_accounts(cfg: &crate::Config, disabled: &HashSet<String>) -> Vec<Qwe
                 };
 
                 accounts.push(QwenAccount {
+                    account_id,
                     email,
                     subject,
                     label,

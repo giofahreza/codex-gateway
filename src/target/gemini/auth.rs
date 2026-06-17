@@ -4,27 +4,17 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use url::Url;
 
+use super::super::oauth::{provider_config, OAuthProvider};
 use super::accounts::GeminiAccount;
 
-const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
-const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_USER_INFO_URL: &str = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json";
 const GOOGLE_PROJECTS_URL: &str = "https://cloudresourcemanager.googleapis.com/v1/projects";
 const SERVICE_USAGE_URL: &str = "https://serviceusage.googleapis.com";
 const GEMINI_CLI_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
-const GEMINI_CLI_REDIRECT_URI: &str = "http://localhost:8085/oauth2callback";
-const GEMINI_GOOGLE_CLIENT_ID_ENV: &str = "GEMINI_GOOGLE_CLIENT_ID";
-const GEMINI_GOOGLE_CLIENT_SECRET_ENV: &str = "GEMINI_GOOGLE_CLIENT_SECRET";
 const GEMINI_CLI_USER_AGENT: &str = "google-api-nodejs-client/9.15.1";
 const GEMINI_CLI_API_CLIENT: &str = "gl-node/22.17.0";
 const GEMINI_CLI_CLIENT_METADATA: &str =
     "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI";
-
-const GEMINI_SCOPES: &[&str] = &[
-    "https://www.googleapis.com/auth/cloud-platform",
-    "https://www.googleapis.com/auth/userinfo.email",
-    "https://www.googleapis.com/auth/userinfo.profile",
-];
 
 #[derive(Deserialize)]
 pub struct TokenResponse {
@@ -48,19 +38,28 @@ struct ProjectsResponse {
 }
 
 pub fn build_auth_url() -> Result<(String, String), String> {
+    let provider = provider_config(None, OAuthProvider::Gemini);
     let client_id = env_client_id()?;
+    let redirect_uri = required_config(
+        &provider.redirect_uri,
+        "oauth.providers.gemini.redirect_uri",
+    )?;
+    let authorize_url = required_config(
+        &provider.authorize_url,
+        "oauth.providers.gemini.authorize_url",
+    )?;
     let state_token: String = rand::rng()
         .sample_iter(&rand::distr::Alphanumeric)
         .take(32)
         .map(char::from)
         .collect();
 
-    let mut url = Url::parse(GOOGLE_AUTH_URL).map_err(|e| e.to_string())?;
+    let mut url = Url::parse(&authorize_url).map_err(|e| e.to_string())?;
     url.query_pairs_mut()
         .append_pair("client_id", &client_id)
-        .append_pair("redirect_uri", GEMINI_CLI_REDIRECT_URI)
+        .append_pair("redirect_uri", &redirect_uri)
         .append_pair("response_type", "code")
-        .append_pair("scope", &GEMINI_SCOPES.join(" "))
+        .append_pair("scope", &provider.scopes.join(" "))
         .append_pair("access_type", "offline")
         .append_pair("prompt", "consent")
         .append_pair("state", &state_token);
@@ -99,18 +98,24 @@ pub async fn exchange_code_for_tokens(
     client: &reqwest::Client,
     code: &str,
 ) -> Result<TokenResponse, String> {
+    let provider = provider_config(None, OAuthProvider::Gemini);
     let client_id = env_client_id()?;
     let client_secret = env_client_secret()?;
+    let redirect_uri = required_config(
+        &provider.redirect_uri,
+        "oauth.providers.gemini.redirect_uri",
+    )?;
+    let token_url = required_config(&provider.token_url, "oauth.providers.gemini.token_url")?;
     let params = [
         ("client_id", client_id.as_str()),
         ("client_secret", client_secret.as_str()),
         ("code", code),
         ("grant_type", "authorization_code"),
-        ("redirect_uri", GEMINI_CLI_REDIRECT_URI),
+        ("redirect_uri", redirect_uri.as_str()),
     ];
 
     let resp = client
-        .post(GOOGLE_TOKEN_URL)
+        .post(token_url)
         .form(&params)
         .timeout(Duration::from_secs(30))
         .send()
@@ -130,8 +135,10 @@ pub async fn refresh_access_token(
     client: &reqwest::Client,
     account: &GeminiAccount,
 ) -> Result<TokenResponse, String> {
+    let provider = provider_config(None, OAuthProvider::Gemini);
     let client_id = account_client_id(account)?;
     let client_secret = account_client_secret(account)?;
+    let token_url = required_config(&provider.token_url, "oauth.providers.gemini.token_url")?;
     let params = [
         ("client_id", client_id.as_str()),
         ("client_secret", client_secret.as_str()),
@@ -140,7 +147,7 @@ pub async fn refresh_access_token(
     ];
 
     let resp = client
-        .post(GOOGLE_TOKEN_URL)
+        .post(token_url)
         .form(&params)
         .timeout(Duration::from_secs(30))
         .send()
@@ -420,16 +427,18 @@ pub fn save_auth(
 
     let client_id = env_client_id()?;
     let client_secret = env_client_secret()?;
+    let provider = provider_config(None, OAuthProvider::Gemini);
+    let token_url = required_config(&provider.token_url, "oauth.providers.gemini.token_url")?;
 
     let token = serde_json::json!({
         "access_token": token_resp.access_token.clone(),
         "refresh_token": refresh_token,
         "token_type": token_resp.token_type.clone().unwrap_or_else(|| "Bearer".to_string()),
         "expiry": expires_at,
-        "token_uri": GOOGLE_TOKEN_URL,
+        "token_uri": token_url,
         "client_id": client_id,
         "client_secret": client_secret,
-        "scopes": GEMINI_SCOPES,
+        "scopes": provider.scopes,
         "universe_domain": "googleapis.com"
     });
 
@@ -515,9 +524,18 @@ async fn call_gemini_cli(
     endpoint: &str,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    let provider = provider_config(None, OAuthProvider::Gemini);
+    let base_url = provider
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(GEMINI_CLI_ENDPOINT)
+        .trim_end_matches('/')
+        .to_string();
     let resp = gemini_headers(
         client
-            .post(format!("{}/v1internal:{}", GEMINI_CLI_ENDPOINT, endpoint))
+            .post(format!("{}/v1internal:{}", base_url, endpoint))
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
             .body(body.to_string())
@@ -558,6 +576,8 @@ fn persist_refreshed_account(
         (Utc::now() + ChronoDuration::seconds(token_resp.expires_in.max(0))).to_rfc3339();
     let client_id = account_client_id(account)?;
     let client_secret = account_client_secret(account)?;
+    let provider = provider_config(None, OAuthProvider::Gemini);
+    let token_url = required_config(&provider.token_url, "oauth.providers.gemini.token_url")?;
 
     if let serde_json::Value::Object(map) = &mut value {
         let token_entry = map
@@ -586,7 +606,7 @@ fn persist_refreshed_account(
             );
             token_map.insert(
                 "token_uri".to_string(),
-                serde_json::Value::String(GOOGLE_TOKEN_URL.to_string()),
+                serde_json::Value::String(token_url.clone()),
             );
             token_map.insert(
                 "client_id".to_string(),
@@ -596,7 +616,7 @@ fn persist_refreshed_account(
                 "client_secret".to_string(),
                 serde_json::Value::String(client_secret),
             );
-            token_map.insert("scopes".to_string(), serde_json::json!(GEMINI_SCOPES));
+            token_map.insert("scopes".to_string(), serde_json::json!(provider.scopes));
             token_map.insert(
                 "universe_domain".to_string(),
                 serde_json::Value::String("googleapis.com".to_string()),
@@ -645,21 +665,16 @@ fn credential_file_name(email: &str, project_id: &str) -> String {
 }
 
 fn env_client_id() -> Result<String, String> {
-    std::env::var(GEMINI_GOOGLE_CLIENT_ID_ENV).map_err(|_| {
-        format!(
-            "{} is required for Gemini OAuth login",
-            GEMINI_GOOGLE_CLIENT_ID_ENV
-        )
-    })
+    let provider = provider_config(None, OAuthProvider::Gemini);
+    required_config(&provider.client_id, "oauth.providers.gemini.client_id")
 }
 
 fn env_client_secret() -> Result<String, String> {
-    std::env::var(GEMINI_GOOGLE_CLIENT_SECRET_ENV).map_err(|_| {
-        format!(
-            "{} is required for Gemini OAuth login",
-            GEMINI_GOOGLE_CLIENT_SECRET_ENV
-        )
-    })
+    let provider = provider_config(None, OAuthProvider::Gemini);
+    required_config(
+        &provider.client_secret,
+        "oauth.providers.gemini.client_secret",
+    )
 }
 
 fn account_client_id(account: &GeminiAccount) -> Result<String, String> {
@@ -703,4 +718,13 @@ fn sanitize_label(value: &str) -> String {
             }
         })
         .collect()
+}
+
+fn required_config(value: &Option<String>, field_name: &str) -> Result<String, String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .ok_or_else(|| format!("{} is required for Gemini OAuth login", field_name))
 }

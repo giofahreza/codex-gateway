@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 use url::Url;
 
+use super::super::oauth::{provider_config, OAuthProvider};
+
 #[derive(Clone)]
 pub struct PendingOAuth {
     pub code_verifier: String,
@@ -23,6 +25,14 @@ pub struct TokenResponse {
 }
 
 pub fn build_auth_url() -> Result<(String, String, String), String> {
+    let provider = provider_config(None, OAuthProvider::Codex);
+    let client_id = required_config(&provider.client_id, "oauth.providers.codex.client_id")?;
+    let redirect_uri =
+        required_config(&provider.redirect_uri, "oauth.providers.codex.redirect_uri")?;
+    let authorize_url = required_config(
+        &provider.authorize_url,
+        "oauth.providers.codex.authorize_url",
+    )?;
     let code_verifier: String = rand::rng()
         .sample_iter(&Alphanumeric)
         .take(64)
@@ -38,13 +48,12 @@ pub fn build_auth_url() -> Result<(String, String, String), String> {
         .map(char::from)
         .collect();
 
-    let mut url =
-        Url::parse("https://auth.openai.com/oauth/authorize").map_err(|e| e.to_string())?;
+    let mut url = Url::parse(&authorize_url).map_err(|e| e.to_string())?;
     url.query_pairs_mut()
-        .append_pair("client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
+        .append_pair("client_id", &client_id)
         .append_pair("response_type", "code")
-        .append_pair("redirect_uri", "http://localhost:1455/auth/callback")
-        .append_pair("scope", "openid email profile offline_access")
+        .append_pair("redirect_uri", &redirect_uri)
+        .append_pair("scope", &provider.scopes.join(" "))
         .append_pair("state", &state_token)
         .append_pair("code_challenge", &code_challenge)
         .append_pair("code_challenge_method", "S256")
@@ -71,15 +80,20 @@ pub async fn exchange_code_for_tokens(
     code: &str,
     code_verifier: &str,
 ) -> Result<TokenResponse, String> {
+    let provider = provider_config(None, OAuthProvider::Codex);
+    let client_id = required_config(&provider.client_id, "oauth.providers.codex.client_id")?;
+    let redirect_uri =
+        required_config(&provider.redirect_uri, "oauth.providers.codex.redirect_uri")?;
+    let token_url = required_config(&provider.token_url, "oauth.providers.codex.token_url")?;
     let params = [
         ("grant_type", "authorization_code"),
-        ("client_id", "app_EMoamEEZ73f0CkXaXp7hrann"),
+        ("client_id", client_id.as_str()),
         ("code", code),
-        ("redirect_uri", "http://localhost:1455/auth/callback"),
+        ("redirect_uri", redirect_uri.as_str()),
         ("code_verifier", code_verifier),
     ];
     let resp = client
-        .post("https://auth.openai.com/oauth/token")
+        .post(token_url)
         .form(&params)
         .timeout(Duration::from_secs(30))
         .send()
@@ -172,4 +186,13 @@ fn parse_jwt_account_id(id_token: &str) -> Option<String> {
         .and_then(|a| a.get("chatgpt_account_id"))
         .and_then(|e| e.as_str())
         .map(|s| s.to_string())
+}
+
+fn required_config(value: &Option<String>, field_name: &str) -> Result<String, String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .ok_or_else(|| format!("{} is required", field_name))
 }

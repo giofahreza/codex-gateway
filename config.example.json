@@ -3,5 +3,26 @@
   "upstream_base": "https://chatgpt.com/backend-api/codex",
   "proxy_api_key": "your-shared-proxy-key",
   "tokens": [],
-  "auth_dir": "./auths"
+  "auth_dir": "./auths",
+  "oauth": {
+    "providers": {
+      "qwen": {
+        "client_id": "f0304373b74a44d2b584a3fb70ca9e56",
+        "client_secret": "",
+        "redirect_uri": "http://127.0.0.1:8319/login/qwen/callback",
+        "scopes": [
+          "openid",
+          "profile",
+          "email",
+          "model.completion"
+        ],
+        "authorize_url": "https://chat.qwen.ai/oauth/authorize",
+        "token_url": "https://chat.qwen.ai/api/v1/oauth2/token",
+        "validate_url": "https://chat.qwen.ai/api/v1/auths/",
+        "refresh_url": "https://chat.qwen.ai/api/v1/auths/",
+        "session_url": "https://chat.qwen.ai/api/v1/auths/",
+        "base_url": "https://chat.qwen.ai/api/v1"
+      }
+    }
+  }
 }
