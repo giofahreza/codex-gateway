@@ -273,6 +273,7 @@ async fn main() {
         .route("/deepseek/v1/responses", any(deepseek_responses_route))
         .route("/usage/summary.json", any(usage_summary_route))
         .route("/usage/history.json", any(usage_history_route))
+        .route("/usage/context-history.json", any(context_history_route))
         .route("/temp-files/:name", any(temp_file_route))
         .route("/docs", any(source::openapi::swagger_ui_redirect))
         .route("/docs/", any(source::openapi::swagger_ui_root))
@@ -569,6 +570,41 @@ async fn dashboard() -> impl IntoResponse {
           max-height: calc(100vh - 24px);
         }
       }
+      .chart-section {
+        margin: 20px 0 28px 0;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 16px;
+        box-shadow: var(--shadow);
+      }
+      .chart-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 8px;
+      }
+      .chart-legend {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+        font-size: 13px;
+      }
+      .chart-legend-item {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .chart-legend-dot {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+      }
+      .chart-wrap { position: relative; height: 300px; }
     </style>
     <script>
       (() => {
@@ -580,6 +616,7 @@ async fn dashboard() -> impl IntoResponse {
         }
       })();
     </script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   </head>
   <body>
     <div class="page-shell">
@@ -591,6 +628,13 @@ async fn dashboard() -> impl IntoResponse {
         </span>
       </h1>
       <div id="totals" class="muted"></div>
+      <div class="chart-section">
+        <div class="chart-header">
+          <h2 style="margin:0;">Context Usage (24h)</h2>
+          <div class="chart-legend" id="chartLegend"></div>
+        </div>
+        <div class="chart-wrap"><canvas id="contextChart"></canvas></div>
+      </div>
       <div class="table-wrap">
         <table>
         <thead>
@@ -1230,7 +1274,161 @@ async fn dashboard() -> impl IntoResponse {
         }).join('');
         document.getElementById('deepseekRows').innerHTML = rows;
       }
+      let contextChart = null;
+      const chartColors = {
+        input: '#3b82f6',
+        output: '#22c55e',
+        cache: '#f59e0b',
+        reasoning: '#a855f7'
+      };
+      function ensureChartDestroyed() {
+        if (contextChart) {
+          contextChart.destroy();
+          contextChart = null;
+        }
+      }
+      async function refreshContextChart() {
+        try {
+          const res = await fetch('/usage/context-history.json?hours=24&bucket_minutes=5');
+          const data = await res.json();
+          const labels = data.labels || [];
+          const buckets = data.buckets || [];
+
+          const inputData = [];
+          const outputData = [];
+          const cacheData = [];
+          const reasoningData = [];
+          for (const b of buckets) {
+            inputData.push(b.input_tokens || 0);
+            outputData.push(b.output_tokens || 0);
+            cacheData.push(b.cache_tokens || 0);
+            reasoningData.push(b.reasoning_tokens || 0);
+          }
+
+          const canvas = document.getElementById('contextChart');
+          if (!canvas) return;
+
+          ensureChartDestroyed();
+          const ctx = canvas.getContext('2d');
+          contextChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+              labels: labels,
+              datasets: [
+                {
+                  label: 'Input',
+                  data: inputData,
+                  borderColor: chartColors.input,
+                  backgroundColor: chartColors.input + '18',
+                  borderWidth: 2,
+                  pointRadius: 0,
+                  pointHitRadius: 6,
+                  tension: 0.2,
+                  fill: true
+                },
+                {
+                  label: 'Output',
+                  data: outputData,
+                  borderColor: chartColors.output,
+                  backgroundColor: chartColors.output + '18',
+                  borderWidth: 2,
+                  pointRadius: 0,
+                  pointHitRadius: 6,
+                  tension: 0.2,
+                  fill: true
+                },
+                {
+                  label: 'Cache',
+                  data: cacheData,
+                  borderColor: chartColors.cache,
+                  borderWidth: 1.5,
+                  borderDash: [5, 3],
+                  pointRadius: 0,
+                  pointHitRadius: 6,
+                  tension: 0.2,
+                  fill: false
+                },
+                {
+                  label: 'Reasoning',
+                  data: reasoningData,
+                  borderColor: chartColors.reasoning,
+                  borderWidth: 1.5,
+                  borderDash: [5, 3],
+                  pointRadius: 0,
+                  pointHitRadius: 6,
+                  tension: 0.2,
+                  fill: false
+                }
+              ]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              animation: false,
+              interaction: {
+                mode: 'index',
+                intersect: false
+              },
+              plugins: {
+                legend: { display: false },
+                tooltip: {
+                  callbacks: {
+                    label: function(ctx) {
+                      return ctx.dataset.label + ': ' + ctx.parsed.y.toLocaleString() + ' tokens';
+                    }
+                  }
+                }
+              },
+              scales: {
+                x: {
+                  display: true,
+                  ticks: { maxTicksLimit: 24, color: getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#94a3b8' },
+                  grid: { display: false }
+                },
+                y: {
+                  display: true,
+                  beginAtZero: true,
+                  ticks: {
+                    callback: function(v) { return v >= 1000000 ? (v/1000000).toFixed(1)+'M' : v >= 1000 ? (v/1000).toFixed(0)+'K' : v; },
+                    color: getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#94a3b8'
+                  },
+                  grid: { color: getComputedStyle(document.documentElement).getPropertyValue('--border').trim() || '#25314a' + '40' }
+                }
+              }
+            }
+          });
+
+          const legendDiv = document.getElementById('chartLegend');
+          if (legendDiv) {
+            legendDiv.innerHTML = [
+              { key: 'input', label: 'Input' },
+              { key: 'output', label: 'Output' },
+              { key: 'cache', label: 'Cache' },
+              { key: 'reasoning', label: 'Reasoning' }
+            ].map(function(item) {
+              return '<span class="chart-legend-item" data-key="' + item.key + '">'
+                + '<span class="chart-legend-dot" style="background:' + chartColors[item.key] + ';"></span>'
+                + item.label
+                + '</span>';
+            }).join('');
+            legendDiv.querySelectorAll('.chart-legend-item').forEach(function(el) {
+              el.addEventListener('click', function() {
+                const key = el.getAttribute('data-key');
+                const meta = contextChart.getDatasetMeta(
+                  ['input','output','cache','reasoning'].indexOf(key)
+                );
+                meta.hidden = !meta.hidden;
+                el.style.opacity = meta.hidden ? '0.4' : '1';
+                contextChart.update();
+              });
+            });
+          }
+        } catch (_) {
+          // Chart refresh is best-effort
+        }
+      }
       refresh();
+      refreshContextChart();
       refreshQuota();
       refreshAgwQuota().then(() => refreshAgwAccounts());
       refreshGeminiQuota().then(() => refreshGeminiAccounts());
@@ -1245,6 +1443,7 @@ async fn dashboard() -> impl IntoResponse {
       setInterval(refreshGeminiAccounts, 10000);
       setInterval(refreshQwenAccounts, 10000);
       setInterval(refreshDeepSeekAccounts, 10000);
+      setInterval(refreshContextChart, 60000);
     </script>
     <div id="addModal" class="modal" style="display:none;">
       <div class="modal-card">
@@ -1949,6 +2148,111 @@ async fn usage_history_route(
         )
             .into_response(),
     }
+}
+
+#[derive(Deserialize)]
+struct ContextHistoryQuery {
+    #[serde(default = "default_context_hours")]
+    hours: u64,
+    #[serde(default = "default_context_bucket_minutes")]
+    bucket_minutes: u64,
+}
+
+fn default_context_hours() -> u64 { 24 }
+fn default_context_bucket_minutes() -> u64 { 5 }
+
+async fn context_history_route(
+    State(state): State<AppState>,
+    Query(query): Query<ContextHistoryQuery>,
+) -> impl IntoResponse {
+    let hours = query.hours.max(1).min(720);
+    let bucket_minutes = query.bucket_minutes.max(1).min(60);
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
+
+    let all = match usage_store::load(
+        &state.cfg,
+        &usage_store::UsageHistoryQuery {
+            limit: None,
+            provider: None,
+            account_key: None,
+            model: None,
+        },
+    ) {
+        Ok(entries) => entries,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [("Content-Type", "application/json")],
+                openai_error_body(&err, "server_error", None),
+            )
+                .into_response();
+        }
+    };
+
+    // Filter success entries within the time window
+    let filtered: Vec<_> = all
+        .iter()
+        .filter(|e| e.success && e.recorded_at >= cutoff.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .collect();
+
+    if filtered.is_empty() {
+        return axum::Json(serde_json::json!({
+            "labels": [],
+            "datasets": []
+        }))
+        .into_response();
+    }
+
+    let bucket_secs = bucket_minutes * 60;
+    let start_ts = cutoff.timestamp();
+    let end_ts = chrono::Utc::now().timestamp();
+    let num_buckets = ((end_ts - start_ts) / bucket_secs as i64).max(1) as usize;
+    let num_buckets = num_buckets.min(288); // cap at 288 buckets
+
+    let mut buckets = vec![
+        serde_json::json!({
+            "input_tokens": 0u64,
+            "output_tokens": 0u64,
+            "total_tokens": 0u64,
+            "cache_tokens": 0u64,
+            "reasoning_tokens": 0u64,
+            "request_count": 0u64,
+        });
+        num_buckets
+    ];
+
+    let mut labels = Vec::with_capacity(num_buckets);
+    for i in 0..num_buckets {
+        let bucket_start = start_ts + (i as i64 * bucket_secs as i64);
+        let dt = chrono::DateTime::from_timestamp(bucket_start, 0)
+            .unwrap_or(chrono::DateTime::UNIX_EPOCH);
+        labels.push(dt.format("%H:%M").to_string());
+    }
+
+    for entry in filtered {
+        let ts = match chrono::DateTime::parse_from_rfc3339(&entry.recorded_at) {
+            Ok(dt) => dt.timestamp(),
+            Err(_) => continue,
+        };
+        let bucket_idx = ((ts - start_ts) / bucket_secs as i64) as usize;
+        if bucket_idx >= num_buckets {
+            continue;
+        }
+        let b = &mut buckets[bucket_idx];
+        b["input_tokens"] = serde_json::json!(b["input_tokens"].as_u64().unwrap_or(0) + entry.input_tokens);
+        b["output_tokens"] = serde_json::json!(b["output_tokens"].as_u64().unwrap_or(0) + entry.output_tokens);
+        b["total_tokens"] = serde_json::json!(b["total_tokens"].as_u64().unwrap_or(0) + entry.total_tokens);
+        b["cache_tokens"] = serde_json::json!(b["cache_tokens"].as_u64().unwrap_or(0) + entry.cache_tokens);
+        b["reasoning_tokens"] = serde_json::json!(b["reasoning_tokens"].as_u64().unwrap_or(0) + entry.reasoning_tokens);
+        b["request_count"] = serde_json::json!(b["request_count"].as_u64().unwrap_or(0) + 1);
+    }
+
+    axum::Json(serde_json::json!({
+        "labels": labels,
+        "buckets": buckets
+    }))
+    .into_response()
 }
 
 async fn temp_file_route(Path(name): Path<String>) -> impl IntoResponse {
