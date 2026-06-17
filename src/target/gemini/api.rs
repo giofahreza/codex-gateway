@@ -524,7 +524,13 @@ fn google_to_openai_response(value: &serde_json::Value, model: &str) -> serde_js
             "total_tokens": usage.get("totalTokenCount").and_then(|value| value.as_u64()).unwrap_or(
                 usage.get("promptTokenCount").and_then(|value| value.as_u64()).unwrap_or(0)
                     + usage.get("candidatesTokenCount").and_then(|value| value.as_u64()).unwrap_or(0)
-            )
+            ),
+            "input_tokens_details": {
+                "cached_tokens": usage.get("cachedContentTokenCount").and_then(|v| v.as_u64()).unwrap_or(0),
+            },
+            "output_tokens_details": {
+                "reasoning_tokens": usage.get("thoughtsTokenCount").and_then(|v| v.as_u64()).unwrap_or(0),
+            }
         }
     })
 }

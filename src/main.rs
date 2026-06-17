@@ -2075,6 +2075,8 @@ pub(crate) fn prompt_metrics_from_request_value(value: &serde_json::Value) -> Pr
         .filter(|text| !text.is_empty())
     {
         metrics.input_chars += instructions.chars().count() as u64;
+        metrics.prompt_items += 1;
+        metrics.is_prompt = true;
     }
 
     if let Some(input) = value.get("input") {
@@ -2108,6 +2110,7 @@ fn append_prompt_value(metrics: &mut PromptMetrics, value: &serde_json::Value) {
             }
         }
         serde_json::Value::Object(map) => {
+            let mut found_direct_text = false;
             if let Some(text) = map
                 .get("text")
                 .and_then(|value| value.as_str())
@@ -2128,10 +2131,16 @@ fn append_prompt_value(metrics: &mut PromptMetrics, value: &serde_json::Value) {
                     metrics.input_chars += text.chars().count() as u64;
                     metrics.prompt_items += 1;
                     metrics.is_prompt = true;
+                    found_direct_text = true;
                 }
             }
-            if let Some(content) = map.get("content").filter(|value| value.is_array()) {
-                append_prompt_value(metrics, content);
+            // Only recurse into content array if no direct text was found —
+            // avoids double-counting when the same content is expressed both
+            // as a top-level text field and as a structured content array.
+            if !found_direct_text {
+                if let Some(content) = map.get("content").filter(|value| value.is_array()) {
+                    append_prompt_value(metrics, content);
+                }
             }
             if let Some(input) = map.get("input") {
                 append_prompt_value(metrics, input);

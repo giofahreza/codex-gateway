@@ -495,7 +495,13 @@ fn chat_to_openai_response(value: &serde_json::Value, model: &str) -> serde_json
         "usage": {
             "input_tokens": usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
             "output_tokens": usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            "total_tokens": usage.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
+            "total_tokens": usage.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            "input_tokens_details": {
+                "cached_tokens": usage.get("prompt_tokens_details").and_then(|v| v.get("cached_tokens")).and_then(|v| v.as_u64()).unwrap_or(0),
+            },
+            "output_tokens_details": {
+                "reasoning_tokens": usage.get("completion_tokens_details").and_then(|v| v.get("reasoning_tokens")).and_then(|v| v.as_u64()).unwrap_or(0),
+            }
         }
     })
 }
