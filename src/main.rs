@@ -987,6 +987,15 @@ async fn dashboard() -> impl IntoResponse {
             bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>' + (g.display_name || 'Group') + ' Weekly</span><span>' + fmtQ(g.weekly, 'N/A') + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (g.weekly && g.weekly.used_percent > 80 ? 'high' : g.weekly && g.weekly.used_percent > 50 ? 'mid' : 'low') + '" style="width:' + (g.weekly ? g.weekly.used_percent || 0 : 0) + '%;"></div></div></div>';
           });
         }
+        // Qwen-style rate limits
+        if (quota.limits) {
+          quota.limits.forEach(function(l) {
+            var label = l.label || l.scope || 'Limit';
+            var pct = l.used_percent != null ? l.used_percent : 0;
+            var hint = (l.used_text || l.used || '') + '/' + (l.limit_text || l.limit || '') + ' ' + (l.reset_label || '');
+            bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>' + label + '</span><span>' + hint + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (pct > 80 ? 'high' : pct > 50 ? 'mid' : 'low') + '" style="width:' + pct + '%;"></div></div></div>';
+          });
+        }
         return bars ? '<div class="card-quota">' + bars + '</div>' : '';
       }
       function buildCard(a, quota) {
