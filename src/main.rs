@@ -3037,15 +3037,26 @@ async fn collect_unified_v1_models(
     append_unique_models(
         &mut models,
         &mut seen,
-        fetch_openai_models_from_response(
+        fetch_openai_models_from_response(if has_enabled_grok_account(state) {
             target::grok::api::models(State(state.clone()), headers.clone())
                 .await
-                .into_response(),
-        )
+                .into_response()
+        } else {
+            (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
+        })
         .await,
     );
 
     models
+}
+
+fn has_enabled_grok_account(state: &AppState) -> bool {
+    state
+        .grok_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|account| account.enabled)
 }
 
 fn append_unique_models(
