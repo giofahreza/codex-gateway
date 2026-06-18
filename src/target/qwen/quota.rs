@@ -48,6 +48,8 @@ const CONTEXT_WINDOW_FIELDS: &[&str] = &[
     "contextwindow",
     "context_length",
     "contextlength",
+    "max_context_length",
+    "maxcontextlength",
     "max_input_tokens",
     "maxinputtokens",
     "input_token_limit",
@@ -57,9 +59,17 @@ const CONTEXT_WINDOW_FIELDS: &[&str] = &[
 const OUTPUT_TOKEN_FIELDS: &[&str] = &[
     "max_output_tokens",
     "maxoutputtokens",
+    "max_generation_length",
+    "maxgenerationlength",
+    "max_summary_generation_length",
+    "maxsummarygenerationlength",
+    "max_thinking_generation_length",
+    "maxthinkinggenerationlength",
     "output_token_limit",
     "outputtokenlimit",
 ];
+
+const QWEN_CHAT_API_BASE_URL: &str = "https://chat.qwen.ai/api";
 
 #[derive(Clone)]
 pub struct QuotaCacheEntry {
@@ -187,10 +197,11 @@ async fn fetch_account_quota(
                     &resource_url,
                     auth_value.as_ref(),
                     None,
+                    None,
                     vec![],
                     vec![],
                     vec![],
-                    Some(&err),
+                    Some(err.as_str()),
                 ),
                 error: Some(err),
             };
@@ -198,13 +209,17 @@ async fn fetch_account_quota(
     };
 
     let claims = parse_access_token_claims(&access_token);
-    match fetch_models_metadata(&state.client, &access_token, &resource_url).await {
+    let config_value = fetch_config_metadata(&state.client, &access_token)
+        .await
+        .ok();
+    match fetch_models_metadata(&state.client, &access_token).await {
         Ok((models, limits, raw_headers)) => QuotaCacheEntry {
             fetched_at: std::time::Instant::now(),
             summary: build_summary(
                 account,
                 &resource_url,
                 auth_value.as_ref(),
+                config_value.as_ref(),
                 claims.as_ref(),
                 limits,
                 models,
@@ -219,6 +234,7 @@ async fn fetch_account_quota(
                 account,
                 &resource_url,
                 auth_value.as_ref(),
+                config_value.as_ref(),
                 claims.as_ref(),
                 vec![],
                 vec![],
@@ -234,6 +250,7 @@ fn build_summary(
     account: &super::accounts::QwenAccount,
     resource_url: &str,
     auth_value: Option<&Value>,
+    config_value: Option<&Value>,
     claims: Option<&Value>,
     limits: Vec<RateLimitSummary>,
     models: Vec<ModelQuotaSummary>,
@@ -243,6 +260,7 @@ fn build_summary(
     let tier = infer_tier_info(auth_value, claims);
     let mut notes = Vec::new();
     notes.push(format!("Resource: {}", resource_url));
+    notes.push(format!("Live metadata source: {}", QWEN_CHAT_API_BASE_URL));
 
     if let Some(subject) = account.subject.clone().or_else(|| {
         if !account.account_id.trim().is_empty() {
@@ -283,17 +301,29 @@ fn build_summary(
 
     if limits.is_empty() {
         notes.push(
-            "No live Qwen rate-limit headers were returned by /models, so this view falls back to account metadata and accessible models."
+            "No live Qwen rate-limit headers were returned by /api/models, so this view falls back to account metadata and accessible models."
                 .to_string(),
         );
     } else {
-        notes.push("Limit data comes from live headers returned by Qwen /models.".to_string());
+        notes.push("Limit data comes from live headers returned by Qwen /api/models.".to_string());
     }
 
     if !models.is_empty() {
         notes.push(format!(
-            "Fetched {} accessible model(s) from the live /models response.",
+            "Fetched {} accessible model(s) from the live /api/models response.",
             models.len()
+        ));
+    }
+
+    let config_has_payment_and_quota =
+        config_flag(config_value, &["features", "enable_payment_and_quota"]);
+    let config_has_subscription = config_flag(config_value, &["features", "enable_subscription"]);
+    if let (Some(payment_and_quota), Some(subscription)) =
+        (config_has_payment_and_quota, config_has_subscription)
+    {
+        notes.push(format!(
+            "Upstream config reports enable_payment_and_quota={} and enable_subscription={}.",
+            payment_and_quota, subscription
         ));
     }
 
@@ -302,11 +332,13 @@ fn build_summary(
     }
 
     let description = if lookup_error.is_some() {
-        "Qwen does not expose a stable public quota summary endpoint here. Tier is inferred from saved auth metadata or token claims, and live quota may only be available through response headers.".to_string()
+        "Qwen live metadata now comes from chat.qwen.ai/api/models and /api/config. No dedicated remaining-quota endpoint was found during research, so this view falls back to tier/config metadata plus accessible models when live lookups fail.".to_string()
+    } else if config_has_payment_and_quota == Some(false) {
+        "Qwen live metadata comes from chat.qwen.ai/api/models and /api/config. The current upstream config reports enable_payment_and_quota=false, so this view shows tier/config metadata and accessible models instead of a remaining-usage counter.".to_string()
     } else if limits.is_empty() {
-        "Qwen did not return standard rate-limit headers for this account during the last live /models call. Showing the best metadata available.".to_string()
+        "Qwen live metadata comes from chat.qwen.ai/api/models and /api/config. The current upstream did not return standard rate-limit headers for this account, so this view shows tier/config metadata and accessible models.".to_string()
     } else {
-        "Tier is inferred from saved Qwen metadata or token claims. Limits are from live headers on /models.".to_string()
+        "Qwen live metadata comes from chat.qwen.ai/api/models and /api/config. Tier is inferred from saved auth metadata or token claims, and any live limits come from /api/models response headers.".to_string()
     };
 
     QuotaSummary {
@@ -372,7 +404,6 @@ fn infer_tier_info(auth_value: Option<&Value>, claims: Option<&Value>) -> TierIn
 async fn fetch_models_metadata(
     client: &reqwest::Client,
     access_token: &str,
-    base_url: &str,
 ) -> Result<
     (
         Vec<ModelQuotaSummary>,
@@ -382,7 +413,7 @@ async fn fetch_models_metadata(
     String,
 > {
     let request = client
-        .get(format!("{}/models", base_url.trim_end_matches('/')))
+        .get(format!("{}/models", QWEN_CHAT_API_BASE_URL))
         .header("Accept", "application/json")
         .timeout(Duration::from_secs(30));
     let resp = super::auth::qwen_headers(request, access_token)
@@ -408,6 +439,31 @@ async fn fetch_models_metadata(
     Ok((models, limits, raw_headers))
 }
 
+async fn fetch_config_metadata(
+    client: &reqwest::Client,
+    access_token: &str,
+) -> Result<Value, String> {
+    let request = client
+        .get(format!("{}/config", QWEN_CHAT_API_BASE_URL))
+        .header("Accept", "application/json")
+        .timeout(Duration::from_secs(30));
+    let resp = super::auth::qwen_headers(request, access_token)
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let status = resp.status();
+    let text = resp.text().await.map_err(|err| err.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "Qwen config endpoint returned {}: {}",
+            status, text
+        ));
+    }
+
+    serde_json::from_str(&text).map_err(|err| err.to_string())
+}
+
 fn extract_models_from_response(value: &Value) -> Vec<ModelQuotaSummary> {
     let items = value
         .get("data")
@@ -423,10 +479,15 @@ fn extract_models_from_response(value: &Value) -> Vec<ModelQuotaSummary> {
                 .get("id")
                 .and_then(|value| value.as_str())?
                 .to_string();
+            let info = model.get("info");
+            let meta = info.and_then(|value| value.get("meta"));
             let display_name = model
                 .get("display_name")
                 .or_else(|| model.get("displayName"))
                 .or_else(|| model.get("name"))
+                .or_else(|| meta.and_then(|value| value.get("display_name")))
+                .or_else(|| meta.and_then(|value| value.get("displayName")))
+                .or_else(|| meta.and_then(|value| value.get("name")))
                 .and_then(value_to_string)
                 .unwrap_or_else(|| model_id.clone());
 
@@ -444,6 +505,7 @@ fn extract_models_from_response(value: &Value) -> Vec<ModelQuotaSummary> {
                 capabilities: extract_model_capabilities(model),
                 description: model
                     .get("description")
+                    .or_else(|| meta.and_then(|value| value.get("description")))
                     .and_then(value_to_string)
                     .unwrap_or_default(),
             })
@@ -454,22 +516,39 @@ fn extract_models_from_response(value: &Value) -> Vec<ModelQuotaSummary> {
 fn extract_model_capabilities(model: &Value) -> Vec<String> {
     let mut values = Vec::new();
 
-    if let Some(items) = model.get("modalities").and_then(|value| value.as_array()) {
-        for item in items {
-            if let Some(value) = item.as_str() {
-                values.push(value.to_string());
+    for source in [
+        Some(model),
+        model.get("info"),
+        model.get("info").and_then(|value| value.get("meta")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(items) = source
+            .get("modalities")
+            .or_else(|| source.get("modality"))
+            .and_then(|value| value.as_array())
+        {
+            for item in items {
+                if let Some(value) = item.as_str() {
+                    values.push(value.to_string());
+                }
             }
         }
-    }
 
-    if let Some(map) = model
-        .get("capabilities")
-        .and_then(|value| value.as_object())
-    {
-        for (key, value) in map {
-            let include = value.as_bool().unwrap_or_else(|| !value.is_null());
-            if include {
-                values.push(key.to_string());
+        if let Some(map) = source
+            .get("capabilities")
+            .or_else(|| source.get("abilities"))
+            .and_then(|value| value.as_object())
+        {
+            for (key, value) in map {
+                let include = value
+                    .as_bool()
+                    .or_else(|| value.as_i64().map(|number| number > 0))
+                    .unwrap_or_else(|| !value.is_null());
+                if include {
+                    values.push(key.to_string());
+                }
             }
         }
     }
@@ -477,6 +556,14 @@ fn extract_model_capabilities(model: &Value) -> Vec<String> {
     values.sort();
     values.dedup();
     values
+}
+
+fn config_flag(value: Option<&Value>, path: &[&str]) -> Option<bool> {
+    let mut current = value?;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    current.as_bool()
 }
 
 fn extract_limit_summaries(headers: &HeaderMap) -> Vec<RateLimitSummary> {
@@ -856,4 +943,66 @@ pub fn prune_cache(
 ) {
     let active_keys = accounts.iter().map(cache_key).collect::<HashSet<_>>();
     cache.retain(|key, _| active_keys.contains(key));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_models_from_response_reads_nested_qwen_api_shape() {
+        let value = json!({
+            "data": [
+                {
+                    "id": "qwen3.7-plus",
+                    "name": "Qwen3.7-Plus",
+                    "owned_by": "qwen",
+                    "info": {
+                        "meta": {
+                            "description": "nested description",
+                            "max_context_length": 1000000,
+                            "max_summary_generation_length": 65536,
+                            "capabilities": {
+                                "vision": true,
+                                "search": true
+                            },
+                            "modality": ["text", "image"]
+                        }
+                    }
+                }
+            ]
+        });
+
+        let models = extract_models_from_response(&value);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model_id, "qwen3.7-plus");
+        assert_eq!(models[0].display_name, "Qwen3.7-Plus");
+        assert_eq!(models[0].description, "nested description");
+        assert_eq!(models[0].context_window, Some(1_000_000));
+        assert_eq!(models[0].max_output_tokens, Some(65_536));
+        assert!(models[0].capabilities.contains(&"vision".to_string()));
+        assert!(models[0].capabilities.contains(&"search".to_string()));
+        assert!(models[0].capabilities.contains(&"text".to_string()));
+        assert!(models[0].capabilities.contains(&"image".to_string()));
+    }
+
+    #[test]
+    fn config_flag_reads_nested_boolean() {
+        let value = json!({
+            "features": {
+                "enable_payment_and_quota": false,
+                "enable_subscription": true
+            }
+        });
+
+        assert_eq!(
+            config_flag(Some(&value), &["features", "enable_payment_and_quota"]),
+            Some(false)
+        );
+        assert_eq!(
+            config_flag(Some(&value), &["features", "enable_subscription"]),
+            Some(true)
+        );
+        assert_eq!(config_flag(Some(&value), &["features", "missing"]), None);
+    }
 }

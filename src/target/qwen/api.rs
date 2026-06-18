@@ -23,6 +23,8 @@ const MODEL_FALLBACKS: &[(&str, &str, &str)] = &[
     ("vision-model", "Qwen3 Vision Model", "Vision model"),
 ];
 
+const QWEN_MODELS_API_URL: &str = "https://chat.qwen.ai/api/models";
+
 pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) -> impl IntoResponse {
     if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
         return (
@@ -239,10 +241,10 @@ pub async fn responses(
 async fn fetch_models(
     client: &reqwest::Client,
     access_token: &str,
-    base_url: &str,
+    _base_url: &str,
 ) -> Result<Vec<u8>, String> {
     let request = client
-        .get(format!("{}/models", base_url.trim_end_matches('/')))
+        .get(QWEN_MODELS_API_URL)
         .header("Accept", "application/json")
         .timeout(Duration::from_secs(30));
     let resp = super::auth::qwen_headers(request, access_token)
