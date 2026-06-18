@@ -961,6 +961,34 @@ async fn dashboard() -> impl IntoResponse {
         }
         refreshQwenAccounts();
       }
+      function renderQuotaBars(quota) {
+        if (!quota) return '';
+        var fmtQ = function(b, fallback) { return b && b.used_percent != null ? b.used_percent.toFixed(1) + '% ' + (b.reset_label || '') : (fallback || '...'); };
+        var bars = '';
+        // Codex-style quota
+        if (quota.code_generation) {
+          var cg5 = quota.code_generation.five_hour, cgw = quota.code_generation.weekly;
+          var cr5 = quota.code_review?.five_hour, crw = quota.code_review?.weekly;
+          bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>Code Gen 5h</span><span>' + fmtQ(cg5) + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (cg5 && cg5.used_percent > 80 ? 'high' : cg5 && cg5.used_percent > 50 ? 'mid' : 'low') + '" style="width:' + (cg5 ? cg5.used_percent || 0 : 0) + '%;"></div></div></div>';
+          bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>Code Gen Weekly</span><span>' + fmtQ(cgw) + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (cgw && cgw.used_percent > 80 ? 'high' : cgw && cgw.used_percent > 50 ? 'mid' : 'low') + '" style="width:' + (cgw ? cgw.used_percent || 0 : 0) + '%;"></div></div></div>';
+          bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>Code Review 5h</span><span>' + fmtQ(cr5) + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (cr5 && cr5.used_percent > 80 ? 'high' : cr5 && cr5.used_percent > 50 ? 'mid' : 'low') + '" style="width:' + (cr5 ? cr5.used_percent || 0 : 0) + '%;"></div></div></div>';
+          bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>Code Review Weekly</span><span>' + fmtQ(crw) + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (crw && crw.used_percent > 80 ? 'high' : crw && crw.used_percent > 50 ? 'mid' : 'low') + '" style="width:' + (crw ? crw.used_percent || 0 : 0) + '%;"></div></div></div>';
+        }
+        // Provider-style quota (groups + models from AGW/Gemini/Qwen)
+        if (quota.models) {
+          quota.models.forEach(function(m) {
+            var b = m.current || m;
+            bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>' + (m.display_name || m.model_id || 'Model') + '</span><span>' + fmtQ(b, 'N/A') + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (b && b.used_percent > 80 ? 'high' : b && b.used_percent > 50 ? 'mid' : 'low') + '" style="width:' + (b ? b.used_percent || 0 : 0) + '%;"></div></div></div>';
+          });
+        }
+        if (quota.groups) {
+          quota.groups.forEach(function(g) {
+            bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>' + (g.display_name || 'Group') + ' 5h</span><span>' + fmtQ(g.five_hour, 'N/A') + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (g.five_hour && g.five_hour.used_percent > 80 ? 'high' : g.five_hour && g.five_hour.used_percent > 50 ? 'mid' : 'low') + '" style="width:' + (g.five_hour ? g.five_hour.used_percent || 0 : 0) + '%;"></div></div></div>';
+            bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>' + (g.display_name || 'Group') + ' Weekly</span><span>' + fmtQ(g.weekly, 'N/A') + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (g.weekly && g.weekly.used_percent > 80 ? 'high' : g.weekly && g.weekly.used_percent > 50 ? 'mid' : 'low') + '" style="width:' + (g.weekly ? g.weekly.used_percent || 0 : 0) + '%;"></div></div></div>';
+          });
+        }
+        return bars ? '<div class="card-quota">' + bars + '</div>' : '';
+      }
       function buildCard(a, quota) {
         var dot = a.enabled ? '#2ecc71' : '#e74c3c';
         var toggleLabel = a.enabled ? 'Disable' : 'Enable';
@@ -971,23 +999,13 @@ async fn dashboard() -> impl IntoResponse {
         } else {
           actions += '<span class="dot-indicator" style="background:' + dot + ';"></span>';
         }
-        var quotaHTML = '';
-        if (quota) {
-          var cg5 = quota.code_generation?.five_hour, cgw = quota.code_generation?.weekly;
-          var cr5 = quota.code_review?.five_hour, crw = quota.code_review?.weekly;
-          var fmtQ = function(b) { return b && b.used_percent !== null ? b.used_percent.toFixed(1) + '% ' + (b.reset_label || '') : '...'; };
-          qt = '<div class="card-quota">'
-            + '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>Code Gen 5h</span><span>' + fmtQ(cg5) + '</span></div></div>'
-            + '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>Code Gen Wk</span><span>' + fmtQ(cgw) + '</span></div></div>'
-            + '</div>';
-        }
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + a.label + '</span><span class="card-actions">' + actions + '</span></div>'
           + '<div class="stat-pills">'
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>'
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
           + '</div>'
-          + quotaHTML
+          + renderQuotaBars(quota)
           + '</div>';
       }
       async function refresh() {
@@ -1010,7 +1028,7 @@ async fn dashboard() -> impl IntoResponse {
         lastQuota = quotaMap;
         refresh();
       }
-      function buildProviderCard(a) {
+      function buildProviderCard(a, quota) {
         var dot = a.enabled ? '#2ecc71' : '#e74c3c';
         var toggleLabel = a.enabled ? 'Disable' : 'Enable';
         var actions = '';
@@ -1029,13 +1047,14 @@ async fn dashboard() -> impl IntoResponse {
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>'
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
           + extra + '</div>'
+          + renderQuotaBars(quota)
           + '</div>';
       }
       async function refreshAgwAccounts() {
         var res = await fetch('/agw/accounts.json');
         var data = await res.json();
         var accounts = data.accounts || [];
-        var cards = accounts.map(buildProviderCard).join('');
+        var cards = accounts.map(function(a) { return buildProviderCard(a, lastAgwQuota.get(a.file_name || a.label)); }).join('');
         document.getElementById('agwCards').innerHTML = cards || '<div class="empty-state">No Antigravity accounts</div>';
         document.getElementById('agwBadgeCount').textContent = accounts.length + ' accounts';
       }
@@ -1043,17 +1062,15 @@ async fn dashboard() -> impl IntoResponse {
         const res = await fetch('/agw/quota.json');
         const quota = await res.json();
         const quotaMap = new Map();
-        (quota.accounts || []).forEach(q => {
-          const key = q.file_name || q.label;
-          quotaMap.set(key, q);
-        });
+        (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
         lastAgwQuota = quotaMap;
+        refreshAgwAccounts();
       }
       async function refreshGeminiAccounts() {
         var res = await fetch('/gemini/accounts.json');
         var data = await res.json();
         var accounts = data.accounts || [];
-        var cards = accounts.map(buildProviderCard).join('');
+        var cards = accounts.map(function(a) { return buildProviderCard(a, lastGeminiQuota.get(a.file_name || a.label)); }).join('');
         document.getElementById('geminiCards').innerHTML = cards || '<div class="empty-state">No Gemini accounts</div>';
         document.getElementById('geminiBadgeCount').textContent = accounts.length + ' accounts';
       }
@@ -1061,17 +1078,15 @@ async fn dashboard() -> impl IntoResponse {
         const res = await fetch('/gemini/quota.json');
         const quota = await res.json();
         const quotaMap = new Map();
-        (quota.accounts || []).forEach(q => {
-          const key = q.file_name || q.label;
-          quotaMap.set(key, q);
-        });
+        (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
         lastGeminiQuota = quotaMap;
+        refreshGeminiAccounts();
       }
       async function refreshQwenAccounts() {
         var res = await fetch('/qwen/accounts.json');
         var data = await res.json();
         var accounts = data.accounts || [];
-        var cards = accounts.map(buildProviderCard).join('');
+        var cards = accounts.map(function(a) { return buildProviderCard(a, lastQwenQuota.get(a.file_name || a.label)); }).join('');
         document.getElementById('qwenCards').innerHTML = cards || '<div class="empty-state">No Qwen accounts</div>';
         document.getElementById('qwenBadgeCount').textContent = accounts.length + ' accounts';
       }
@@ -1079,11 +1094,9 @@ async fn dashboard() -> impl IntoResponse {
         const res = await fetch('/qwen/quota.json');
         const quota = await res.json();
         const quotaMap = new Map();
-        (quota.accounts || []).forEach(q => {
-          const key = q.file_name || q.label;
-          quotaMap.set(key, q);
-        });
+        (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
         lastQwenQuota = quotaMap;
+        refreshQwenAccounts();
       }
       async function refreshDeepSeekAccounts() {
         var res = await fetch('/deepseek/accounts.json');
