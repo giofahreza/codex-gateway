@@ -1241,7 +1241,7 @@ async fn dashboard() -> impl IntoResponse {
                     callback: function(v) { return v >= 1000000 ? (v/1000000).toFixed(1)+'M' : v >= 1000 ? (v/1000).toFixed(0)+'K' : v; },
                     color: getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#94a3b8'
                   },
-                  grid: { color: getComputedStyle(document.documentElement).getPropertyValue('--border').trim() || '#25314a' + '40' }
+                  grid: { color: (getComputedStyle(document.documentElement).getPropertyValue('--border').trim() || '#25314a') + '40' }
                 }
               }
             }
@@ -1463,9 +1463,6 @@ async fn dashboard() -> impl IntoResponse {
           document.getElementById('agwStatus').textContent = data.message || 'Failed to start login';
         }
       }
-      document.getElementById('addAgwAccountBtn').addEventListener('click', () => {
-        document.getElementById('addAgwModal').style.display = 'block';
-      });
       document.getElementById('closeAgwModalBtn').addEventListener('click', () => {
         document.getElementById('addAgwModal').style.display = 'none';
       });
@@ -1487,9 +1484,6 @@ async fn dashboard() -> impl IntoResponse {
           document.getElementById('geminiStatus').textContent = data.message || 'Failed to start Gemini login';
         }
       }
-      document.getElementById('addGeminiAccountBtn').addEventListener('click', () => {
-        document.getElementById('addGeminiModal').style.display = 'block';
-      });
       document.getElementById('closeGeminiModalBtn').addEventListener('click', () => {
         document.getElementById('addGeminiModal').style.display = 'none';
       });
@@ -1530,11 +1524,6 @@ async fn dashboard() -> impl IntoResponse {
         document.getElementById('qwenTokenInput').value = '';
         refreshQwenAccounts();
       }
-      document.getElementById('addQwenAccountBtn').addEventListener('click', () => {
-        document.getElementById('qwenStatus').textContent = '';
-        document.getElementById('qwenTokenInput').value = '';
-        document.getElementById('addQwenModal').style.display = 'block';
-      });
       document.getElementById('closeQwenModalBtn').addEventListener('click', () => {
         closeQwenModal();
       });
@@ -1574,15 +1563,7 @@ async fn dashboard() -> impl IntoResponse {
         document.getElementById('deepseekLabelInput').value = '';
         document.getElementById('deepseekBaseUrlInput').value = '';
         refreshDeepSeekAccounts();
-        refreshGrokAccounts();
       }
-      document.getElementById('addDeepSeekAccountBtn').addEventListener('click', () => {
-        document.getElementById('deepseekStatus').textContent = '';
-        document.getElementById('deepseekKeyInput').value = '';
-        document.getElementById('deepseekLabelInput').value = '';
-        document.getElementById('deepseekBaseUrlInput').value = '';
-        document.getElementById('addDeepSeekModal').style.display = 'block';
-      });
       document.getElementById('closeDeepSeekModalBtn').addEventListener('click', () => {
         closeDeepSeekModal();
       });
