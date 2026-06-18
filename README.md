@@ -180,28 +180,31 @@ sed -n 's/^data: //p' "$tmp" \
   | base64 -d > /tmp/codex-gateway.png
 ```
 
-## Antigravity
+## Provider Routing
 
-This repo now exposes a minimal Antigravity path beside the existing Codex gateway.
+The public API surface is source-oriented:
 
-- Add an Antigravity account from the homepage at `http://127.0.0.1:8319/`
-- Antigravity API base path: `http://127.0.0.1:8319/agw/v1`
-- Current minimal surface:
-  - `GET /agw/v1/models`
-  - `POST /agw/v1/responses`
+- `GET /v1/models` returns the unified model catalog across enabled providers.
+- `POST /v1/responses` is the single OpenAI-compatible execution endpoint.
+- The gateway picks the target adapter from the `model` id instead of exposing provider-specific `/provider/v1/*` APIs.
 
-List Antigravity models:
+Current routing rules:
 
-```bash
-curl http://127.0.0.1:8319/agw/v1/models \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY"
-```
+- `gpt-*` and unmatched models go to the Codex target.
+- `qwen*` goes to Qwen.
+- `deepseek*` goes to DeepSeek.
+- `grok*` goes to Grok.
+- `claude*` goes to Antigravity.
+- Standard `gemini-*` models go to the native Gemini target.
+- Antigravity-only Gemini variants such as `gemini-3-pro-image`, `gemini-3-pro-high`, `gemini-3-pro-low`, and `gemini-2.5-flash-thinking` go to Antigravity.
 
-Generate an image with Antigravity and save the final streamed image:
+This means clients should stay on `/v1/*` and switch providers by changing only the `model` field.
+
+Generate an image through Antigravity using the unified `/v1/responses` endpoint:
 
 ```bash
 tmp=$(mktemp)
-curl -sS -N http://127.0.0.1:8319/agw/v1/responses \
+curl -sS -N http://127.0.0.1:8319/v1/responses \
   -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
@@ -220,7 +223,7 @@ sed -n 's/^data: //p' "$tmp" \
 
 ## DeepSeek
 
-This repo now also exposes a DeepSeek provider that accepts saved DeepSeek API keys and bridges OpenAI Responses-style requests into DeepSeek Chat Completions.
+DeepSeek still uses the same source-facing `/v1/*` API after you add credentials.
 
 - Add a DeepSeek account from the homepage at `http://127.0.0.1:8319/`
 - Or submit a key directly to `POST /login/deepseek/start` as JSON:
@@ -233,22 +236,17 @@ This repo now also exposes a DeepSeek provider that accepts saved DeepSeek API k
 }
 ```
 
-- DeepSeek API base path: `http://127.0.0.1:8319/deepseek/v1`
-- Current minimal surface:
-  - `GET /deepseek/v1/models`
-  - `POST /deepseek/v1/responses`
-
 List DeepSeek models:
 
 ```bash
-curl http://127.0.0.1:8319/deepseek/v1/models \
+curl http://127.0.0.1:8319/v1/models \
   -H "Authorization: Bearer $CODEX_GATEWAY_KEY"
 ```
 
-Send a basic DeepSeek request through the Responses bridge:
+Send a basic DeepSeek request through the unified Responses bridge:
 
 ```bash
-curl http://127.0.0.1:8319/deepseek/v1/responses \
+curl http://127.0.0.1:8319/v1/responses \
   -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   --data '{

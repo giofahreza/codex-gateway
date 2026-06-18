@@ -260,32 +260,22 @@ async fn main() {
         .route("/agw/quota.json", any(agw_quota_json_route))
         .route("/login/antigravity/start", any(agw_login_start_route))
         .route("/login/antigravity/submit", any(agw_login_submit_route))
-        .route("/agw/v1/models", any(agw_models_route))
-        .route("/agw/v1/responses", any(agw_responses_route))
         .route("/gemini/accounts.json", any(gemini_accounts_route))
         .route("/gemini/quota.json", any(gemini_quota_json_route))
         .route("/login/gemini/start", any(gemini_login_start_route))
         .route("/login/gemini/submit", any(gemini_login_submit_route))
-        .route("/gemini/v1/models", any(gemini_models_route))
-        .route("/gemini/v1/responses", any(gemini_responses_route))
         .route("/qwen/accounts.json", any(qwen_accounts_route))
         .route("/qwen/quota.json", any(qwen_quota_json_route))
         .route("/login/qwen/start", any(qwen_login_start_route))
         .route("/login/qwen/submit", any(qwen_login_submit_route))
         .route("/login/qwen/status", any(qwen_login_status_route))
         .route("/login/:provider/callback", any(oauth_login_callback_route))
-        .route("/qwen/v1/models", any(qwen_models_route))
-        .route("/qwen/v1/responses", any(qwen_responses_route))
         .route("/deepseek/accounts.json", any(deepseek_accounts_route))
         .route("/login/deepseek/start", any(deepseek_login_start_route))
-        .route("/deepseek/v1/models", any(deepseek_models_route))
-        .route("/deepseek/v1/responses", any(deepseek_responses_route))
         .route("/grok/accounts.json", any(grok_accounts_route))
         .route("/login/grok/start", any(grok_login_start_route))
         .route("/login/grok/submit", any(grok_login_submit_route))
         .route("/login/grok/status", any(grok_login_status_route))
-        .route("/grok/v1/models", any(grok_models_route))
-        .route("/grok/v1/responses", any(grok_responses_route))
         .route("/usage/summary.json", any(usage_summary_route))
         .route("/usage/history.json", any(usage_history_route))
         .route("/usage/context-history.json", any(context_history_route))
@@ -546,7 +536,6 @@ async fn dashboard() -> impl IntoResponse {
         border: 1px solid var(--border);
         box-shadow: var(--shadow);
       }
-      .panel-note { margin-bottom: 8px; }
       .auth-url {
         display: none;
         white-space: pre-wrap;
@@ -814,7 +803,6 @@ async fn dashboard() -> impl IntoResponse {
           <span>Antigravity</span>
           <span class="provider-badge-count" id="agwBadgeCount">0 accounts</span>
         </div>
-        <div class="muted panel-note">Use through <code>/agw/v1/*</code></div>
         <div id="agwCards"></div>
       </div>
       <div class="provider-section">
@@ -822,7 +810,6 @@ async fn dashboard() -> impl IntoResponse {
           <span>Gemini</span>
           <span class="provider-badge-count" id="geminiBadgeCount">0 accounts</span>
         </div>
-        <div class="muted panel-note">Use through <code>/gemini/v1/*</code></div>
         <div id="geminiCards"></div>
       </div>
       <div class="provider-section">
@@ -830,7 +817,6 @@ async fn dashboard() -> impl IntoResponse {
           <span>Qwen</span>
           <span class="provider-badge-count" id="qwenBadgeCount">0 accounts</span>
         </div>
-        <div class="muted panel-note">Use through <code>/qwen/v1/*</code></div>
         <div id="qwenCards"></div>
       </div>
       <div class="provider-section">
@@ -838,7 +824,6 @@ async fn dashboard() -> impl IntoResponse {
           <span>DeepSeek</span>
           <span class="provider-badge-count" id="deepseekBadgeCount">0 accounts</span>
         </div>
-        <div class="muted panel-note">Use through <code>/deepseek/v1/*</code></div>
         <div id="deepseekCards"></div>
       </div>
       <div class="provider-section">
@@ -846,7 +831,6 @@ async fn dashboard() -> impl IntoResponse {
           <span>Grok (xAI)</span>
           <span class="provider-badge-count" id="grokBadgeCount">0 accounts</span>
         </div>
-        <div class="muted panel-note">Use through <code>/grok/v1/*</code>. Supports chat, image, and video generation with Grok models.</div>
         <div id="grokCards"></div>
       </div>
     </div>
@@ -977,7 +961,10 @@ async fn dashboard() -> impl IntoResponse {
         // Provider-style quota (groups + models from AGW/Gemini/Qwen)
         if (quota.models) {
           quota.models.forEach(function(m) {
-            var b = m.current || m;
+            var b = m.current || m.quota || m.limit || null;
+            if (!b || (b.used_percent == null && b.limit == null && b.remaining == null && !b.limit_text && !b.remaining_text && !b.used_text)) {
+              return;
+            }
             bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>' + (m.display_name || m.model_id || 'Model') + '</span><span>' + fmtQ(b, 'N/A') + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (b && b.used_percent > 80 ? 'high' : b && b.used_percent > 50 ? 'mid' : 'low') + '" style="width:' + (b ? b.used_percent || 0 : 0) + '%;"></div></div></div>';
           });
         }
@@ -1926,18 +1913,6 @@ async fn agw_login_submit_route(
     target::antigravity::admin::login_submit(State(state), Form(form)).await
 }
 
-async fn agw_models_route(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    target::antigravity::api::models(State(state), headers).await
-}
-
-async fn agw_responses_route(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    target::antigravity::api::responses(State(state), headers, body).await
-}
-
 async fn gemini_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
     target::gemini::admin::accounts_json(State(state)).await
 }
@@ -1955,21 +1930,6 @@ async fn gemini_login_submit_route(
     Form(form): Form<target::gemini::admin::CallbackForm>,
 ) -> impl IntoResponse {
     target::gemini::admin::login_submit(State(state), Form(form)).await
-}
-
-async fn gemini_models_route(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    target::gemini::api::models(State(state), headers).await
-}
-
-async fn gemini_responses_route(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    target::gemini::api::responses(State(state), headers, body).await
 }
 
 async fn qwen_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
@@ -2013,18 +1973,6 @@ async fn oauth_login_callback_route(
     target::oauth::login_callback_route(state, provider, method, headers, uri).await
 }
 
-async fn qwen_models_route(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    target::qwen::api::models(State(state), headers).await
-}
-
-async fn qwen_responses_route(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    target::qwen::api::responses(State(state), headers, body).await
-}
-
 async fn deepseek_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
     target::deepseek::admin::accounts_json(State(state)).await
 }
@@ -2035,21 +1983,6 @@ async fn deepseek_login_start_route(
     body: Bytes,
 ) -> impl IntoResponse {
     target::deepseek::admin::login_start(State(state), method, body).await
-}
-
-async fn deepseek_models_route(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    target::deepseek::api::models(State(state), headers).await
-}
-
-async fn deepseek_responses_route(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    target::deepseek::api::responses(State(state), headers, body).await
 }
 
 async fn grok_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
@@ -2072,18 +2005,6 @@ async fn grok_login_status_route(
     Query(query): Query<target::grok::admin::LoginStatusQuery>,
 ) -> impl IntoResponse {
     target::grok::admin::login_status(State(state), Query(query)).await
-}
-
-async fn grok_models_route(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    target::grok::api::models(State(state), headers).await
-}
-
-async fn grok_responses_route(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    target::grok::api::responses(State(state), headers, body).await
 }
 
 async fn usage_summary_route(State(state): State<AppState>) -> impl IntoResponse {
@@ -2674,12 +2595,53 @@ async fn proxy(
             };
         }
     };
+    match routed.target {
+        TargetModel::UnifiedV1Models => {
+            return unified_v1_models_response(state, headers, &routed.upstream_path).await;
+        }
+        TargetModel::Antigravity => {
+            return target::antigravity::api::responses(
+                State(state),
+                headers,
+                routed.upstream_body,
+            )
+            .await
+            .into_response();
+        }
+        TargetModel::Gemini => {
+            return target::gemini::api::responses(State(state), headers, routed.upstream_body)
+                .await
+                .into_response();
+        }
+        TargetModel::Qwen => {
+            return target::qwen::api::responses(State(state), headers, routed.upstream_body)
+                .await
+                .into_response();
+        }
+        TargetModel::DeepSeek => {
+            return target::deepseek::api::responses(State(state), headers, routed.upstream_body)
+                .await
+                .into_response();
+        }
+        TargetModel::Grok => {
+            return target::grok::api::responses(State(state), headers, routed.upstream_body)
+                .await
+                .into_response();
+        }
+        TargetModel::Codex => {}
+    }
     let upstream = match routed.target {
         TargetModel::Codex => target::codex::gateway::build_upstream_url(
             &state.cfg.upstream_base,
             &routed.upstream_path,
             routed.upstream_query.as_deref(),
         ),
+        TargetModel::Antigravity
+        | TargetModel::Gemini
+        | TargetModel::Qwen
+        | TargetModel::DeepSeek
+        | TargetModel::Grok
+        | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
     let session_id = Uuid::new_v4().to_string();
 
@@ -2723,6 +2685,12 @@ async fn proxy(
             routed.upstream_body,
             &session_id,
         ),
+        TargetModel::Antigravity
+        | TargetModel::Gemini
+        | TargetModel::Qwen
+        | TargetModel::DeepSeek
+        | TargetModel::Grok
+        | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
     let mut req = state
         .client
@@ -2744,6 +2712,12 @@ async fn proxy(
             token.account_id.as_deref(),
             &session_id,
         ),
+        TargetModel::Antigravity
+        | TargetModel::Gemini
+        | TargetModel::Qwen
+        | TargetModel::DeepSeek
+        | TargetModel::Grok
+        | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
 
     let resp = match req.send().await {
@@ -2943,6 +2917,222 @@ async fn proxy(
         );
     }
     (status, out_headers, body).into_response()
+}
+
+async fn unified_v1_models_response(
+    state: AppState,
+    headers: HeaderMap,
+    upstream_path: &str,
+) -> axum::response::Response {
+    let mut models = collect_unified_v1_models(&state, &headers).await;
+    if models.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Content-Type", "application/json")],
+            openai_error_body("No upstream credentials configured", "server_error", None),
+        )
+            .into_response();
+    }
+
+    models.sort_by(|left, right| {
+        left.get("id")
+            .and_then(|value| value.as_str())
+            .cmp(&right.get("id").and_then(|value| value.as_str()))
+    });
+
+    if upstream_path == "models" {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "object": "list",
+            "data": models
+        }))
+        .unwrap_or_default();
+        return (StatusCode::OK, [("Content-Type", "application/json")], body).into_response();
+    }
+
+    let Some(model_id) = upstream_path.strip_prefix("models/") else {
+        return (
+            StatusCode::NOT_FOUND,
+            [("Content-Type", "application/json")],
+            openai_error_body("v1 endpoint not found", "invalid_request_error", None),
+        )
+            .into_response();
+    };
+
+    let model = models
+        .into_iter()
+        .find(|entry| entry.get("id").and_then(|value| value.as_str()) == Some(model_id));
+
+    match model {
+        Some(model) => (
+            StatusCode::OK,
+            [("Content-Type", "application/json")],
+            serde_json::to_vec(&model).unwrap_or_default(),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            [("Content-Type", "application/json")],
+            openai_error_body(
+                &format!("The model '{}' does not exist", model_id),
+                "invalid_request_error",
+                Some("model_not_found"),
+            ),
+        )
+            .into_response(),
+    }
+}
+
+async fn collect_unified_v1_models(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Vec<serde_json::Value> {
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+
+    append_unique_models(
+        &mut models,
+        &mut seen,
+        fetch_codex_v1_models(state, headers).await,
+    );
+    append_unique_models(
+        &mut models,
+        &mut seen,
+        fetch_openai_models_from_response(
+            target::gemini::api::models(State(state.clone()), headers.clone())
+                .await
+                .into_response(),
+        )
+        .await,
+    );
+    append_unique_models(
+        &mut models,
+        &mut seen,
+        fetch_openai_models_from_response(
+            target::antigravity::api::models(State(state.clone()), headers.clone())
+                .await
+                .into_response(),
+        )
+        .await,
+    );
+    append_unique_models(
+        &mut models,
+        &mut seen,
+        fetch_openai_models_from_response(
+            target::qwen::api::models(State(state.clone()), headers.clone())
+                .await
+                .into_response(),
+        )
+        .await,
+    );
+    append_unique_models(
+        &mut models,
+        &mut seen,
+        fetch_openai_models_from_response(
+            target::deepseek::api::models(State(state.clone()), headers.clone())
+                .await
+                .into_response(),
+        )
+        .await,
+    );
+    append_unique_models(
+        &mut models,
+        &mut seen,
+        fetch_openai_models_from_response(
+            target::grok::api::models(State(state.clone()), headers.clone())
+                .await
+                .into_response(),
+        )
+        .await,
+    );
+
+    models
+}
+
+fn append_unique_models(
+    output: &mut Vec<serde_json::Value>,
+    seen: &mut HashSet<String>,
+    incoming: Vec<serde_json::Value>,
+) {
+    for model in incoming {
+        let Some(id) = model
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string())
+        else {
+            continue;
+        };
+        if seen.insert(id) {
+            output.push(model);
+        }
+    }
+}
+
+async fn fetch_codex_v1_models(state: &AppState, headers: &HeaderMap) -> Vec<serde_json::Value> {
+    let Some((_token_idx, token)) = pick_token(state) else {
+        return Vec::new();
+    };
+
+    let mut req = state.client.request(
+        Method::GET,
+        target::codex::gateway::build_upstream_url(
+            &state.cfg.upstream_base,
+            "models",
+            Some("client_version=1.0.0"),
+        ),
+    );
+    for (key, value) in headers.iter() {
+        if should_drop_incoming_header(key.as_str()) {
+            continue;
+        }
+        req = req.header(key, value);
+    }
+    req = req.header("Authorization", format!("Bearer {}", token.token));
+    req = target::codex::gateway::apply_default_headers(
+        req,
+        headers,
+        token.account_id.as_deref(),
+        &Uuid::new_v4().to_string(),
+    );
+
+    let resp = match req.send().await {
+        Ok(resp) if resp.status().is_success() => resp,
+        _ => return Vec::new(),
+    };
+    let body = match resp.bytes().await {
+        Ok(body) => body,
+        Err(_) => return Vec::new(),
+    };
+    let converted = match models_list_to_openai_json(&body) {
+        Ok(body) => body,
+        Err(_) => return Vec::new(),
+    };
+
+    model_entries_from_openai_list_bytes(&converted)
+}
+
+async fn fetch_openai_models_from_response(
+    response: axum::response::Response,
+) -> Vec<serde_json::Value> {
+    if !response.status().is_success() {
+        return Vec::new();
+    }
+    let body = match axum::body::to_bytes(response.into_body(), usize::MAX).await {
+        Ok(body) => body,
+        Err(_) => return Vec::new(),
+    };
+    model_entries_from_openai_list_bytes(&body)
+}
+
+fn model_entries_from_openai_list_bytes(body: &[u8]) -> Vec<serde_json::Value> {
+    let value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    value
+        .get("data")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default()
 }
 
 struct CompatSseState<S> {

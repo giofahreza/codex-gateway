@@ -6,9 +6,15 @@ pub mod codex;
 pub mod openapi;
 pub mod v1;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum TargetModel {
     Codex,
+    Antigravity,
+    Gemini,
+    Qwen,
+    DeepSeek,
+    Grok,
+    UnifiedV1Models,
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -4,6 +4,7 @@ use bytes::Bytes;
 use crate::source::{RouteError, RoutedRequest};
 
 pub mod codex;
+pub mod provider;
 pub mod response;
 pub mod route;
 
@@ -15,6 +16,25 @@ pub fn route_to_target(
     body: Bytes,
 ) -> Result<RoutedRequest, RouteError> {
     let upstream_path = route::resolve(path, method)?;
+    if (*method == Method::GET || *method == Method::HEAD)
+        && (upstream_path == "models" || upstream_path.starts_with("models/"))
+    {
+        return Ok(provider::convert(
+            crate::source::TargetModel::UnifiedV1Models,
+            upstream_path,
+            uri,
+            body,
+        ));
+    }
+
+    if upstream_path == "responses" && *method == Method::POST {
+        let target =
+            provider::target_from_request_body(&body).unwrap_or(crate::source::TargetModel::Codex);
+        if target != crate::source::TargetModel::Codex {
+            return Ok(provider::convert(target, upstream_path, uri, body));
+        }
+    }
+
     Ok(codex::convert(upstream_path, uri, method, headers, body))
 }
 
@@ -135,3 +155,82 @@ pub(crate) fn responses_get_doc() {}
 )]
 #[allow(dead_code)]
 pub(crate) fn responses_delete_doc() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn route_to_target_uses_unified_catalog_for_v1_models() {
+        let uri: Uri = "/v1/models".parse().unwrap();
+        let routed = route_to_target(
+            "/v1/models",
+            &uri,
+            &Method::GET,
+            &HeaderMap::new(),
+            Bytes::new(),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, crate::source::TargetModel::UnifiedV1Models);
+        assert_eq!(routed.upstream_path, "models");
+    }
+
+    #[test]
+    fn route_to_target_uses_qwen_for_qwen_models() {
+        let uri: Uri = "/v1/responses".parse().unwrap();
+        let body = Bytes::from_static(br#"{"model":"qwen3.7-plus","input":"hi"}"#);
+        let routed = route_to_target(
+            "/v1/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            body,
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, crate::source::TargetModel::Qwen);
+        assert_eq!(routed.upstream_path, "responses");
+    }
+
+    #[test]
+    fn route_to_target_uses_native_gemini_for_standard_gemini_models() {
+        let uri: Uri = "/v1/responses".parse().unwrap();
+        let body = Bytes::from_static(br#"{"model":"gemini-2.5-pro","input":"hi"}"#);
+        let routed = route_to_target(
+            "/v1/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            body,
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, crate::source::TargetModel::Gemini);
+    }
+
+    #[test]
+    fn route_to_target_uses_antigravity_for_claude_and_special_gemini_models() {
+        let uri: Uri = "/v1/responses".parse().unwrap();
+
+        let claude = route_to_target(
+            "/v1/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"claude-sonnet-4-5","input":"hi"}"#),
+        )
+        .unwrap();
+        assert_eq!(claude.target, crate::source::TargetModel::Antigravity);
+
+        let agw_gemini = route_to_target(
+            "/v1/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"gemini-3-pro-image","input":"hi"}"#),
+        )
+        .unwrap();
+        assert_eq!(agw_gemini.target, crate::source::TargetModel::Antigravity);
+    }
+}
