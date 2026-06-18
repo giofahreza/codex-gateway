@@ -620,6 +620,7 @@ async fn dashboard() -> impl IntoResponse {
         border-radius: 2px;
       }
       .chart-wrap { position: relative; height: 300px; }
+      .provider-menu-item:hover { background: var(--row-hover); }
       .card {
         background: var(--surface);
         border: 1px solid var(--border);
@@ -780,7 +781,17 @@ async fn dashboard() -> impl IntoResponse {
         <span>Codex Gateway Usage</span>
         <span class="header-actions">
           <button type="button" id="themeToggleBtn" class="secondary-button">Theme: Dark</button>
-          <button id="addAccountBtn">Add account</button>
+          <div style="position:relative;">
+            <button id="addProviderBtn">+ Add account</button>
+            <div id="providerMenu" style="display:none;position:absolute;right:0;top:100%;z-index:100;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);min-width:200px;margin-top:4px;overflow:hidden;">
+              <div class="provider-menu-item" data-provider="codex" style="padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);">Codex (ChatGPT)</div>
+              <div class="provider-menu-item" data-provider="antigravity" style="padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);">Antigravity (Google)</div>
+              <div class="provider-menu-item" data-provider="gemini" style="padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);">Gemini (Google)</div>
+              <div class="provider-menu-item" data-provider="qwen" style="padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);">Qwen</div>
+              <div class="provider-menu-item" data-provider="deepseek" style="padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);">DeepSeek</div>
+              <div class="provider-menu-item" data-provider="grok" style="padding:10px 16px;cursor:pointer;">Grok (xAI)</div>
+            </div>
+          </div>
         </span>
       </h1>
       <div id="totals" class="muted"></div>
@@ -1674,6 +1685,23 @@ async fn dashboard() -> impl IntoResponse {
         </div>
       </div>
     </div>
+    <div id="addGrokModal" class="modal" style="display:none;">
+      <div class="modal-card">
+        <h2 style="margin-top:0;">Add Grok Account</h2>
+        <p>Click start, open the URL in a new tab, complete login with your SuperGrok or X Premium+ account, then paste the callback URL you are redirected to.</p>
+        <button onclick="startGrokLogin()">Start Login</button>
+        <div id="grokStatus" class="muted" style="margin-top:8px;"></div>
+        <pre id="grokAuthUrl" class="auth-url"></pre>
+        <form id="grokLoginForm" style="margin-top:16px;">
+          <label>Callback URL</label>
+          <input name="redirect_url" placeholder="http://localhost:56121/callback?code=...&state=...">
+          <div class="modal-actions" style="margin-top:8px;">
+            <button type="submit">Submit</button>
+            <button type="button" id="closeGrokModalBtn" class="secondary-button">Close</button>
+          </div>
+        </form>
+      </div>
+    </div>
     <script>
       async function startLogin() {
         const res = await fetch('/login/codex/start');
@@ -1689,8 +1717,29 @@ async fn dashboard() -> impl IntoResponse {
         }
       }
       document.getElementById('themeToggleBtn').addEventListener('click', toggleTheme);
-      document.getElementById('addAccountBtn').addEventListener('click', () => {
-        document.getElementById('addModal').style.display = 'block';
+      // Provider selector menu
+      document.getElementById('addProviderBtn').addEventListener('click', function(e) {
+        e.stopPropagation();
+        var menu = document.getElementById('providerMenu');
+        menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+      });
+      document.addEventListener('click', function() {
+        document.getElementById('providerMenu').style.display = 'none';
+      });
+      document.getElementById('providerMenu').addEventListener('click', function(e) {
+        e.stopPropagation();
+      });
+      document.querySelectorAll('.provider-menu-item').forEach(function(item) {
+        item.addEventListener('click', function() {
+          document.getElementById('providerMenu').style.display = 'none';
+          var provider = item.getAttribute('data-provider');
+          if (provider === 'codex') document.getElementById('addModal').style.display = 'block';
+          else if (provider === 'antigravity') document.getElementById('addAgwModal').style.display = 'block';
+          else if (provider === 'gemini') document.getElementById('addGeminiModal').style.display = 'block';
+          else if (provider === 'qwen') document.getElementById('addQwenModal').style.display = 'block';
+          else if (provider === 'deepseek') document.getElementById('addDeepSeekModal').style.display = 'block';
+          else if (provider === 'grok') document.getElementById('addGrokModal').style.display = 'block';
+        });
       });
       document.getElementById('closeModalBtn').addEventListener('click', () => {
         document.getElementById('addModal').style.display = 'none';
@@ -1824,6 +1873,7 @@ async fn dashboard() -> impl IntoResponse {
         document.getElementById('deepseekLabelInput').value = '';
         document.getElementById('deepseekBaseUrlInput').value = '';
         refreshDeepSeekAccounts();
+        refreshGrokAccounts();
       }
       document.getElementById('addDeepSeekAccountBtn').addEventListener('click', () => {
         document.getElementById('deepseekStatus').textContent = '';
@@ -1838,6 +1888,53 @@ async fn dashboard() -> impl IntoResponse {
       document.getElementById('addDeepSeekModal').addEventListener('click', (e) => {
         if (e.target.id === 'addDeepSeekModal') {
           closeDeepSeekModal();
+        }
+      });
+      // Grok modal
+      function closeGrokModal() {
+        document.getElementById('addGrokModal').style.display = 'none';
+      }
+      async function startGrokLogin() {
+        document.getElementById('grokStatus').textContent = 'Starting login...';
+        const res = await fetch('/login/grok/start');
+        const data = await res.json();
+        if (data.url) {
+          window.open(data.url, '_blank');
+          document.getElementById('grokStatus').textContent = 'Opened login URL. Complete login and paste the redirect URL below.';
+          const pre = document.getElementById('grokAuthUrl');
+          pre.textContent = data.url;
+          pre.style.display = 'block';
+        } else {
+          document.getElementById('grokStatus').textContent = data.message || 'Failed to start Grok login';
+        }
+      }
+      document.getElementById('closeGrokModalBtn').addEventListener('click', () => {
+        closeGrokModal();
+      });
+      document.getElementById('addGrokModal').addEventListener('click', (e) => {
+        if (e.target.id === 'addGrokModal') {
+          closeGrokModal();
+        }
+      });
+      document.getElementById('grokLoginForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const form = e.target;
+        const input = form.querySelector('input[name="redirect_url"]');
+        const redirectUrl = input.value.trim();
+        if (!redirectUrl) {
+          document.getElementById('grokStatus').textContent = 'Callback URL is required.';
+          return;
+        }
+        const res = await fetch('/login/grok/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ redirect_url: redirectUrl })
+        });
+        const data = await res.json();
+        document.getElementById('grokStatus').textContent = data.message || 'Login completed.';
+        if (data.ok) {
+          input.value = '';
+          refreshGrokAccounts();
         }
       });
       document.getElementById('loginForm').addEventListener('submit', async (e) => {
@@ -1925,6 +2022,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshGeminiAccounts();
         refreshQwenAccounts();
         refreshDeepSeekAccounts();
+        refreshGrokAccounts();
       }
       async function toggleCred(fileName, enabled) {
         const key = prompt('Proxy API key for toggle:');
@@ -1947,6 +2045,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshGeminiAccounts();
         refreshQwenAccounts();
         refreshDeepSeekAccounts();
+        refreshGrokAccounts();
       }
     </script>
   </body>
