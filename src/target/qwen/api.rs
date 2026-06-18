@@ -24,6 +24,7 @@ const MODEL_FALLBACKS: &[(&str, &str, &str)] = &[
 ];
 
 const QWEN_MODELS_API_URL: &str = "https://chat.qwen.ai/api/models";
+const QWEN_CHAT_COMPLETIONS_API_URL: &str = "https://qwen.aikit.club/v1/chat/completions";
 
 pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) -> impl IntoResponse {
     if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
@@ -289,19 +290,17 @@ async fn fetch_models(
 async fn send_chat_request(
     client: &reqwest::Client,
     access_token: &str,
-    base_url: &str,
+    _base_url: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
     let request = client
-        .post(format!(
-            "{}/chat/completions",
-            base_url.trim_end_matches('/')
-        ))
+        .post(QWEN_CHAT_COMPLETIONS_API_URL)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
+        .bearer_auth(access_token)
         .body(payload.to_string())
         .timeout(Duration::from_secs(180));
-    let resp = super::auth::qwen_headers(request, access_token)
+    let resp = request
         .send()
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
@@ -466,6 +465,7 @@ fn chat_to_openai_response(value: &serde_json::Value, model: &str) -> serde_json
         .and_then(|choice| choice.get("message"))
         .and_then(|message| message.get("content"))
         .map(extract_content_text)
+        .map(strip_proxy_footer)
         .unwrap_or_default();
 
     let usage = value.get("usage").cloned().unwrap_or_default();
@@ -533,6 +533,18 @@ fn extract_content_text(content: &serde_json::Value) -> String {
     out
 }
 
+fn strip_proxy_footer(content: String) -> String {
+    let trimmed = content.trim_end();
+    if let Some(index) = trimmed.rfind("\n\n<details>") {
+        let footer = &trimmed[index..];
+        if footer.contains("Response ID:") && footer.contains("Request ID:") {
+            return trimmed[..index].trim_end().to_string();
+        }
+    }
+
+    content
+}
+
 fn render_response_sse(response: &serde_json::Value) -> Vec<u8> {
     let mut chunks = Vec::new();
 
@@ -579,4 +591,21 @@ fn sse_json(value: &serde_json::Value) -> Vec<u8> {
     out.push_str(&data);
     out.push_str("\n\n");
     out.into_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_proxy_footer;
+
+    #[test]
+    fn strip_proxy_footer_removes_qwen_api_debug_block() {
+        let content = "ok\n\n<details>\n<summary></summary>\n\n```\nResponse ID: abc\nRequest ID: def\n```\n</details>".to_string();
+        assert_eq!(strip_proxy_footer(content), "ok");
+    }
+
+    #[test]
+    fn strip_proxy_footer_keeps_normal_content() {
+        let content = "normal response\n\n<details>\nno proxy ids here\n</details>".to_string();
+        assert_eq!(strip_proxy_footer(content.clone()), content);
+    }
 }
