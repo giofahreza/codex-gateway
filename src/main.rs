@@ -40,12 +40,14 @@ struct AppState {
     gemini_rr: Arc<Mutex<usize>>,
     qwen_rr: Arc<Mutex<usize>>,
     deepseek_rr: Arc<Mutex<usize>>,
+    grok_rr: Arc<Mutex<usize>>,
     client: reqwest::Client,
     tokens: Arc<Mutex<Vec<UpstreamToken>>>,
     agw_accounts: Arc<Mutex<Vec<target::antigravity::accounts::AntigravityAccount>>>,
     gemini_accounts: Arc<Mutex<Vec<target::gemini::accounts::GeminiAccount>>>,
     qwen_accounts: Arc<Mutex<Vec<target::qwen::accounts::QwenAccount>>>,
     deepseek_accounts: Arc<Mutex<Vec<target::deepseek::accounts::DeepSeekAccount>>>,
+    grok_accounts: Arc<Mutex<Vec<target::grok::accounts::GrokAccount>>>,
     stats: Arc<Mutex<UsageStats>>,
     persisted_stats: Arc<Mutex<StatsStore>>,
     quota_cache: Arc<Mutex<Vec<Option<QuotaCacheEntry>>>>,
@@ -56,6 +58,7 @@ struct AppState {
     agw_oauth_pending: Arc<Mutex<HashMap<String, target::antigravity::auth::PendingOAuth>>>,
     gemini_oauth_pending: Arc<Mutex<HashSet<String>>>,
     qwen_oauth_pending: Arc<Mutex<HashMap<String, target::qwen::auth::PendingOAuth>>>,
+    grok_oauth_pending: Arc<Mutex<HashMap<String, target::grok::auth::PendingOAuth>>>,
     disabled: Arc<Mutex<HashSet<String>>>,
     usage_history_lock: Arc<Mutex<()>>,
 }
@@ -92,6 +95,7 @@ struct UsageStats {
     gemini_accounts: Vec<AccountUsage>,
     qwen_accounts: Vec<AccountUsage>,
     deepseek_accounts: Vec<AccountUsage>,
+    grok_accounts: Vec<AccountUsage>,
     total_requests: u64,
     total_errors: u64,
     total_prompt_total: u64,
@@ -186,6 +190,7 @@ async fn main() {
     let gemini_accounts = target::gemini::accounts::load_accounts(&cfg, &disabled);
     let qwen_accounts = target::qwen::accounts::load_accounts(&cfg, &disabled);
     let deepseek_accounts = target::deepseek::accounts::load_accounts(&cfg, &disabled);
+    let grok_accounts = target::grok::accounts::load_accounts(&cfg, &disabled);
     let persisted_stats = stats_store::load(&cfg);
     let stats = build_usage_stats(
         &tokens,
@@ -193,6 +198,7 @@ async fn main() {
         &gemini_accounts,
         &qwen_accounts,
         &deepseek_accounts,
+        &grok_accounts,
         &persisted_stats,
     );
     let quota_cache = vec![None; tokens.len()];
@@ -215,12 +221,14 @@ async fn main() {
         gemini_rr: Arc::new(Mutex::new(0)),
         qwen_rr: Arc::new(Mutex::new(0)),
         deepseek_rr: Arc::new(Mutex::new(0)),
+        grok_rr: Arc::new(Mutex::new(0)),
         client,
         tokens: Arc::new(Mutex::new(tokens)),
         agw_accounts: Arc::new(Mutex::new(agw_accounts)),
         gemini_accounts: Arc::new(Mutex::new(gemini_accounts)),
         qwen_accounts: Arc::new(Mutex::new(qwen_accounts)),
         deepseek_accounts: Arc::new(Mutex::new(deepseek_accounts)),
+        grok_accounts: Arc::new(Mutex::new(grok_accounts)),
         stats: Arc::new(Mutex::new(stats)),
         persisted_stats: Arc::new(Mutex::new(persisted_stats)),
         quota_cache: Arc::new(Mutex::new(quota_cache)),
@@ -231,6 +239,7 @@ async fn main() {
         agw_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),
         qwen_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
+        grok_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         disabled: Arc::new(Mutex::new(disabled)),
         usage_history_lock: Arc::new(Mutex::new(())),
     };
@@ -271,6 +280,12 @@ async fn main() {
         .route("/login/deepseek/start", any(deepseek_login_start_route))
         .route("/deepseek/v1/models", any(deepseek_models_route))
         .route("/deepseek/v1/responses", any(deepseek_responses_route))
+        .route("/grok/accounts.json", any(grok_accounts_route))
+        .route("/login/grok/start", any(grok_login_start_route))
+        .route("/login/grok/submit", any(grok_login_submit_route))
+        .route("/login/grok/status", any(grok_login_status_route))
+        .route("/grok/v1/models", any(grok_models_route))
+        .route("/grok/v1/responses", any(grok_responses_route))
         .route("/usage/summary.json", any(usage_summary_route))
         .route("/usage/history.json", any(usage_history_route))
         .route("/usage/context-history.json", any(context_history_route))
@@ -316,7 +331,7 @@ async fn dashboard_root() -> impl IntoResponse {
     responses((status = 200, description = "Dashboard HTML", body = String))
 )]
 async fn dashboard() -> impl IntoResponse {
-    let html = r#"<!doctype html>
+    let html = r###"<!doctype html>
 <html>
   <head>
     <meta charset="utf-8">
@@ -605,6 +620,147 @@ async fn dashboard() -> impl IntoResponse {
         border-radius: 2px;
       }
       .chart-wrap { position: relative; height: 300px; }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        box-shadow: var(--shadow);
+        padding: 20px;
+        margin-bottom: 16px;
+        transition: border-color 0.2s;
+      }
+      .card:hover { border-color: var(--muted); }
+      .card-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 12px;
+        flex-wrap: wrap;
+      }
+      .card-email { font-weight: 700; font-size: 15px; }
+      .card-actions { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+      .stat-pills {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 14px;
+      }
+      .stat-pill {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        background: var(--surface-alt);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 6px 12px;
+        font-size: 13px;
+        white-space: nowrap;
+      }
+      .stat-pill-icon { font-size: 16px; }
+      .stat-pill-value { font-weight: 700; color: var(--text); }
+      .stat-pill-label { color: var(--muted); }
+      .card-chart-wrap {
+        position: relative;
+        height: 180px;
+        margin-bottom: 14px;
+        background: var(--surface-raised);
+        border-radius: 10px;
+        padding: 8px;
+        border: 1px solid var(--border);
+      }
+      .card-chart-placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .card-quota {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+        font-size: 13px;
+      }
+      .quota-bar-wrap {
+        flex: 1;
+        min-width: 180px;
+      }
+      .quota-bar-label {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 3px;
+      }
+      .quota-bar-label span:last-child { color: var(--muted); }
+      .quota-bar {
+        height: 8px;
+        background: var(--surface-alt);
+        border-radius: 4px;
+        overflow: hidden;
+      }
+      .quota-bar-fill {
+        height: 100%;
+        border-radius: 4px;
+        transition: width 0.4s;
+      }
+      .quota-bar-fill.low { background: #22c55e; }
+      .quota-bar-fill.mid { background: #f59e0b; }
+      .quota-bar-fill.high { background: #ef4444; }
+      .provider-section {
+        margin-top: 28px;
+      }
+      .provider-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: var(--surface-raised);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 16px;
+        margin-bottom: 12px;
+        font-weight: 700;
+        font-size: 14px;
+      }
+      .provider-badge-count {
+        background: var(--surface-alt);
+        border-radius: 20px;
+        padding: 2px 10px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .empty-state {
+        text-align: center;
+        padding: 28px;
+        color: var(--muted);
+        font-style: italic;
+      }
+      .mini-btn {
+        font-size: 12px;
+        padding: 4px 8px;
+        border-radius: 6px;
+        background: var(--secondary-bg);
+        color: var(--secondary-text);
+        border-color: var(--border);
+      }
+      .mini-btn:hover { background: var(--secondary-hover); }
+      .mini-btn.danger { color: #ef4444; }
+      .mini-btn.danger:hover { background: #ef4444; color: #fff; }
+      .card-model-legend {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 6px;
+        font-size: 11px;
+      }
+      .card-model-legend-item {
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        cursor: pointer;
+      }
+      .card-model-legend-dot {
+        width: 8px; height: 8px; border-radius: 2px; display: inline-block;
+      }
     </style>
     <script>
       (() => {
@@ -635,98 +791,52 @@ async fn dashboard() -> impl IntoResponse {
         </div>
         <div class="chart-wrap"><canvas id="contextChart"></canvas></div>
       </div>
-      <div class="table-wrap">
-        <table>
-        <thead>
-          <tr>
-            <th>Account</th>
-            <th>Code Gen</th>
-            <th>Code Review</th>
-            <th>Expired At</th>
-          </tr>
-        </thead>
-        <tbody id="rows"></tbody>
-        </table>
-      </div>
-      <div class="section">
-        <h2 class="section-header">
-          <span>Antigravity Accounts</span>
-          <button id="addAgwAccountBtn">Add Antigravity</button>
-        </h2>
-        <div class="muted panel-note">Use these accounts through <code>/agw/v1/*</code>. This is the minimal Antigravity path added beside the existing Codex gateway.</div>
-        <div class="table-wrap">
-          <table>
-          <thead>
-            <tr>
-              <th>Account</th>
-              <th>Tier</th>
-              <th>Gemini Limits</th>
-              <th>Claude/GPT Limits</th>
-              <th>Access Token Expires</th>
-            </tr>
-          </thead>
-          <tbody id="agwRows"></tbody>
-          </table>
+      <div class="provider-section">
+        <div class="provider-badge">
+          <span>Codex</span>
+          <span class="provider-badge-count" id="codexBadgeCount">0 accounts</span>
         </div>
+        <div id="codexCards"></div>
       </div>
-      <div class="section">
-        <h2 class="section-header">
-          <span>Gemini Accounts</span>
-          <button id="addGeminiAccountBtn">Add Gemini</button>
-        </h2>
-        <div class="muted panel-note">Use these accounts through <code>/gemini/v1/*</code>. Gemini login here uses Google OAuth and then onboards one Google Cloud project for Cloud Code Assist.</div>
-        <div class="table-wrap">
-          <table>
-          <thead>
-            <tr>
-              <th>Account</th>
-              <th>Tier</th>
-              <th>Limits</th>
-              <th>Access Token Expires</th>
-            </tr>
-          </thead>
-          <tbody id="geminiRows"></tbody>
-          </table>
+      <div class="provider-section">
+        <div class="provider-badge">
+          <span>Antigravity</span>
+          <span class="provider-badge-count" id="agwBadgeCount">0 accounts</span>
         </div>
+        <div class="muted panel-note">Use through <code>/agw/v1/*</code></div>
+        <div id="agwCards"></div>
       </div>
-      <div class="section">
-        <h2 class="section-header">
-          <span>Qwen Accounts</span>
-          <button id="addQwenAccountBtn">Add Qwen</button>
-        </h2>
-        <div class="muted panel-note">Use these accounts through <code>/qwen/v1/*</code>. Qwen login here follows the browser-token flow used by <code>qwen-api</code>: open the local helper, extract <code>localStorage.token</code> from <code>chat.qwen.ai</code>, then save it back to this gateway.</div>
-        <div class="table-wrap">
-          <table>
-          <thead>
-            <tr>
-              <th>Account</th>
-              <th>Tier</th>
-              <th>Limits</th>
-              <th>Access Token Expires</th>
-            </tr>
-          </thead>
-          <tbody id="qwenRows"></tbody>
-          </table>
+      <div class="provider-section">
+        <div class="provider-badge">
+          <span>Gemini</span>
+          <span class="provider-badge-count" id="geminiBadgeCount">0 accounts</span>
         </div>
+        <div class="muted panel-note">Use through <code>/gemini/v1/*</code></div>
+        <div id="geminiCards"></div>
       </div>
-      <div class="section">
-        <h2 class="section-header">
-          <span>DeepSeek Accounts</span>
-          <button id="addDeepSeekAccountBtn">Add DeepSeek</button>
-        </h2>
-        <div class="muted panel-note">Use these accounts through <code>/deepseek/v1/*</code>. This provider accepts a DeepSeek API key and translates OpenAI Responses requests into DeepSeek chat-completions requests.</div>
-        <div class="table-wrap">
-          <table>
-          <thead>
-            <tr>
-              <th>Account</th>
-              <th>Base URL</th>
-              <th>Type</th>
-            </tr>
-          </thead>
-          <tbody id="deepseekRows"></tbody>
-          </table>
+      <div class="provider-section">
+        <div class="provider-badge">
+          <span>Qwen</span>
+          <span class="provider-badge-count" id="qwenBadgeCount">0 accounts</span>
         </div>
+        <div class="muted panel-note">Use through <code>/qwen/v1/*</code></div>
+        <div id="qwenCards"></div>
+      </div>
+      <div class="provider-section">
+        <div class="provider-badge">
+          <span>DeepSeek</span>
+          <span class="provider-badge-count" id="deepseekBadgeCount">0 accounts</span>
+        </div>
+        <div class="muted panel-note">Use through <code>/deepseek/v1/*</code></div>
+        <div id="deepseekCards"></div>
+      </div>
+      <div class="provider-section">
+        <div class="provider-badge">
+          <span>Grok (xAI)</span>
+          <span class="provider-badge-count" id="grokBadgeCount">0 accounts</span>
+        </div>
+        <div class="muted panel-note">Use through <code>/grok/v1/*</code>. Supports chat, image, and video generation with Grok models.</div>
+        <div id="grokCards"></div>
       </div>
     </div>
     <script>
@@ -1274,6 +1384,33 @@ async fn dashboard() -> impl IntoResponse {
         }).join('');
         document.getElementById('deepseekRows').innerHTML = rows;
       }
+      async function refreshGrokAccounts() {
+        const res = await fetch('/grok/accounts.json');
+        const data = await res.json();
+        const accounts = data.accounts || [];
+        var cards = accounts.map(function(a) {
+          var dot = a.enabled ? '#2ecc71' : '#e74c3c';
+          var toggleLabel = a.enabled ? 'Disable' : 'Enable';
+          var toggleBtn = a.file_name
+            ? '<button title="' + toggleLabel + '" onclick="toggleCred(\'' + a.file_name + '\', ' + (a.enabled ? 'false' : 'true') + ')" class="dot-button" style="background:' + dot + ';"></button>'
+            : '<span class="dot-indicator" style="background:' + dot + ';"></span>';
+          var deleteBtn = a.file_name
+            ? '<button title="Delete" onclick="deleteCred(\'' + a.file_name + '\')" class="icon-button">&#128465;</button>'
+            : '';
+          return '<div class="card">'
+            + '<div class="card-header">'
+            + toggleBtn + deleteBtn
+            + '<span class="card-email">' + (a.label || a.email || 'Grok') + '</span>'
+            + '</div>'
+            + '<div class="stat-pills">'
+            + '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>'
+            + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
+            + (a.email ? '<span class="stat-pill"><span class="stat-pill-value">' + a.email + '</span></span>' : '')
+            + '</div></div>';
+        }).join('');
+        document.getElementById('grokCards').innerHTML = cards || '<div class="empty-state">No Grok accounts. <a href="/login/grok/start" target="_blank">Add one</a></div>';
+        document.getElementById('grokBadgeCount').textContent = accounts.length + ' accounts';
+      }
       let contextChart = null;
       const chartColors = {
         input: '#3b82f6',
@@ -1434,6 +1571,7 @@ async fn dashboard() -> impl IntoResponse {
       refreshGeminiQuota().then(() => refreshGeminiAccounts());
       refreshQwenQuota().then(() => refreshQwenAccounts());
       refreshDeepSeekAccounts();
+      refreshGrokAccounts();
       setInterval(refresh, 5000);
       setInterval(refreshQuota, 60000);
       setInterval(refreshAgwQuota, 60000);
@@ -1443,6 +1581,7 @@ async fn dashboard() -> impl IntoResponse {
       setInterval(refreshGeminiAccounts, 10000);
       setInterval(refreshQwenAccounts, 10000);
       setInterval(refreshDeepSeekAccounts, 10000);
+      setInterval(refreshGrokAccounts, 10000);
       setInterval(refreshContextChart, 60000);
     </script>
     <div id="addModal" class="modal" style="display:none;">
@@ -1812,7 +1951,7 @@ async fn dashboard() -> impl IntoResponse {
     </script>
   </body>
 </html>
-"#;
+"###;
     (
         StatusCode::OK,
         [
@@ -2079,6 +2218,43 @@ async fn deepseek_responses_route(
     target::deepseek::api::responses(State(state), headers, body).await
 }
 
+async fn grok_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
+    target::grok::admin::accounts_json(State(state)).await
+}
+
+async fn grok_login_start_route(State(state): State<AppState>) -> impl IntoResponse {
+    target::grok::admin::login_start(State(state)).await
+}
+
+async fn grok_login_submit_route(
+    State(state): State<AppState>,
+    Form(form): Form<target::grok::admin::CallbackForm>,
+) -> impl IntoResponse {
+    target::grok::admin::login_submit(State(state), Form(form)).await
+}
+
+async fn grok_login_status_route(
+    State(state): State<AppState>,
+    Query(query): Query<target::grok::admin::LoginStatusQuery>,
+) -> impl IntoResponse {
+    target::grok::admin::login_status(State(state), Query(query)).await
+}
+
+async fn grok_models_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    target::grok::api::models(State(state), headers).await
+}
+
+async fn grok_responses_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    target::grok::api::responses(State(state), headers, body).await
+}
+
 async fn usage_summary_route(State(state): State<AppState>) -> impl IntoResponse {
     let persisted = state.persisted_stats.lock().unwrap().clone();
     let mut codex = persisted
@@ -2106,11 +2282,17 @@ async fn usage_summary_route(State(state): State<AppState>) -> impl IntoResponse
         .into_iter()
         .map(|(key, usage)| serde_json::json!({ "key": key, "usage": usage }))
         .collect::<Vec<_>>();
+    let mut grok = persisted
+        .grok
+        .into_iter()
+        .map(|(key, usage)| serde_json::json!({ "key": key, "usage": usage }))
+        .collect::<Vec<_>>();
     codex.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     antigravity.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     gemini.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     qwen.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     deepseek.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+    grok.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     axum::Json(serde_json::json!({
         "totals": {
             "requests": persisted.total_requests,
@@ -2130,7 +2312,8 @@ async fn usage_summary_route(State(state): State<AppState>) -> impl IntoResponse
             "antigravity": antigravity,
             "gemini": gemini,
             "qwen": qwen,
-            "deepseek": deepseek
+            "deepseek": deepseek,
+            "grok": grok
         }
     }))
 }
@@ -2156,6 +2339,10 @@ struct ContextHistoryQuery {
     hours: u64,
     #[serde(default = "default_context_bucket_minutes")]
     bucket_minutes: u64,
+    #[serde(default)]
+    account_key: Option<String>,
+    #[serde(default)]
+    per_model: bool,
 }
 
 fn default_context_hours() -> u64 { 24 }
@@ -2167,8 +2354,11 @@ async fn context_history_route(
 ) -> impl IntoResponse {
     let hours = query.hours.max(1).min(720);
     let bucket_minutes = query.bucket_minutes.max(1).min(60);
+    let account_filter = query.account_key.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    let per_model = query.per_model;
 
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
+    let cutoff_str = cutoff.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     let all = match usage_store::load(
         &state.cfg,
@@ -2190,16 +2380,22 @@ async fn context_history_route(
         }
     };
 
-    // Filter success entries within the time window
     let filtered: Vec<_> = all
         .iter()
-        .filter(|e| e.success && e.recorded_at >= cutoff.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .filter(|e| e.success && e.recorded_at >= cutoff_str)
+        .filter(|e| {
+            if let Some(ak) = account_filter {
+                e.account_key == ak
+            } else {
+                true
+            }
+        })
         .collect();
 
     if filtered.is_empty() {
         return axum::Json(serde_json::json!({
             "labels": [],
-            "datasets": []
+            "models": {}
         }))
         .into_response();
     }
@@ -2208,8 +2404,50 @@ async fn context_history_route(
     let start_ts = cutoff.timestamp();
     let end_ts = chrono::Utc::now().timestamp();
     let num_buckets = ((end_ts - start_ts) / bucket_secs as i64).max(1) as usize;
-    let num_buckets = num_buckets.min(288); // cap at 288 buckets
+    let num_buckets = num_buckets.min(288);
 
+    let mut labels = Vec::with_capacity(num_buckets);
+    for i in 0..num_buckets {
+        let bucket_start = start_ts + (i as i64 * bucket_secs as i64);
+        let dt = chrono::DateTime::from_timestamp(bucket_start, 0)
+            .unwrap_or(chrono::DateTime::UNIX_EPOCH);
+        labels.push(dt.format("%H:%M").to_string());
+    }
+
+    if per_model {
+        // Group by model → buckets
+        let mut model_data: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+
+        for entry in &filtered {
+            let model = entry.model.as_deref().unwrap_or("unknown").to_string();
+            let ts = match chrono::DateTime::parse_from_rfc3339(&entry.recorded_at) {
+                Ok(dt) => dt.timestamp(),
+                Err(_) => continue,
+            };
+            let bucket_idx = ((ts - start_ts) / bucket_secs as i64) as usize;
+            if bucket_idx >= num_buckets {
+                continue;
+            }
+
+            let buckets = model_data.entry(model).or_insert_with(|| {
+                vec![serde_json::json!({"input": 0u64, "output": 0u64, "cache": 0u64, "reasoning": 0u64}); num_buckets]
+            });
+
+            let b = &mut buckets[bucket_idx];
+            b["input"] = serde_json::json!(b["input"].as_u64().unwrap_or(0) + entry.input_tokens);
+            b["output"] = serde_json::json!(b["output"].as_u64().unwrap_or(0) + entry.output_tokens);
+            b["cache"] = serde_json::json!(b["cache"].as_u64().unwrap_or(0) + entry.cache_tokens);
+            b["reasoning"] = serde_json::json!(b["reasoning"].as_u64().unwrap_or(0) + entry.reasoning_tokens);
+        }
+
+        return axum::Json(serde_json::json!({
+            "labels": labels,
+            "models": model_data
+        }))
+        .into_response();
+    }
+
+    // Default: aggregate all together
     let mut buckets = vec![
         serde_json::json!({
             "input_tokens": 0u64,
@@ -2222,15 +2460,7 @@ async fn context_history_route(
         num_buckets
     ];
 
-    let mut labels = Vec::with_capacity(num_buckets);
-    for i in 0..num_buckets {
-        let bucket_start = start_ts + (i as i64 * bucket_secs as i64);
-        let dt = chrono::DateTime::from_timestamp(bucket_start, 0)
-            .unwrap_or(chrono::DateTime::UNIX_EPOCH);
-        labels.push(dt.format("%H:%M").to_string());
-    }
-
-    for entry in filtered {
+    for entry in &filtered {
         let ts = match chrono::DateTime::parse_from_rfc3339(&entry.recorded_at) {
             Ok(dt) => dt.timestamp(),
             Err(_) => continue,
@@ -3155,6 +3385,7 @@ fn build_usage_stats(
     gemini_accounts: &[target::gemini::accounts::GeminiAccount],
     qwen_accounts: &[target::qwen::accounts::QwenAccount],
     deepseek_accounts: &[target::deepseek::accounts::DeepSeekAccount],
+    grok_accounts: &[target::grok::accounts::GrokAccount],
     persisted_stats: &StatsStore,
 ) -> UsageStats {
     let codex_accounts = tokens
@@ -3302,12 +3533,42 @@ fn build_usage_stats(
         })
         .collect();
 
+    let grok_accounts = grok_accounts
+        .iter()
+        .map(|account| {
+            let key = grok_stats_key(account);
+            let stored = persisted_stats
+                .account_usage(Provider::Grok, &key)
+                .cloned()
+                .unwrap_or_default();
+            AccountUsage {
+                key,
+                label: account.label.clone(),
+                account_id: account.email.clone().unwrap_or_default(),
+                requests: stored.requests,
+                errors: stored.errors,
+                prompt_total: stored.prompt_total,
+                prompt_error_total: stored.prompt_error_total,
+                input_tokens: stored.input_tokens,
+                output_tokens: stored.output_tokens,
+                total_tokens: stored.total_tokens,
+                cache_tokens: stored.cache_tokens,
+                reasoning_tokens: stored.reasoning_tokens,
+                first_seen_at: stored.first_seen_at,
+                last_seen_at: stored.last_seen_at,
+                last_success_at: stored.last_success_at,
+                last_error_at: stored.last_error_at,
+            }
+        })
+        .collect();
+
     UsageStats {
         codex_accounts,
         agw_accounts,
         gemini_accounts,
         qwen_accounts,
         deepseek_accounts,
+        grok_accounts,
         total_requests: persisted_stats.total_requests,
         total_errors: persisted_stats.total_errors,
         total_prompt_total: persisted_stats.total_prompt_total,
@@ -3328,6 +3589,7 @@ pub(crate) fn sync_usage_stats(state: &AppState) {
     let gemini_accounts = state.gemini_accounts.lock().unwrap().clone();
     let qwen_accounts = state.qwen_accounts.lock().unwrap().clone();
     let deepseek_accounts = state.deepseek_accounts.lock().unwrap().clone();
+    let grok_accounts = state.grok_accounts.lock().unwrap().clone();
     let persisted_stats = state.persisted_stats.lock().unwrap().clone();
     let mut stats = state.stats.lock().unwrap();
     *stats = build_usage_stats(
@@ -3336,6 +3598,7 @@ pub(crate) fn sync_usage_stats(state: &AppState) {
         &gemini_accounts,
         &qwen_accounts,
         &deepseek_accounts,
+        &grok_accounts,
         &persisted_stats,
     );
 }
@@ -3409,6 +3672,16 @@ pub(crate) fn deepseek_stats_key(account: &target::deepseek::accounts::DeepSeekA
         return format!("deepseek:file:{}", file_name);
     }
     format!("deepseek:label:{}", account.label)
+}
+
+pub(crate) fn grok_stats_key(account: &target::grok::accounts::GrokAccount) -> String {
+    if let Some(email) = account.email.as_ref().filter(|s| !s.trim().is_empty()) {
+        return format!("grok:email:{}", email);
+    }
+    if let Some(file_name) = account.file_name.as_ref().filter(|s| !s.trim().is_empty()) {
+        return format!("grok:file:{}", file_name);
+    }
+    format!("grok:label:{}", account.label)
 }
 
 fn qwen_fallback_stats_keys(account: &target::qwen::accounts::QwenAccount) -> Vec<String> {
@@ -3579,6 +3852,25 @@ pub(crate) fn deepseek_usage_context(
         key: deepseek_stats_key(account),
         label: account.label.clone(),
         account_id: account.account_id.clone(),
+        credential_file: account.file_name.clone(),
+        model,
+        request_path: request_path.into(),
+        prompt,
+    }
+}
+
+pub(crate) fn grok_usage_context(
+    account: &target::grok::accounts::GrokAccount,
+    model: Option<String>,
+    request_path: impl Into<String>,
+    prompt: PromptMetrics,
+) -> UsageContext {
+    UsageContext {
+        provider: Provider::Grok,
+        provider_name: "grok",
+        key: grok_stats_key(account),
+        label: account.label.clone(),
+        account_id: account.email.clone().unwrap_or_default(),
         credential_file: account.file_name.clone(),
         model,
         request_path: request_path.into(),
@@ -3903,6 +4195,22 @@ pub(crate) fn record_deepseek_error(
 }
 
 pub(crate) fn record_deepseek_success(
+    state: &AppState,
+    context: &UsageContext,
+    metrics: &UsageMetrics,
+) {
+    record_usage_success(state, context, metrics);
+}
+
+pub(crate) fn record_grok_error(
+    state: &AppState,
+    context: &UsageContext,
+    message: impl Into<String>,
+) {
+    record_request_error(state, context, message);
+}
+
+pub(crate) fn record_grok_success(
     state: &AppState,
     context: &UsageContext,
     metrics: &UsageMetrics,
