@@ -79,7 +79,7 @@ cargo run
         "validate_url": "https://chat.qwen.ai/api/v1/auths/",
         "refresh_url": "https://chat.qwen.ai/api/v1/auths/",
         "session_url": "https://chat.qwen.ai/api/v1/auths/",
-        "base_url": "https://chat.qwen.ai/api/v1"
+        "base_url": "https://portal.qwen.ai/v1"
       }
     }
   }
@@ -113,6 +113,7 @@ Relevant Qwen environment variables for this flow:
 Operational notes:
 
 - The local helper route is `GET /login/qwen/start`. It serves instructions and the extractor snippet; it does not redirect into `https://chat.qwen.ai/oauth/authorize`.
+- The usable Qwen API base for responses/models is normalized to `https://portal.qwen.ai/v1`. Older saved credentials that still point at `https://chat.qwen.ai/api/v1` are remapped at runtime.
 - Direct token submission still uses `POST /login/qwen/start` with `{"token":"..."}`.
 - Browser-token-backed Qwen accounts refresh through the upstream `/auths/` session endpoint and keep the original browser token unless the upstream explicitly returns a replacement refresh token.
 - The legacy device-code flow is no longer used.

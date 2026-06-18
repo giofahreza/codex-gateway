@@ -21,7 +21,7 @@
         "validate_url": "https://chat.qwen.ai/api/v1/auths/",
         "refresh_url": "https://chat.qwen.ai/api/v1/auths/",
         "session_url": "https://chat.qwen.ai/api/v1/auths/",
-        "base_url": "https://chat.qwen.ai/api/v1"
+        "base_url": "https://portal.qwen.ai/v1"
       }
     }
   }

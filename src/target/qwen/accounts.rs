@@ -131,10 +131,9 @@ pub fn load_accounts(cfg: &crate::Config, disabled: &HashSet<String>) -> Vec<Qwe
                     label,
                     refresh_token,
                     access_token,
-                    resource_url: value
-                        .get("resource_url")
-                        .and_then(|v| v.as_str())
-                        .map(|value| value.to_string()),
+                    resource_url: super::auth::normalize_resource_url(
+                        value.get("resource_url").and_then(|v| v.as_str()),
+                    ),
                     expired_at: value
                         .get("expired")
                         .and_then(|v| v.as_str())

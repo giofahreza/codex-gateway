@@ -30,7 +30,23 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
         stats
             .qwen_accounts
             .iter()
-            .map(|usage| (usage.key.clone(), (usage.requests, usage.errors)))
+            .map(|usage| {
+                (
+                    usage.key.clone(),
+                    (
+                        usage.requests,
+                        usage.errors,
+                        usage.prompt_total,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.total_tokens,
+                        usage.cache_tokens,
+                        usage.reasoning_tokens,
+                        usage.last_success_at.clone(),
+                        usage.last_error_at.clone(),
+                    ),
+                )
+            })
             .collect::<std::collections::HashMap<_, _>>()
     };
 
@@ -41,7 +57,21 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
         .iter()
         .map(|account| {
             let stats_key = crate::qwen_stats_key(account);
-            let (requests, errors) = usage_by_key.get(&stats_key).copied().unwrap_or((0, 0));
+            let (
+                requests,
+                errors,
+                prompt_total,
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                cache_tokens,
+                reasoning_tokens,
+                last_success_at,
+                last_error_at,
+            ) = usage_by_key
+                .get(&stats_key)
+                .cloned()
+                .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, None, None));
             serde_json::json!({
                 "account_id": account.account_id,
                 "label": account.label,
@@ -52,7 +82,15 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
                 "resource_url": account.resource_url,
                 "expired_at": account.expired_at,
                 "requests": requests,
-                "errors": errors
+                "errors": errors,
+                "prompt_total": prompt_total,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+                "cache_tokens": cache_tokens,
+                "reasoning_tokens": reasoning_tokens,
+                "last_success_at": last_success_at,
+                "last_error_at": last_error_at
             })
         })
         .collect::<Vec<_>>();
@@ -786,12 +824,14 @@ mod tests {
                 gemini_rr: Arc::new(Mutex::new(0)),
                 qwen_rr: Arc::new(Mutex::new(0)),
                 deepseek_rr: Arc::new(Mutex::new(0)),
+                grok_rr: Arc::new(Mutex::new(0)),
                 client: reqwest::Client::builder().build().unwrap(),
                 tokens: Arc::new(Mutex::new(Vec::new())),
                 agw_accounts: Arc::new(Mutex::new(Vec::new())),
                 gemini_accounts: Arc::new(Mutex::new(Vec::new())),
                 qwen_accounts: Arc::new(Mutex::new(Vec::new())),
                 deepseek_accounts: Arc::new(Mutex::new(Vec::new())),
+                grok_accounts: Arc::new(Mutex::new(Vec::new())),
                 stats: Arc::new(Mutex::new(crate::UsageStats::default())),
                 persisted_stats: Arc::new(Mutex::new(crate::stats_store::StatsStore::default())),
                 quota_cache: Arc::new(Mutex::new(Vec::new())),
@@ -802,6 +842,7 @@ mod tests {
                 agw_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),
                 qwen_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
+                grok_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 disabled: Arc::new(Mutex::new(HashSet::new())),
                 usage_history_lock: Arc::new(Mutex::new(())),
             };

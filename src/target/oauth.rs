@@ -262,7 +262,7 @@ fn default_provider_config(provider: OAuthProvider) -> OAuthProviderConfig {
             validate_url: Some("https://chat.qwen.ai/api/v1/auths/".to_string()),
             refresh_url: Some("https://chat.qwen.ai/api/v1/auths/".to_string()),
             session_url: Some("https://chat.qwen.ai/api/v1/auths/".to_string()),
-            base_url: Some("https://chat.qwen.ai/api/v1".to_string()),
+            base_url: Some("https://portal.qwen.ai/v1".to_string()),
             scopes: QWEN_SCOPES
                 .iter()
                 .map(|scope| (*scope).to_string())

@@ -18,10 +18,7 @@ const MODEL_FALLBACKS: &[(&str, &str)] = &[
     ("grok-imagine-video", "Grok Imagine Video"),
 ];
 
-pub async fn models(
-    State(state): State<crate::AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) -> impl IntoResponse {
     if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
         return (
             StatusCode::UNAUTHORIZED,
@@ -198,9 +195,7 @@ pub async fn responses(
                 tokio::spawn(async move {
                     let mut chunk_stream = resp.bytes_stream();
                     let mut buffer = Vec::new();
-                    while let Some(chunk) =
-                        futures_util::StreamExt::next(&mut chunk_stream).await
-                    {
+                    while let Some(chunk) = futures_util::StreamExt::next(&mut chunk_stream).await {
                         match chunk {
                             Ok(bytes) => {
                                 buffer.extend_from_slice(&bytes);
@@ -213,9 +208,7 @@ pub async fn responses(
                         }
                     }
                     let body_bytes = Bytes::from(buffer);
-                    if let Some(usage) =
-                        crate::usage_metrics_from_sse_response_body(&body_bytes)
-                    {
+                    if let Some(usage) = crate::usage_metrics_from_sse_response_body(&body_bytes) {
                         crate::record_grok_success(&state_clone, &context_clone, &usage);
                     }
                 });

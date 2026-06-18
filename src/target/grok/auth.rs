@@ -89,7 +89,10 @@ pub async fn exchange_code(
     let body = serde_urlencoded::to_string([
         ("grant_type", "authorization_code"),
         ("code", code),
-        ("redirect_uri", &format!("{}{}", REDIRECT_HOST, REDIRECT_PATH)),
+        (
+            "redirect_uri",
+            &format!("{}{}", REDIRECT_HOST, REDIRECT_PATH),
+        ),
         ("client_id", CLIENT_ID),
         ("code_verifier", &pending.code_verifier),
         ("code_challenge", &pending.code_challenge),
@@ -167,8 +170,8 @@ pub async fn refresh_token(
         ));
     }
 
-    let mut token: GrokTokenResponse =
-        serde_json::from_str(&text).map_err(|e| format!("failed to parse refreshed token: {}", e))?;
+    let mut token: GrokTokenResponse = serde_json::from_str(&text)
+        .map_err(|e| format!("failed to parse refreshed token: {}", e))?;
 
     if token.refresh_token.is_none() || token.refresh_token.as_deref() == Some("") {
         token.refresh_token = Some(refresh_token.to_string());

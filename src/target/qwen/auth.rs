@@ -19,6 +19,7 @@ const QWEN_X_GOOG_API_CLIENT: &str = "gl-node/22.17.0";
 const QWEN_CLIENT_METADATA: &str =
     "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI";
 const QWEN_OAUTH_PENDING_TTL_SECONDS: u64 = 900;
+const QWEN_PORTAL_BASE_URL: &str = "https://portal.qwen.ai/v1";
 
 #[derive(Clone)]
 pub struct PendingOAuth {
@@ -1010,13 +1011,7 @@ fn derive_local_redirect_uri(listen: &str) -> Result<String, String> {
 }
 
 fn provider_base_url(provider: &OAuthProviderConfig) -> String {
-    provider
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.trim_end_matches('/').to_string())
-        .unwrap_or_else(|| "https://chat.qwen.ai/api/v1".to_string())
+    normalize_base_url(provider.base_url.as_deref())
 }
 
 fn provider_validate_url(provider: &OAuthProviderConfig) -> Result<String, String> {
@@ -1079,22 +1074,57 @@ fn code_challenge(code_verifier: &str) -> String {
 }
 
 fn resource_to_base_url(resource_url: Option<&str>, provider: &OAuthProviderConfig) -> String {
-    let Some(resource_url) = resource_url
+    if resource_url
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    else {
-        return provider_base_url(provider);
+        .is_some()
+    {
+        return normalize_base_url(resource_url);
+    }
+
+    provider_base_url(provider)
+}
+
+pub fn normalize_resource_url(resource_url: Option<&str>) -> Option<String> {
+    resource_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| normalize_base_url(Some(value)))
+}
+
+fn normalize_base_url(base_url: Option<&str>) -> String {
+    let Some(base_url) = base_url.map(str::trim).filter(|value| !value.is_empty()) else {
+        return QWEN_PORTAL_BASE_URL.to_string();
     };
 
-    if resource_url.starts_with("http://") || resource_url.starts_with("https://") {
-        return resource_url.trim_end_matches('/').to_string();
+    let trimmed = base_url.trim_end_matches('/');
+    let lower = trimmed.to_ascii_lowercase();
+
+    if matches!(
+        lower.as_str(),
+        "https://chat.qwen.ai"
+            | "https://chat.qwen.ai/api/v1"
+            | "chat.qwen.ai"
+            | "chat.qwen.ai/api/v1"
+            | "https://portal.qwen.ai"
+            | "portal.qwen.ai"
+    ) {
+        return QWEN_PORTAL_BASE_URL.to_string();
     }
 
-    if resource_url.contains('/') {
-        return format!("https://{}", resource_url.trim_end_matches('/'));
+    if lower == QWEN_PORTAL_BASE_URL {
+        return QWEN_PORTAL_BASE_URL.to_string();
     }
 
-    format!("https://{}/v1", resource_url.trim_end_matches('/'))
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return trimmed.to_string();
+    }
+
+    if trimmed.contains('/') {
+        return format!("https://{}", trimmed);
+    }
+
+    format!("https://{}/v1", trimmed)
 }
 
 fn compact_error_body(body: &str, max_len: usize) -> Option<String> {
@@ -1212,6 +1242,22 @@ mod tests {
         assert_eq!(
             err,
             "Qwen identity payload did not include a subject/user id"
+        );
+    }
+
+    #[test]
+    fn normalize_base_url_maps_legacy_chat_host_to_portal_host() {
+        assert_eq!(
+            normalize_resource_url(Some("https://chat.qwen.ai/api/v1")).as_deref(),
+            Some("https://portal.qwen.ai/v1")
+        );
+        assert_eq!(
+            normalize_resource_url(Some("chat.qwen.ai/api/v1")).as_deref(),
+            Some("https://portal.qwen.ai/v1")
+        );
+        assert_eq!(
+            normalize_resource_url(Some("https://portal.qwen.ai")).as_deref(),
+            Some("https://portal.qwen.ai/v1")
         );
     }
 
@@ -1339,12 +1385,14 @@ mod tests {
                 gemini_rr: Arc::new(Mutex::new(0)),
                 qwen_rr: Arc::new(Mutex::new(0)),
                 deepseek_rr: Arc::new(Mutex::new(0)),
+                grok_rr: Arc::new(Mutex::new(0)),
                 client: reqwest::Client::builder().build().unwrap(),
                 tokens: Arc::new(Mutex::new(Vec::new())),
                 agw_accounts: Arc::new(Mutex::new(Vec::new())),
                 gemini_accounts: Arc::new(Mutex::new(Vec::new())),
                 qwen_accounts: Arc::new(Mutex::new(Vec::new())),
                 deepseek_accounts: Arc::new(Mutex::new(Vec::new())),
+                grok_accounts: Arc::new(Mutex::new(Vec::new())),
                 stats: Arc::new(Mutex::new(crate::UsageStats::default())),
                 persisted_stats: Arc::new(Mutex::new(crate::stats_store::StatsStore::default())),
                 quota_cache: Arc::new(Mutex::new(Vec::new())),
@@ -1355,6 +1403,7 @@ mod tests {
                 agw_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),
                 qwen_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
+                grok_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 disabled: Arc::new(Mutex::new(HashSet::new())),
                 usage_history_lock: Arc::new(Mutex::new(())),
             };

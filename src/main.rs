@@ -1059,6 +1059,59 @@ async fn dashboard() -> impl IntoResponse {
           + renderQuotaBars(quota)
           + '</div>';
       }
+      function buildQwenCard(a, quota) {
+        var dot = a.enabled ? '#2ecc71' : '#e74c3c';
+        var toggleLabel = a.enabled ? 'Disable' : 'Enable';
+        var actions = '';
+        if (a.file_name) {
+          actions += '<button title="' + toggleLabel + '" onclick="toggleCred(\'' + a.file_name + '\', ' + (a.enabled ? 'false' : 'true') + ')" class="mini-btn" style="background:' + dot + ';color:#fff;">&#9679;</button>';
+          actions += '<button title="Delete" onclick="deleteCred(\'' + a.file_name + '\')" class="mini-btn danger">&#128465;</button>';
+        } else {
+          actions += '<span class="dot-indicator" style="background:' + dot + ';"></span>';
+        }
+        var resource = (quota && quota.resource_url) || a.resource_url || 'https://portal.qwen.ai/v1';
+        var meta = '';
+        if (quota && quota.tier_name) {
+          meta += '<div class="muted">tier: ' + quota.tier_name + (quota.tier_id ? ' | ' + quota.tier_id : '') + '</div>';
+        }
+        meta += '<div class="muted">resource: <code>' + resource + '</code></div>';
+        if (a.expired_at) {
+          meta += '<div class="muted">saved token expiry: ' + a.expired_at + '</div>';
+        }
+        if (a.last_success_at) {
+          meta += '<div class="muted">last success: ' + a.last_success_at + '</div>';
+        }
+        if (a.last_error_at) {
+          meta += '<div class="muted">last error: ' + a.last_error_at + '</div>';
+        }
+        if (quota && quota.error) {
+          meta += '<div class="muted">live quota lookup: ' + quota.error + '</div>';
+        } else if (quota && quota.description) {
+          meta += '<div class="muted">' + quota.description + '</div>';
+        }
+        var usage = '';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.prompt_total || 0) + '</span><span class="stat-pill-label">prompt</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.input_tokens || 0) + '</span><span class="stat-pill-label">in tok</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.output_tokens || 0) + '</span><span class="stat-pill-label">out tok</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.total_tokens || 0) + '</span><span class="stat-pill-label">total tok</span></span>';
+        if (a.cache_tokens) {
+          usage += '<span class="stat-pill"><span class="stat-pill-value">' + a.cache_tokens + '</span><span class="stat-pill-label">cache tok</span></span>';
+        }
+        if (a.reasoning_tokens) {
+          usage += '<span class="stat-pill"><span class="stat-pill-value">' + a.reasoning_tokens + '</span><span class="stat-pill-label">reason tok</span></span>';
+        }
+        if (a.email) {
+          usage += '<span class="stat-pill"><span class="stat-pill-label">email</span><span class="stat-pill-value">' + a.email + '</span></span>';
+        }
+        return '<div class="card">'
+          + '<div class="card-header"><span class="card-email">' + (a.label || a.email || a.account_id || 'N/A') + '</span><span class="card-actions">' + actions + '</span></div>'
+          + '<div class="stat-pills">' + usage + '</div>'
+          + meta
+          + renderQuotaBars(quota)
+          + '</div>';
+      }
       async function refreshAgwAccounts() {
         var res = await fetch('/agw/accounts.json');
         var data = await res.json();
@@ -1095,7 +1148,7 @@ async fn dashboard() -> impl IntoResponse {
         var res = await fetch('/qwen/accounts.json');
         var data = await res.json();
         var accounts = data.accounts || [];
-        var cards = accounts.map(function(a) { return buildProviderCard(a, lastQwenQuota.get(a.file_name || a.label)); }).join('');
+        var cards = accounts.map(function(a) { return buildQwenCard(a, lastQwenQuota.get(a.file_name || a.label)); }).join('');
         document.getElementById('qwenCards').innerHTML = cards || '<div class="empty-state">No Qwen accounts</div>';
         document.getElementById('qwenBadgeCount').textContent = accounts.length + ' accounts';
       }
@@ -2021,10 +2074,7 @@ async fn grok_login_status_route(
     target::grok::admin::login_status(State(state), Query(query)).await
 }
 
-async fn grok_models_route(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn grok_models_route(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     target::grok::api::models(State(state), headers).await
 }
 
@@ -2126,8 +2176,12 @@ struct ContextHistoryQuery {
     per_model: bool,
 }
 
-fn default_context_hours() -> u64 { 24 }
-fn default_context_bucket_minutes() -> u64 { 5 }
+fn default_context_hours() -> u64 {
+    24
+}
+fn default_context_bucket_minutes() -> u64 {
+    5
+}
 
 async fn context_history_route(
     State(state): State<AppState>,
@@ -2135,7 +2189,11 @@ async fn context_history_route(
 ) -> impl IntoResponse {
     let hours = query.hours.max(1).min(720);
     let bucket_minutes = query.bucket_minutes.max(1).min(60);
-    let account_filter = query.account_key.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    let account_filter = query
+        .account_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
     let per_model = query.per_model;
 
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
@@ -2216,9 +2274,11 @@ async fn context_history_route(
 
             let b = &mut buckets[bucket_idx];
             b["input"] = serde_json::json!(b["input"].as_u64().unwrap_or(0) + entry.input_tokens);
-            b["output"] = serde_json::json!(b["output"].as_u64().unwrap_or(0) + entry.output_tokens);
+            b["output"] =
+                serde_json::json!(b["output"].as_u64().unwrap_or(0) + entry.output_tokens);
             b["cache"] = serde_json::json!(b["cache"].as_u64().unwrap_or(0) + entry.cache_tokens);
-            b["reasoning"] = serde_json::json!(b["reasoning"].as_u64().unwrap_or(0) + entry.reasoning_tokens);
+            b["reasoning"] =
+                serde_json::json!(b["reasoning"].as_u64().unwrap_or(0) + entry.reasoning_tokens);
         }
 
         return axum::Json(serde_json::json!({
@@ -2251,11 +2311,16 @@ async fn context_history_route(
             continue;
         }
         let b = &mut buckets[bucket_idx];
-        b["input_tokens"] = serde_json::json!(b["input_tokens"].as_u64().unwrap_or(0) + entry.input_tokens);
-        b["output_tokens"] = serde_json::json!(b["output_tokens"].as_u64().unwrap_or(0) + entry.output_tokens);
-        b["total_tokens"] = serde_json::json!(b["total_tokens"].as_u64().unwrap_or(0) + entry.total_tokens);
-        b["cache_tokens"] = serde_json::json!(b["cache_tokens"].as_u64().unwrap_or(0) + entry.cache_tokens);
-        b["reasoning_tokens"] = serde_json::json!(b["reasoning_tokens"].as_u64().unwrap_or(0) + entry.reasoning_tokens);
+        b["input_tokens"] =
+            serde_json::json!(b["input_tokens"].as_u64().unwrap_or(0) + entry.input_tokens);
+        b["output_tokens"] =
+            serde_json::json!(b["output_tokens"].as_u64().unwrap_or(0) + entry.output_tokens);
+        b["total_tokens"] =
+            serde_json::json!(b["total_tokens"].as_u64().unwrap_or(0) + entry.total_tokens);
+        b["cache_tokens"] =
+            serde_json::json!(b["cache_tokens"].as_u64().unwrap_or(0) + entry.cache_tokens);
+        b["reasoning_tokens"] =
+            serde_json::json!(b["reasoning_tokens"].as_u64().unwrap_or(0) + entry.reasoning_tokens);
         b["request_count"] = serde_json::json!(b["request_count"].as_u64().unwrap_or(0) + 1);
     }
 

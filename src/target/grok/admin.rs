@@ -33,8 +33,7 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
         .iter()
         .map(|a| {
             let stats_key = crate::grok_stats_key(a);
-            let (requests, errors) =
-                usage_by_key.get(&stats_key).copied().unwrap_or((0, 0));
+            let (requests, errors) = usage_by_key.get(&stats_key).copied().unwrap_or((0, 0));
             serde_json::json!({
                 "label": a.label,
                 "email": a.email,
@@ -150,27 +149,24 @@ pub async fn login_submit(
     match super::auth::exchange_code(&state.client, &code, &pending).await {
         Ok(token) => {
             // Extract email from id_token JWT
-            let email = token
-                .id_token
-                .as_deref()
-                .and_then(|jwt| {
-                    jwt.split('.')
-                        .nth(1)
-                        .and_then(|payload| {
-                            use base64::Engine;
-                            let padded = payload.to_string() + "=";
-                            base64::engine::general_purpose::URL_SAFE
-                                .decode(padded.as_bytes())
-                                .ok()
-                        })
-                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                        .and_then(|claims| {
-                            claims
-                                .get("email")
-                                .and_then(|v| v.as_str())
-                                .map(|v| v.to_string())
-                        })
-                });
+            let email = token.id_token.as_deref().and_then(|jwt| {
+                jwt.split('.')
+                    .nth(1)
+                    .and_then(|payload| {
+                        use base64::Engine;
+                        let padded = payload.to_string() + "=";
+                        base64::engine::general_purpose::URL_SAFE
+                            .decode(padded.as_bytes())
+                            .ok()
+                    })
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .and_then(|claims| {
+                        claims
+                            .get("email")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string())
+                    })
+            });
 
             let email_display = email.as_deref().unwrap_or("unknown@x.ai");
             let label = email.as_deref().unwrap_or("grok");
