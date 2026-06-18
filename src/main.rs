@@ -961,39 +961,43 @@ async fn dashboard() -> impl IntoResponse {
         }
         refreshQwenAccounts();
       }
+      function buildCard(a, quota) {
+        var dot = a.enabled ? '#2ecc71' : '#e74c3c';
+        var toggleLabel = a.enabled ? 'Disable' : 'Enable';
+        var actions = '';
+        if (a.file_name) {
+          actions += '<button title="' + toggleLabel + '" onclick="toggleCred(\'' + a.file_name + '\', ' + (a.enabled ? 'false' : 'true') + ')" class="mini-btn" style="background:' + dot + ';color:#fff;">&#9679;</button>';
+          actions += '<button title="Delete" onclick="deleteCred(\'' + a.file_name + '\')" class="mini-btn danger">&#128465;</button>';
+        } else {
+          actions += '<span class="dot-indicator" style="background:' + dot + ';"></span>';
+        }
+        var quotaHTML = '';
+        if (quota) {
+          var cg5 = quota.code_generation?.five_hour, cgw = quota.code_generation?.weekly;
+          var cr5 = quota.code_review?.five_hour, crw = quota.code_review?.weekly;
+          var fmtQ = function(b) { return b && b.used_percent !== null ? b.used_percent.toFixed(1) + '% ' + (b.reset_label || '') : '...'; };
+          qt = '<div class="card-quota">'
+            + '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>Code Gen 5h</span><span>' + fmtQ(cg5) + '</span></div></div>'
+            + '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>Code Gen Wk</span><span>' + fmtQ(cgw) + '</span></div></div>'
+            + '</div>';
+        }
+        return '<div class="card">'
+          + '<div class="card-header"><span class="card-email">' + a.label + '</span><span class="card-actions">' + actions + '</span></div>'
+          + '<div class="stat-pills">'
+          + '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>'
+          + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
+          + '</div>'
+          + quotaHTML
+          + '</div>';
+      }
       async function refresh() {
         const res = await fetch('/dashboard.json');
         const data = await res.json();
         document.getElementById('totals').textContent =
           'Total requests: ' + data.total_requests + ' | Total errors: ' + data.total_errors;
-        const rows = data.accounts.map(a => {
-          const toggleLabel = a.enabled ? 'Disable' : 'Enable';
-          const dot = a.enabled ? '#2ecc71' : '#e74c3c';
-          const key = a.file_name || a.label;
-          const toggleControl = a.file_name
-            ? `<button title="${toggleLabel}" onclick="toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" class="dot-button" style="background:${dot};"></button>`
-            : `<span class="dot-indicator" style="background:${dot};"></span>`;
-          const deleteControl = a.file_name
-            ? `<button title="Delete" onclick="deleteCred('${a.file_name}')" class="icon-button">&#128465;</button>`
-            : '';
-          const expiredAt = a.expired_at || '-';
-          const label = `<span class="row-label">${toggleControl}${deleteControl}<span data-tip="Account ID: ${a.account_id || ''} | Expired at: ${expiredAt}" title="Account ID: ${a.account_id || ''} | Expired at: ${expiredAt}" onclick="showTapTip(this, event)" class="help-trigger">${a.label}</span><span class="count-pill">(${a.requests}/${a.errors})</span></span>`;
-          const q = lastQuota.get(key);
-          const qcg5 = q?.code_generation?.five_hour;
-          const qcgw = q?.code_generation?.weekly;
-          const qcr5 = q?.code_review?.five_hour;
-          const qcrw = q?.code_review?.weekly;
-          const fmt = (x) => x && x.used_percent !== null && x.used_percent !== undefined
-            ? (x.used_percent.toFixed(1) + '% ' + (x.reset_label ? '(' + x.reset_label + ')' : ''))
-            : '…';
-          return '<tr>' +
-            '<td>' + label + '</td>' +
-            '<td class="stacked">5h: <span data-q="cg5" data-key="' + key + '">' + fmt(qcg5) + '</span><br><span class="weekly-line">Weekly: <span data-q="cgw" data-key="' + key + '">' + fmt(qcgw) + '</span></span></td>' +
-            '<td class="stacked">5h: <span data-q="cr5" data-key="' + key + '">' + fmt(qcr5) + '</span><br><span class="weekly-line">Weekly: <span data-q="crw" data-key="' + key + '">' + fmt(qcrw) + '</span></span></td>' +
-            '<td>' + expiredAt + '</td>' +
-          '</tr>';
-        }).join('');
-        document.getElementById('rows').innerHTML = rows;
+        var cards = data.accounts.map(function(a) { return buildCard(a, lastQuota.get(a.file_name || a.label)); }).join('');
+        document.getElementById('codexCards').innerHTML = cards || '<div class="empty-state">No Codex accounts</div>';
+        document.getElementById('codexBadgeCount').textContent = data.accounts.length + ' accounts';
       }
       async function refreshQuota() {
         const res = await fetch('/quota.json');
@@ -1004,105 +1008,36 @@ async fn dashboard() -> impl IntoResponse {
           quotaMap.set(key, q);
         });
         lastQuota = quotaMap;
-        const fmt = (x) => x && x.used_percent !== null && x.used_percent !== undefined
-          ? (x.used_percent.toFixed(1) + '% ' + (x.reset_label ? '(' + x.reset_label + ')' : ''))
-          : '0%';
-        document.querySelectorAll('[data-q]').forEach(td => {
-          const key = td.getAttribute('data-key');
-          const kind = td.getAttribute('data-q');
-          const row = quotaMap.get(key);
-          if (!row || row.error) {
-            td.textContent = '0%';
-            return;
-          }
-          const cg5 = row.code_generation?.five_hour || {};
-          const cgw = row.code_generation?.weekly || {};
-          const cr5 = row.code_review?.five_hour || {};
-          const crw = row.code_review?.weekly || {};
-          if (kind === 'cg5') td.textContent = fmt(cg5);
-          if (kind === 'cgw') td.textContent = fmt(cgw);
-          if (kind === 'cr5') td.textContent = fmt(cr5);
-          if (kind === 'crw') td.textContent = fmt(crw);
-        });
+        refresh();
+      }
+      function buildProviderCard(a) {
+        var dot = a.enabled ? '#2ecc71' : '#e74c3c';
+        var toggleLabel = a.enabled ? 'Disable' : 'Enable';
+        var actions = '';
+        if (a.file_name) {
+          actions += '<button title="' + toggleLabel + '" onclick="toggleCred(\'' + a.file_name + '\', ' + (a.enabled ? 'false' : 'true') + ')" class="mini-btn" style="background:' + dot + ';color:#fff;">&#9679;</button>';
+          actions += '<button title="Delete" onclick="deleteCred(\'' + a.file_name + '\')" class="mini-btn danger">&#128465;</button>';
+        } else {
+          actions += '<span class="dot-indicator" style="background:' + dot + ';"></span>';
+        }
+        var extra = '';
+        if (a.email) extra += '<span class="stat-pill"><span class="stat-pill-label">email</span><span class="stat-pill-value">' + a.email + '</span></span>';
+        if (a.project_id) extra += '<span class="stat-pill"><span class="stat-pill-label">project</span><span class="stat-pill-value"><code>' + a.project_id + '</code></span></span>';
+        return '<div class="card">'
+          + '<div class="card-header"><span class="card-email">' + (a.label || a.email || a.account_id || 'N/A') + '</span><span class="card-actions">' + actions + '</span></div>'
+          + '<div class="stat-pills">'
+          + '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>'
+          + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
+          + extra + '</div>'
+          + '</div>';
       }
       async function refreshAgwAccounts() {
-        const res = await fetch('/agw/accounts.json');
-        const data = await res.json();
-        const fmtAgw = (bucket) => bucket && bucket.used_percent !== null && bucket.used_percent !== undefined
-          ? (bucket.used_percent.toFixed(1) + '% ' + (bucket.reset_label ? '(' + bucket.reset_label + ')' : ''))
-          : '…';
-        const rows = (data.accounts || []).map(a => {
-          const toggleLabel = a.enabled ? 'Disable' : 'Enable';
-          const dot = a.enabled ? '#2ecc71' : '#e74c3c';
-          const key = a.file_name || a.label;
-          const q = lastAgwQuota.get(key);
-          const groups = q?.groups || [];
-          const models = q?.models || [];
-          const hasModelRows = models.length > 0;
-          const isOpen = openAgwRows.has(key);
-          const gemini = groups.find(g => (g.display_name || '').toLowerCase().includes('gemini')) || {};
-          const thirdParty = groups.find(g => {
-            const name = (g.display_name || '').toLowerCase();
-            return name.includes('claude') || name.includes('gpt');
-          }) || {};
-          const tierTip = [
-            q?.tier_description || '',
-            q?.upgrade_text || '',
-            q?.description || ''
-          ].filter(Boolean).join(' | ');
-          const accountTip = [
-            'Email: ' + (a.email || ''),
-            'Project: ' + (a.project_id || '-'),
-            'Token expires: ' + (a.expired_at || '-')
-          ].join(' | ');
-          const toggleControl = a.file_name
-            ? `<button title="${toggleLabel}" onclick="event.stopPropagation();toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" class="dot-button" style="background:${dot};"></button>`
-            : `<span class="dot-indicator" style="background:${dot};"></span>`;
-          const deleteControl = a.file_name
-            ? `<button title="Delete" onclick="event.stopPropagation();deleteCred('${a.file_name}')" class="icon-button">&#128465;</button>`
-            : '';
-          const tierLabel = q?.tier_name
-            ? `<span data-tip="${tierTip}" title="${tierTip}" onclick="showTapTip(this, event)" class="help-trigger">${q.tier_name}</span>`
-            : '-';
-          const expandGlyph = hasModelRows ? (isOpen ? '&#9662;' : '&#9656;') : '';
-          const modelRows = models.map(m => {
-            const currentTip = m.group_display_name
-              ? `Shared group: ${m.group_display_name}`
-              : '';
-            return '<tr>' +
-              '<td>' + (m.display_name || m.model_id) + '</td>' +
-              '<td><span data-tip="' + currentTip + '" title="' + currentTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + fmtAgw(m.current) + '</span></td>' +
-              '<td>' + fmtAgw(m.five_hour) + '</td>' +
-              '<td>' + fmtAgw(m.weekly) + '</td>' +
-            '</tr>';
-          }).join('');
-          const detailRow = modelRows
-            ? '<tr class="detail-row" style="display:' + (isOpen ? 'table-row' : 'none') + ';">' +
-                '<td colspan="5">' +
-                  '<div class="detail-panel">' +
-                    '<div class="muted">Current is the model-specific bucket from Antigravity. 5h and Weekly are the shared group limits Antigravity reports for that model family.</div>' +
-                    '<div class="detail-table-wrap">' +
-                      '<table class="detail-table">' +
-                        '<thead><tr><th>Model</th><th>Current</th><th>5h</th><th>Weekly</th></tr></thead>' +
-                        '<tbody>' + modelRows + '</tbody>' +
-                      '</table>' +
-                    '</div>' +
-                  '</div>' +
-                '</td>' +
-              '</tr>'
-            : '';
-          const summaryRow = '<tr' +
-            (hasModelRows ? ` onclick="toggleAgwModelRow('${key}')" class="clickable-row"` : '') +
-          '>' +
-            '<td><span class="row-label">' + toggleControl + deleteControl + '<span class="expander">' + expandGlyph + '</span><span data-tip="' + accountTip + '" title="' + accountTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + a.label + '</span><span class="count-pill">(' + (a.requests || 0) + '/' + (a.errors || 0) + ')</span></span><div class="muted">project: ' + (a.project_id || '-') + (hasModelRows ? ' | click row to expand' : '') + '</div></td>' +
-            '<td>' + tierLabel + (q?.tier_id ? '<div class="muted">' + q.tier_id + '</div>' : '') + '</td>' +
-            '<td class="stacked">5h: ' + fmtAgw(gemini.five_hour) + '<br><span class="weekly-line">Weekly: ' + fmtAgw(gemini.weekly) + '</span></td>' +
-            '<td class="stacked">5h: ' + fmtAgw(thirdParty.five_hour) + '<br><span class="weekly-line">Weekly: ' + fmtAgw(thirdParty.weekly) + '</span></td>' +
-            '<td>' + (a.expired_at || '-') + '</td>' +
-          '</tr>';
-          return summaryRow + detailRow;
-        }).join('');
-        document.getElementById('agwRows').innerHTML = rows;
+        var res = await fetch('/agw/accounts.json');
+        var data = await res.json();
+        var accounts = data.accounts || [];
+        var cards = accounts.map(buildProviderCard).join('');
+        document.getElementById('agwCards').innerHTML = cards || '<div class="empty-state">No Antigravity accounts</div>';
+        document.getElementById('agwBadgeCount').textContent = accounts.length + ' accounts';
       }
       async function refreshAgwQuota() {
         const res = await fetch('/agw/quota.json');
@@ -1115,107 +1050,12 @@ async fn dashboard() -> impl IntoResponse {
         lastAgwQuota = quotaMap;
       }
       async function refreshGeminiAccounts() {
-        const res = await fetch('/gemini/accounts.json');
-        const data = await res.json();
-        const fmtGemini = (bucket) => bucket && bucket.used_percent !== null && bucket.used_percent !== undefined
-          ? (bucket.used_percent.toFixed(1) + '% ' + (bucket.reset_label ? '(' + bucket.reset_label + ')' : ''))
-          : '…';
-        const rows = (data.accounts || []).map(a => {
-          const toggleLabel = a.enabled ? 'Disable' : 'Enable';
-          const dot = a.enabled ? '#2ecc71' : '#e74c3c';
-          const key = a.file_name || a.label;
-          const q = lastGeminiQuota.get(key);
-          const groups = q?.groups || [];
-          const models = q?.models || [];
-          const hasDetails = groups.length > 0 || models.length > 0;
-          const isOpen = openGeminiRows.has(key);
-          const primaryGroup = groups.find(g => (g.display_name || '').toLowerCase().includes('gemini')) || groups[0] || {};
-          const tierTip = [
-            q?.tier_description || '',
-            q?.upgrade_text || '',
-            q?.description || '',
-            q?.error || ''
-          ].filter(Boolean).join(' | ');
-          const accountTip = [
-            'Email: ' + (a.email || a.label || ''),
-            'Project: ' + (a.project_id || '-'),
-            'Token expires: ' + (a.expired_at || '-'),
-            'Auto project selection: ' + (a.auto ? 'yes' : 'no'),
-            'Cloud API checked: ' + (a.checked ? 'yes' : 'no')
-          ].join(' | ');
-          const toggleControl = a.file_name
-            ? `<button title="${toggleLabel}" onclick="event.stopPropagation();toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" class="dot-button" style="background:${dot};"></button>`
-            : `<span class="dot-indicator" style="background:${dot};"></span>`;
-          const deleteControl = a.file_name
-            ? `<button title="Delete" onclick="event.stopPropagation();deleteCred('${a.file_name}')" class="icon-button">&#128465;</button>`
-            : '';
-          const tierLabel = q?.tier_name
-            ? `<span data-tip="${tierTip}" title="${tierTip}" onclick="showTapTip(this, event)" class="help-trigger">${q.tier_name}</span>`
-            : '-';
-          const expandGlyph = hasDetails ? (isOpen ? '&#9662;' : '&#9656;') : '';
-          const groupRows = groups.map(g => {
-            const groupTip = g.description || '';
-            return '<tr>' +
-              '<td><span data-tip="' + groupTip + '" title="' + groupTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + (g.display_name || '-') + '</span></td>' +
-              '<td>' + fmtGemini(g.five_hour) + '</td>' +
-              '<td>' + fmtGemini(g.weekly) + '</td>' +
-            '</tr>';
-          }).join('');
-          const modelRows = models.map(m => {
-            const currentTip = m.group_display_name
-              ? `Shared group: ${m.group_display_name}`
-              : '';
-            return '<tr>' +
-              '<td>' + (m.display_name || m.model_id) + '</td>' +
-              '<td><span data-tip="' + currentTip + '" title="' + currentTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + fmtGemini(m.current) + '</span></td>' +
-              '<td>' + fmtGemini(m.five_hour) + '</td>' +
-              '<td>' + fmtGemini(m.weekly) + '</td>' +
-            '</tr>';
-          }).join('');
-          const detailParts = [];
-          if (groupRows) {
-            detailParts.push(
-              '<div class="muted">Shared Gemini quota groups reported for this account.</div>' +
-              '<div class="detail-table-wrap">' +
-                '<table class="detail-table">' +
-                  '<thead><tr><th>Group</th><th>5h</th><th>Weekly</th></tr></thead>' +
-                  '<tbody>' + groupRows + '</tbody>' +
-                '</table>' +
-              '</div>'
-            );
-          }
-          if (modelRows) {
-            detailParts.push(
-              '<div class="muted">Current is the model-specific bucket from Gemini. 5h and Weekly are the shared group limits Gemini reports for that model family.</div>' +
-              '<div class="detail-table-wrap">' +
-                '<table class="detail-table">' +
-                  '<thead><tr><th>Model</th><th>Current</th><th>5h</th><th>Weekly</th></tr></thead>' +
-                  '<tbody>' + modelRows + '</tbody>' +
-                '</table>' +
-              '</div>'
-            );
-          }
-          const detailRow = detailParts.length
-            ? '<tr class="detail-row" style="display:' + (isOpen ? 'table-row' : 'none') + ';">' +
-                '<td colspan="4">' +
-                  '<div class="detail-panel">' + detailParts.join('') + '</div>' +
-                '</td>' +
-              '</tr>'
-            : '';
-          const noteSuffix = q?.error
-            ? ' | quota lookup failed'
-            : (hasDetails ? ' | click row to expand' : '');
-          const summaryRow = '<tr' +
-            (hasDetails ? ` onclick="toggleGeminiModelRow('${key}')" class="clickable-row"` : '') +
-          '>' +
-            '<td><span class="row-label">' + toggleControl + deleteControl + '<span class="expander">' + expandGlyph + '</span><span data-tip="' + accountTip + '" title="' + accountTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + a.label + '</span><span class="count-pill">(' + (a.requests || 0) + '/' + (a.errors || 0) + ')</span></span><div class="muted">project: ' + (a.project_id || '-') + noteSuffix + '</div></td>' +
-            '<td>' + tierLabel + (q?.tier_id ? '<div class="muted">' + q.tier_id + '</div>' : '') + '</td>' +
-            '<td class="stacked">5h: ' + fmtGemini(primaryGroup.five_hour) + '<br><span class="weekly-line">Weekly: ' + fmtGemini(primaryGroup.weekly) + '</span></td>' +
-            '<td>' + (a.expired_at || '-') + '</td>' +
-          '</tr>';
-          return summaryRow + detailRow;
-        }).join('');
-        document.getElementById('geminiRows').innerHTML = rows;
+        var res = await fetch('/gemini/accounts.json');
+        var data = await res.json();
+        var accounts = data.accounts || [];
+        var cards = accounts.map(buildProviderCard).join('');
+        document.getElementById('geminiCards').innerHTML = cards || '<div class="empty-state">No Gemini accounts</div>';
+        document.getElementById('geminiBadgeCount').textContent = accounts.length + ' accounts';
       }
       async function refreshGeminiQuota() {
         const res = await fetch('/gemini/quota.json');
@@ -1228,138 +1068,12 @@ async fn dashboard() -> impl IntoResponse {
         lastGeminiQuota = quotaMap;
       }
       async function refreshQwenAccounts() {
-        const res = await fetch('/qwen/accounts.json');
-        const data = await res.json();
-        const fmtQwen = (limit) => {
-          if (!limit) return '...';
-          const used = limit.used_text || (limit.used !== null && limit.used !== undefined ? String(limit.used) : '');
-          const limitValue = limit.limit_text || (limit.limit !== null && limit.limit !== undefined ? String(limit.limit) : '');
-          const remaining = limit.remaining_text || (limit.remaining !== null && limit.remaining !== undefined ? String(limit.remaining) : '');
-          const percent = limit.used_percent !== null && limit.used_percent !== undefined
-            ? limit.used_percent.toFixed(1) + '% used'
-            : '';
-          const counts = used && limitValue
-            ? `${used}/${limitValue}`
-            : (remaining ? `${remaining} left` : 'available');
-          return [counts, percent, limit.reset_label].filter(Boolean).join(' | ');
-        };
-        const rows = (data.accounts || []).map(a => {
-          const toggleLabel = a.enabled ? 'Disable' : 'Enable';
-          const dot = a.enabled ? '#2ecc71' : '#e74c3c';
-          const key = a.file_name || a.label;
-          const q = lastQwenQuota.get(key);
-          const resource = q?.resource_url || a.resource_url || 'https://portal.qwen.ai/v1';
-          const limits = q?.limits || [];
-          const models = q?.models || [];
-          const rawHeaders = q?.raw_headers || [];
-          const hasDetails = limits.length > 0 || models.length > 0 || rawHeaders.length > 0 || !!q?.description || !!q?.error;
-          const isOpen = openQwenRows.has(key);
-          const requestLimit = limits.find(l => l.scope === 'requests') || limits[0] || null;
-          const tokenLimit = limits.find(l => l.scope === 'tokens')
-            || limits.find(l => l.scope === 'input-tokens')
-            || limits.find(l => l.scope === 'output-tokens')
-            || null;
-          const accountTip = [
-            'Account ID: ' + (a.account_id || a.subject || '-'),
-            'Alias: ' + (a.email || a.label || ''),
-            'Resource: ' + resource,
-            'Token expires: ' + (a.expired_at || '-')
-          ].join(' | ');
-          const toggleControl = a.file_name
-            ? `<button title="${toggleLabel}" onclick="event.stopPropagation();toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" class="dot-button" style="background:${dot};"></button>`
-            : `<span class="dot-indicator" style="background:${dot};"></span>`;
-          const deleteControl = a.file_name
-            ? `<button title="Delete" onclick="event.stopPropagation();deleteCred('${a.file_name}')" class="icon-button">&#128465;</button>`
-            : '';
-          const tierTip = [
-            q?.tier_description || '',
-            q?.description || '',
-            q?.error || ''
-          ].filter(Boolean).join(' | ');
-          const tierLabel = q?.tier_name
-            ? `<span data-tip="${tierTip}" title="${tierTip}" onclick="showTapTip(this, event)" class="help-trigger">${q.tier_name}</span>`
-            : '-';
-          const expandGlyph = hasDetails ? (isOpen ? '&#9662;' : '&#9656;') : '';
-          const limitRows = limits.map(limit => {
-            return '<tr>' +
-              '<td>' + (limit.label || limit.scope || '-') + '</td>' +
-              '<td>' + (limit.used_text || (limit.used !== null && limit.used !== undefined ? limit.used : '-')) + '</td>' +
-              '<td>' + (limit.remaining_text || (limit.remaining !== null && limit.remaining !== undefined ? limit.remaining : '-')) + '</td>' +
-              '<td>' + (limit.limit_text || (limit.limit !== null && limit.limit !== undefined ? limit.limit : '-')) + '</td>' +
-              '<td>' + (limit.reset_label || '-') + '</td>' +
-            '</tr>';
-          }).join('');
-          const modelRows = models.map(model => {
-            const modelTip = [
-              model.description || '',
-              model.capabilities && model.capabilities.length ? ('Capabilities: ' + model.capabilities.join(', ')) : ''
-            ].filter(Boolean).join(' | ');
-            return '<tr>' +
-              '<td><span data-tip="' + modelTip + '" title="' + modelTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + (model.display_name || model.model_id) + '</span></td>' +
-              '<td>' + (model.owned_by || '-') + '</td>' +
-              '<td>' + (model.context_window || '-') + '</td>' +
-              '<td>' + (model.max_output_tokens || '-') + '</td>' +
-            '</tr>';
-          }).join('');
-          const headerRows = rawHeaders.map(header => {
-            return '<tr><td><code>' + header.name + '</code></td><td><code>' + header.value + '</code></td></tr>';
-          }).join('');
-          const noteLines = []
-            .concat(q?.description ? [q.description] : [])
-            .concat((q?.notes || []));
-          const detailParts = [];
-          if (noteLines.length) {
-            detailParts.push('<div class="muted">' + noteLines.join('<br>') + '</div>');
-          }
-          if (limitRows) {
-            detailParts.push(
-              '<div class="detail-table-wrap">' +
-                '<table class="detail-table">' +
-                  '<thead><tr><th>Limit</th><th>Used</th><th>Remaining</th><th>Total</th><th>Reset</th></tr></thead>' +
-                  '<tbody>' + limitRows + '</tbody>' +
-                '</table>' +
-              '</div>'
-            );
-          }
-          if (modelRows) {
-            detailParts.push(
-              '<div class="detail-table-wrap">' +
-                '<table class="detail-table">' +
-                  '<thead><tr><th>Model</th><th>Owner</th><th>Context</th><th>Max Output</th></tr></thead>' +
-                  '<tbody>' + modelRows + '</tbody>' +
-                '</table>' +
-              '</div>'
-            );
-          }
-          if (headerRows) {
-            detailParts.push(
-              '<div class="detail-table-wrap">' +
-                '<table class="detail-table">' +
-                  '<thead><tr><th>Header</th><th>Value</th></tr></thead>' +
-                  '<tbody>' + headerRows + '</tbody>' +
-                '</table>' +
-              '</div>'
-            );
-          }
-          const detailRow = detailParts.length
-            ? '<tr class="detail-row" style="display:' + (isOpen ? 'table-row' : 'none') + ';">' +
-                '<td colspan="4"><div class="detail-panel">' + detailParts.join('') + '</div></td>' +
-              '</tr>'
-            : '';
-          const noteSuffix = q?.error
-            ? ' | live lookup failed'
-            : (hasDetails ? ' | click row to expand' : '');
-          const summaryRow = '<tr' +
-            (hasDetails ? ` onclick="toggleQwenModelRow('${key}')" class="clickable-row"` : '') +
-          '>' +
-            '<td><span class="row-label">' + toggleControl + deleteControl + '<span class="expander">' + expandGlyph + '</span><span data-tip="' + accountTip + '" title="' + accountTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + a.label + '</span><span class="count-pill">(' + (a.requests || 0) + '/' + (a.errors || 0) + ')</span></span><div class="muted">resource: <code>' + resource + '</code>' + noteSuffix + '</div></td>' +
-            '<td>' + tierLabel + (q?.tier_id ? '<div class="muted">' + q.tier_id + '</div>' : '') + '</td>' +
-            '<td class="stacked">Requests: ' + fmtQwen(requestLimit) + '<br><span class="weekly-line">Tokens: ' + fmtQwen(tokenLimit) + '</span></td>' +
-            '<td>' + (a.expired_at || '-') + '</td>' +
-          '</tr>';
-          return summaryRow + detailRow;
-        }).join('');
-        document.getElementById('qwenRows').innerHTML = rows;
+        var res = await fetch('/qwen/accounts.json');
+        var data = await res.json();
+        var accounts = data.accounts || [];
+        var cards = accounts.map(buildProviderCard).join('');
+        document.getElementById('qwenCards').innerHTML = cards || '<div class="empty-state">No Qwen accounts</div>';
+        document.getElementById('qwenBadgeCount').textContent = accounts.length + ' accounts';
       }
       async function refreshQwenQuota() {
         const res = await fetch('/qwen/quota.json');
@@ -1372,54 +1086,19 @@ async fn dashboard() -> impl IntoResponse {
         lastQwenQuota = quotaMap;
       }
       async function refreshDeepSeekAccounts() {
-        const res = await fetch('/deepseek/accounts.json');
-        const data = await res.json();
-        const rows = (data.accounts || []).map(a => {
-          const toggleLabel = a.enabled ? 'Disable' : 'Enable';
-          const dot = a.enabled ? '#2ecc71' : '#e74c3c';
-          const toggleControl = a.file_name
-            ? `<button title="${toggleLabel}" onclick="event.stopPropagation();toggleCred('${a.file_name}', ${a.enabled ? 'false' : 'true'})" class="dot-button" style="background:${dot};"></button>`
-            : `<span class="dot-indicator" style="background:${dot};"></span>`;
-          const deleteControl = a.file_name
-            ? `<button title="Delete" onclick="event.stopPropagation();deleteCred('${a.file_name}')" class="icon-button">&#128465;</button>`
-            : '';
-          const accountTip = [
-            'Account ID: ' + (a.account_id || a.label || '-'),
-            'Base URL: ' + (a.base_url || 'https://api.deepseek.com')
-          ].join(' | ');
-          return '<tr>' +
-            '<td><span class="row-label">' + toggleControl + deleteControl + '<span data-tip="' + accountTip + '" title="' + accountTip + '" onclick="showTapTip(this, event)" class="help-trigger">' + a.label + '</span><span class="count-pill">(' + (a.requests || 0) + '/' + (a.errors || 0) + ')</span></span></td>' +
-            '<td><code>' + (a.base_url || 'https://api.deepseek.com') + '</code></td>' +
-            '<td>API key</td>' +
-          '</tr>';
-        }).join('');
-        document.getElementById('deepseekRows').innerHTML = rows;
+        var res = await fetch('/deepseek/accounts.json');
+        var data = await res.json();
+        var accounts = data.accounts || [];
+        var cards = accounts.map(buildProviderCard).join('');
+        document.getElementById('deepseekCards').innerHTML = cards || '<div class="empty-state">No DeepSeek accounts</div>';
+        document.getElementById('deepseekBadgeCount').textContent = accounts.length + ' accounts';
       }
       async function refreshGrokAccounts() {
-        const res = await fetch('/grok/accounts.json');
-        const data = await res.json();
-        const accounts = data.accounts || [];
-        var cards = accounts.map(function(a) {
-          var dot = a.enabled ? '#2ecc71' : '#e74c3c';
-          var toggleLabel = a.enabled ? 'Disable' : 'Enable';
-          var toggleBtn = a.file_name
-            ? '<button title="' + toggleLabel + '" onclick="toggleCred(\'' + a.file_name + '\', ' + (a.enabled ? 'false' : 'true') + ')" class="dot-button" style="background:' + dot + ';"></button>'
-            : '<span class="dot-indicator" style="background:' + dot + ';"></span>';
-          var deleteBtn = a.file_name
-            ? '<button title="Delete" onclick="deleteCred(\'' + a.file_name + '\')" class="icon-button">&#128465;</button>'
-            : '';
-          return '<div class="card">'
-            + '<div class="card-header">'
-            + toggleBtn + deleteBtn
-            + '<span class="card-email">' + (a.label || a.email || 'Grok') + '</span>'
-            + '</div>'
-            + '<div class="stat-pills">'
-            + '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>'
-            + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
-            + (a.email ? '<span class="stat-pill"><span class="stat-pill-value">' + a.email + '</span></span>' : '')
-            + '</div></div>';
-        }).join('');
-        document.getElementById('grokCards').innerHTML = cards || '<div class="empty-state">No Grok accounts. <a href="/login/grok/start" target="_blank">Add one</a></div>';
+        var res = await fetch('/grok/accounts.json');
+        var data = await res.json();
+        var accounts = data.accounts || [];
+        var cards = accounts.map(buildProviderCard).join('');
+        document.getElementById('grokCards').innerHTML = cards || '<div class="empty-state">No Grok accounts</div>';
         document.getElementById('grokBadgeCount').textContent = accounts.length + ' accounts';
       }
       let contextChart = null;
