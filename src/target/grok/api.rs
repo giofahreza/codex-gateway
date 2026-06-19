@@ -7,7 +7,7 @@ use axum::{
 use bytes::Bytes;
 use std::time::Duration;
 
-const DEFAULT_BASE_URL: &str = "https://api.x.ai/v1";
+const DEFAULT_BASE_URL: &str = "https://api.x.ai";
 
 const MODEL_FALLBACKS: &[(&str, &str)] = &[
     ("grok-4.3", "Grok 4.3"),
@@ -258,5 +258,16 @@ fn rx_stream(
         while let Some(chunk) = rx.recv().await {
             yield chunk;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_BASE_URL;
+
+    #[test]
+    fn grok_responses_url_matches_xai_docs() {
+        let upstream_url = format!("{}/v1/responses", DEFAULT_BASE_URL.trim_end_matches('/'));
+        assert_eq!(upstream_url, "https://api.x.ai/v1/responses");
     }
 }
