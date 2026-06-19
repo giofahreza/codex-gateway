@@ -43,7 +43,9 @@ fn normalize_codex_provider_body(target: TargetModel, body: Bytes) -> Bytes {
     copy_json_field(&input, &mut output, "instructions");
     copy_json_field(&input, &mut output, "input");
     copy_json_field(&input, &mut output, "messages");
-    copy_json_field(&input, &mut output, "tools");
+    if let Some(tools) = normalize_provider_tools(input.get("tools")) {
+        output.insert("tools".to_string(), Value::Array(tools));
+    }
     copy_json_field(&input, &mut output, "tool_choice");
     copy_json_field(&input, &mut output, "parallel_tool_calls");
     copy_json_field(&input, &mut output, "max_output_tokens");
@@ -70,6 +72,49 @@ fn normalize_codex_provider_body(target: TargetModel, body: Bytes) -> Bytes {
 }
 
 fn copy_json_field(input: &Map<String, Value>, output: &mut Map<String, Value>, name: &str) {
+    if let Some(value) = input.get(name) {
+        output.insert(name.to_string(), value.clone());
+    }
+}
+
+fn normalize_provider_tools(tools: Option<&Value>) -> Option<Vec<Value>> {
+    let tools = tools?.as_array()?;
+    let mut normalized = Vec::new();
+    for tool in tools {
+        if tool.get("type").and_then(|value| value.as_str()) != Some("function") {
+            continue;
+        }
+
+        if let Some(function) = tool.get("function") {
+            normalized.push(serde_json::json!({
+                "type": "function",
+                "function": function
+            }));
+            continue;
+        }
+
+        let Some(name) = tool.get("name").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let mut function = Map::new();
+        function.insert("name".to_string(), Value::String(name.to_string()));
+        copy_json_field_object(tool, &mut function, "description");
+        copy_json_field_object(tool, &mut function, "parameters");
+        copy_json_field_object(tool, &mut function, "strict");
+        normalized.push(serde_json::json!({
+            "type": "function",
+            "function": Value::Object(function)
+        }));
+    }
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn copy_json_field_object(input: &Value, output: &mut Map<String, Value>, name: &str) {
     if let Some(value) = input.get(name) {
         output.insert(name.to_string(), value.clone());
     }
@@ -198,6 +243,29 @@ mod tests {
         let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn codex_responses_converts_responses_tools_for_deepseek() {
+        let uri: Uri = "/codex/responses".parse().unwrap();
+        let routed = route_to_target(
+            "/codex/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(
+                br#"{"model":"deepseek-v4-pro","input":"hi","tools":[{"type":"function","name":"shell","description":"run a command","parameters":{"type":"object"},"strict":true}]}"#,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::DeepSeek);
+        let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["function"]["name"], "shell");
+        assert_eq!(body["tools"][0]["function"]["description"], "run a command");
+        assert_eq!(body["tools"][0]["function"]["parameters"]["type"], "object");
+        assert_eq!(body["tools"][0]["function"]["strict"], true);
     }
 }
 
