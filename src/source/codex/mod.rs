@@ -15,7 +15,42 @@ pub fn route_to_target(
     body: Bytes,
 ) -> Result<RoutedRequest, RouteError> {
     let upstream_path = route::resolve(path, method)?;
+    if upstream_path == "responses" && *method == Method::POST {
+        let target = crate::source::v1::provider::target_from_request_body(&body)
+            .unwrap_or(crate::source::TargetModel::Codex);
+        if target != crate::source::TargetModel::Codex {
+            return Ok(crate::source::v1::provider::convert(
+                target,
+                upstream_path,
+                uri,
+                body,
+            ));
+        }
+    }
+
     Ok(codex::convert(upstream_path, uri, method, headers, body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderMap, Method, Uri};
+
+    #[test]
+    fn codex_responses_can_route_deepseek_models() {
+        let uri: Uri = "/codex/responses".parse().unwrap();
+        let routed = route_to_target(
+            "/codex/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"deepseek-v4-pro","input":"hi"}"#),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, crate::source::TargetModel::DeepSeek);
+        assert_eq!(routed.upstream_path, "responses");
+    }
 }
 
 /// Lists raw upstream Codex models without OpenAI compatibility translation.
