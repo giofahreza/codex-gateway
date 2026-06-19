@@ -1493,7 +1493,7 @@ async fn dashboard() -> impl IntoResponse {
         <pre id="grokAuthUrl" class="auth-url"></pre>
         <form id="grokLoginForm" style="margin-top:16px;">
           <label>Callback URL</label>
-          <input name="redirect_url" placeholder="http://localhost:56121/callback?code=...&state=...">
+          <input name="redirect_url" placeholder="http://127.0.0.1:56121/callback?code=...&state=...">
           <div class="modal-actions" style="margin-top:8px;">
             <button type="submit">Submit</button>
             <button type="button" id="closeGrokModalBtn" class="secondary-button">Close</button>

@@ -8,14 +8,16 @@ pub const ISSUER: &str = "https://auth.x.ai";
 const AUTHORIZE_URL: &str = "https://auth.x.ai/oauth2/authorize";
 const TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
 const SCOPE: &str = "openid profile email offline_access grok-cli:access api:access";
-const REDIRECT_HOST: &str = "http://localhost:56121";
+const REDIRECT_HOST: &str = "http://127.0.0.1:56121";
 const REDIRECT_PATH: &str = "/callback";
+const REFERRER: &str = "hermes-agent";
 
 #[derive(Clone)]
 pub struct PendingOAuth {
     pub code_verifier: String,
     pub code_challenge: String,
     pub state_token: String,
+    pub nonce: String,
     #[allow(dead_code)]
     pub created_at: Instant,
 }
@@ -39,10 +41,12 @@ impl PendingOAuth {
         let code_verifier = Self::generate_code_verifier();
         let code_challenge = Self::code_challenge_from_verifier(&code_verifier);
         let state_token = uuid::Uuid::new_v4().simple().to_string();
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
         Self {
             code_verifier,
             code_challenge,
             state_token,
+            nonce,
             created_at: Instant::now(),
         }
     }
@@ -57,8 +61,9 @@ impl PendingOAuth {
             ("code_challenge", &self.code_challenge),
             ("code_challenge_method", "S256"),
             ("state", &self.state_token),
+            ("nonce", &self.nonce),
             ("plan", "generic"),
-            ("referrer", "grokcli"),
+            ("referrer", REFERRER),
         ];
         let qs: String = params
             .iter()
@@ -267,4 +272,34 @@ pub struct GrokTokenResponse {
 fn base64_url_encode(input: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(input)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grok_authorize_url_matches_current_loopback_shape() {
+        let pending = PendingOAuth::new();
+        let url = url::Url::parse(&pending.build_authorize_url()).expect("valid authorize url");
+        let params = url
+            .query_pairs()
+            .into_owned()
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(url.as_str().split('?').next(), Some(AUTHORIZE_URL));
+        assert_eq!(
+            params.get("redirect_uri").map(String::as_str),
+            Some("http://127.0.0.1:56121/callback")
+        );
+        assert_eq!(params.get("referrer").map(String::as_str), Some(REFERRER));
+        assert_eq!(
+            params.get("nonce").map(String::as_str),
+            Some(pending.nonce.as_str())
+        );
+        assert_eq!(
+            params.get("state").map(String::as_str),
+            Some(pending.state_token.as_str())
+        );
+    }
 }
