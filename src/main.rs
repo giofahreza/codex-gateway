@@ -4946,6 +4946,64 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             false,
         ));
     }
+    if state
+        .gemini_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|account| account.enabled)
+    {
+        models.push(codex_provider_model(
+            "gemini-2.5-pro",
+            "Gemini 2.5 Pro",
+            "Gemini model routed through the configured Gemini account.",
+            1_048_576,
+            true,
+        ));
+        models.push(codex_provider_model(
+            "gemini-2.5-flash",
+            "Gemini 2.5 Flash",
+            "Fast Gemini model routed through the configured Gemini account.",
+            1_048_576,
+            true,
+        ));
+        models.push(codex_provider_model(
+            "gemini-3-pro",
+            "Gemini 3 Pro",
+            "Gemini model routed through the configured Gemini account.",
+            1_048_576,
+            true,
+        ));
+    }
+    if state
+        .grok_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|account| account.enabled)
+    {
+        models.push(codex_provider_model(
+            "grok-4.3",
+            "Grok 4.3",
+            "Grok model routed through the configured xAI account.",
+            256_000,
+            true,
+        ));
+        models.push(codex_provider_model(
+            "grok-4.1",
+            "Grok 4.1",
+            "Grok model routed through the configured xAI account.",
+            256_000,
+            true,
+        ));
+        models.push(codex_provider_model(
+            "grok-3",
+            "Grok 3",
+            "Grok model routed through the configured xAI account.",
+            131_072,
+            false,
+        ));
+    }
     models
 }
 

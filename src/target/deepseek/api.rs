@@ -5,7 +5,7 @@ use axum::{
     response::IntoResponse,
 };
 use bytes::Bytes;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -158,7 +158,7 @@ pub async fn responses(
         }
     };
 
-    let payload = match build_chat_payload(&request_value, &model) {
+    let payload = match build_anthropic_payload(&request_value, &model) {
         Ok(payload) => payload,
         Err(err) => {
             return (
@@ -193,7 +193,7 @@ pub async fn responses(
     );
     crate::record_deepseek_request(&state, &context);
 
-    let upstream = match send_chat_request(
+    let upstream = match send_anthropic_request(
         &state.client,
         &account.api_key,
         &normalize_base_url(account.base_url.as_deref()),
@@ -213,7 +213,7 @@ pub async fn responses(
         }
     };
 
-    let response = chat_to_openai_response(&upstream, &model);
+    let response = anthropic_to_openai_response(&upstream, &model);
     let usage = crate::usage_metrics_from_response_value(&response);
     crate::record_deepseek_success(&state, &context, &usage);
 
@@ -281,18 +281,34 @@ fn models_to_openai_json(value: &serde_json::Value) -> Result<Vec<u8>, String> {
     .map_err(|e| e.to_string())
 }
 
-async fn send_chat_request(
+fn anthropic_messages_url(base_url: &str) -> String {
+    let base = normalize_base_url(Some(base_url));
+    if base.ends_with("/v1/messages") || base.ends_with("/messages") {
+        return base;
+    }
+    if base.ends_with("/anthropic/v1") {
+        return format!("{}/messages", base);
+    }
+    if base.ends_with("/anthropic") {
+        return format!("{}/v1/messages", base);
+    }
+    if let Some(root) = base.strip_suffix("/v1") {
+        return format!("{}/anthropic/v1/messages", root);
+    }
+    format!("{}/anthropic/v1/messages", base)
+}
+
+async fn send_anthropic_request(
     client: &reqwest::Client,
     api_key: &str,
     base_url: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
     let resp = client
-        .post(format!(
-            "{}/chat/completions",
-            normalize_base_url(Some(base_url))
-        ))
+        .post(anthropic_messages_url(base_url))
+        .header("x-api-key", api_key.trim())
         .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .header("anthropic-version", "2023-06-01")
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .body(payload.to_string())
@@ -326,37 +342,55 @@ async fn send_chat_request(
     })
 }
 
-fn build_chat_payload(
+fn build_anthropic_payload(
     request_value: &serde_json::Value,
     model: &str,
 ) -> Result<serde_json::Value, String> {
-    let mut messages =
-        if let Some(messages) = request_value.get("messages").and_then(|v| v.as_array()) {
-            normalize_chat_messages(messages)?
-        } else {
-            build_messages_from_input(request_value)?
-        };
-    messages = sanitize_tool_call_messages(messages);
+    let direct_messages = request_value.get("messages").and_then(|v| v.as_array());
+    let chat_messages = if let Some(messages) = direct_messages {
+        normalize_chat_messages(messages)?
+    } else {
+        build_messages_from_input(request_value)?
+    };
 
+    let mut system_parts = Vec::new();
+    if direct_messages.is_some() {
+        if let Some(instructions) = request_value
+            .get("instructions")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            system_parts.push(instructions.to_string());
+        }
+    }
+
+    let messages = chat_messages_to_anthropic(chat_messages, &mut system_parts);
     if messages.is_empty() {
         return Err("messages must not be empty".to_string());
     }
 
+    let max_tokens = request_value
+        .get("max_output_tokens")
+        .or_else(|| request_value.get("max_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(4096);
+
     let mut payload = json!({
         "model": model,
+        "max_tokens": max_tokens,
         "messages": messages,
         "stream": false
     });
 
-    if let Some(tools) = build_tools(request_value)? {
-        payload["tools"] = tools;
+    if !system_parts.is_empty() {
+        payload["system"] = json!(system_parts.join("\n"));
     }
-
-    if let Some(max_output_tokens) = request_value
-        .get("max_output_tokens")
-        .and_then(|v| v.as_u64())
-    {
-        payload["max_tokens"] = json!(max_output_tokens);
+    if let Some(tools) = build_anthropic_tools(request_value)? {
+        payload["tools"] = tools;
+        if let Some(tool_choice) = build_anthropic_tool_choice(request_value) {
+            payload["tool_choice"] = tool_choice;
+        }
     }
     if let Some(temperature) = request_value.get("temperature").and_then(|v| v.as_f64()) {
         payload["temperature"] = json!(temperature);
@@ -364,23 +398,170 @@ fn build_chat_payload(
     if let Some(top_p) = request_value.get("top_p").and_then(|v| v.as_f64()) {
         payload["top_p"] = json!(top_p);
     }
-    if let Some(stop) = request_value.get("stop") {
-        payload["stop"] = stop.clone();
+    if let Some(stop) = build_stop_sequences(request_value.get("stop")) {
+        payload["stop_sequences"] = stop;
     }
-    if let Some(thinking) = build_thinking(request_value) {
-        payload["thinking"] = thinking;
+    if let Some(effort) = build_reasoning_effort(request_value) {
+        payload["output_config"] = json!({ "effort": effort });
     }
-    if let Some(reasoning_effort) = build_reasoning_effort(request_value) {
-        payload["reasoning_effort"] = json!(reasoning_effort);
-    }
-    if let Some(response_format) = build_response_format(request_value) {
-        payload["response_format"] = response_format;
+    if let Some(metadata) = build_anthropic_metadata(request_value) {
+        payload["metadata"] = metadata;
     }
 
     Ok(payload)
 }
 
-fn build_tools(request_value: &serde_json::Value) -> Result<Option<serde_json::Value>, String> {
+fn chat_messages_to_anthropic(
+    messages: Vec<serde_json::Value>,
+    system_parts: &mut Vec<String>,
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < messages.len() {
+        let message = &messages[index];
+        match message_role(message).unwrap_or("user") {
+            "system" | "developer" => {
+                if let Some(text) = extract_text_value(message.get("content")) {
+                    system_parts.push(text);
+                }
+                index += 1;
+            }
+            "assistant" => {
+                if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+                    let mut next = index + 1;
+                    let mut tool_messages = Vec::new();
+                    while next < messages.len() && message_role(&messages[next]) == Some("tool") {
+                        tool_messages.push(messages[next].clone());
+                        next += 1;
+                    }
+
+                    let available_ids = tool_messages
+                        .iter()
+                        .filter_map(|tool| {
+                            tool.get("tool_call_id")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string)
+                        })
+                        .collect::<Vec<_>>();
+                    let mut content = Vec::new();
+                    if let Some(text) = extract_text_value(message.get("content")) {
+                        content.push(json!({ "type": "text", "text": text }));
+                    }
+                    let mut retained_ids = Vec::new();
+                    for tool_call in tool_calls {
+                        let Some(id) = tool_call_id(tool_call) else {
+                            continue;
+                        };
+                        if !available_ids.iter().any(|available| available == &id) {
+                            continue;
+                        }
+                        if let Some(block) = tool_call_to_anthropic(tool_call, &id) {
+                            retained_ids.push(id);
+                            content.push(block);
+                        }
+                    }
+                    if !content.is_empty() {
+                        out.push(json!({
+                            "role": "assistant",
+                            "content": content
+                        }));
+                    }
+
+                    let results = tool_messages
+                        .iter()
+                        .filter_map(|tool| {
+                            let id = tool.get("tool_call_id").and_then(|value| value.as_str())?;
+                            if retained_ids.iter().any(|retained| retained == id) {
+                                tool_message_to_anthropic_result(tool)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    if !results.is_empty() {
+                        out.push(json!({
+                            "role": "user",
+                            "content": results
+                        }));
+                    }
+
+                    index = next;
+                } else {
+                    if let Some(text) = extract_text_value(message.get("content")) {
+                        out.push(json!({
+                            "role": "assistant",
+                            "content": [{ "type": "text", "text": text }]
+                        }));
+                    }
+                    index += 1;
+                }
+            }
+            "tool" => {
+                if let Some(text) = tool_result_context_text(message) {
+                    out.push(json!({
+                        "role": "user",
+                        "content": [{ "type": "text", "text": text }]
+                    }));
+                }
+                index += 1;
+            }
+            _ => {
+                if let Some(text) = extract_text_value(message.get("content")) {
+                    out.push(json!({
+                        "role": "user",
+                        "content": [{ "type": "text", "text": text }]
+                    }));
+                }
+                index += 1;
+            }
+        }
+    }
+    out
+}
+
+fn tool_call_to_anthropic(tool_call: &serde_json::Value, id: &str) -> Option<serde_json::Value> {
+    let function = tool_call.get("function")?;
+    let name = function.get("name").and_then(|v| v.as_str())?;
+    let input = function
+        .get("arguments")
+        .and_then(|v| v.as_str())
+        .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok())
+        .or_else(|| function.get("arguments").cloned())
+        .unwrap_or_else(|| json!({}));
+    Some(json!({
+        "type": "tool_use",
+        "id": id,
+        "name": name,
+        "input": input
+    }))
+}
+
+fn tool_message_to_anthropic_result(tool: &serde_json::Value) -> Option<serde_json::Value> {
+    let tool_use_id = tool.get("tool_call_id").and_then(|value| value.as_str())?;
+    let content = stringify_tool_output(tool.get("content"));
+    Some(json!({
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": content
+    }))
+}
+
+fn tool_result_context_text(tool: &serde_json::Value) -> Option<String> {
+    let tool_call_id = tool
+        .get("tool_call_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let content = stringify_tool_output(tool.get("content"));
+    if content.trim().is_empty() {
+        None
+    } else {
+        Some(format!("Tool result for {}:\n{}", tool_call_id, content))
+    }
+}
+
+fn build_anthropic_tools(
+    request_value: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, String> {
     let Some(tools) = request_value.get("tools").and_then(|v| v.as_array()) else {
         return Ok(None);
     };
@@ -390,28 +571,21 @@ fn build_tools(request_value: &serde_json::Value) -> Result<Option<serde_json::V
         if tool.get("type").and_then(|v| v.as_str()) != Some("function") {
             continue;
         }
-        let Some(function) = tool.get("function") else {
-            return Err("tool.function is required".to_string());
-        };
+        let function = tool.get("function").unwrap_or(tool);
         let Some(name) = function.get("name").and_then(|v| v.as_str()) else {
-            return Err("tool.function.name is required".to_string());
+            return Err("tool.name is required".to_string());
         };
-        let mut mapped_function = json!({
-            "name": name
+        let mut mapped_tool = json!({
+            "name": name,
+            "input_schema": function
+                .get("parameters")
+                .cloned()
+                .unwrap_or_else(|| json!({ "type": "object" }))
         });
         if let Some(description) = function.get("description").and_then(|v| v.as_str()) {
-            mapped_function["description"] = json!(description);
+            mapped_tool["description"] = json!(description);
         }
-        if let Some(parameters) = function.get("parameters") {
-            mapped_function["parameters"] = parameters.clone();
-        }
-        if let Some(strict) = function.get("strict").and_then(|v| v.as_bool()) {
-            mapped_function["strict"] = json!(strict);
-        }
-        mapped.push(json!({
-            "type": "function",
-            "function": mapped_function
-        }));
+        mapped.push(mapped_tool);
     }
 
     if mapped.is_empty() {
@@ -421,12 +595,68 @@ fn build_tools(request_value: &serde_json::Value) -> Result<Option<serde_json::V
     }
 }
 
-fn build_thinking(request_value: &serde_json::Value) -> Option<serde_json::Value> {
-    if request_value.get("reasoning").is_none() && request_value.get("reasoning_effort").is_none() {
-        None
-    } else {
-        Some(json!({ "type": "enabled" }))
+fn build_anthropic_tool_choice(request_value: &serde_json::Value) -> Option<serde_json::Value> {
+    let choice = request_value.get("tool_choice")?;
+    if let Some(choice) = choice.as_str() {
+        return match choice {
+            "none" => Some(json!({ "type": "none" })),
+            "required" | "any" => Some(json!({ "type": "any" })),
+            "auto" => Some(json!({ "type": "auto" })),
+            _ => None,
+        };
     }
+
+    let choice_type = choice.get("type").and_then(|v| v.as_str())?;
+    match choice_type {
+        "none" => Some(json!({ "type": "none" })),
+        "required" | "any" => Some(json!({ "type": "any" })),
+        "auto" => Some(json!({ "type": "auto" })),
+        "function" => choice
+            .get("function")
+            .and_then(|function| function.get("name"))
+            .and_then(|name| name.as_str())
+            .map(|name| json!({ "type": "tool", "name": name })),
+        "tool" => choice
+            .get("name")
+            .and_then(|name| name.as_str())
+            .map(|name| json!({ "type": "tool", "name": name })),
+        _ => None,
+    }
+}
+
+fn build_stop_sequences(stop: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    let stop = stop?;
+    if let Some(stop) = stop
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(json!([stop]));
+    }
+    if let Some(items) = stop.as_array() {
+        let values = items
+            .iter()
+            .filter_map(|item| item.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| json!(value))
+            .collect::<Vec<_>>();
+        if !values.is_empty() {
+            return Some(serde_json::Value::Array(values));
+        }
+    }
+    None
+}
+
+fn build_anthropic_metadata(request_value: &serde_json::Value) -> Option<serde_json::Value> {
+    request_value
+        .get("metadata")
+        .and_then(|metadata| metadata.get("user_id"))
+        .and_then(|value| value.as_str())
+        .or_else(|| request_value.get("user").and_then(|value| value.as_str()))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|user_id| json!({ "user_id": user_id }))
 }
 
 fn build_reasoning_effort(request_value: &serde_json::Value) -> Option<&'static str> {
@@ -440,25 +670,6 @@ fn build_reasoning_effort(request_value: &serde_json::Value) -> Option<&'static 
                 .and_then(|v| v.as_str())
         })
         .and_then(map_reasoning_effort)
-}
-
-fn build_response_format(request_value: &serde_json::Value) -> Option<serde_json::Value> {
-    let format_type = request_value
-        .get("response_format")
-        .and_then(|value| value.get("type"))
-        .and_then(|v| v.as_str())
-        .or_else(|| {
-            request_value
-                .get("text")
-                .and_then(|value| value.get("format"))
-                .and_then(|value| value.get("type"))
-                .and_then(|v| v.as_str())
-        })?;
-
-    match format_type {
-        "json_object" | "json_schema" => Some(json!({ "type": "json_object" })),
-        _ => None,
-    }
 }
 
 fn map_reasoning_effort(effort: &str) -> Option<&'static str> {
@@ -535,96 +746,6 @@ fn normalize_message_role(role: Option<&str>) -> &'static str {
     }
 }
 
-fn sanitize_tool_call_messages(messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
-    let mut out = Vec::new();
-    let mut index = 0;
-    while index < messages.len() {
-        let message = &messages[index];
-        if message_role(message) == Some("assistant") {
-            if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
-                if !tool_calls.is_empty() {
-                    let mut next = index + 1;
-                    let mut following_tools = Vec::new();
-                    while next < messages.len() && message_role(&messages[next]) == Some("tool") {
-                        following_tools.push(messages[next].clone());
-                        next += 1;
-                    }
-
-                    let retained_calls =
-                        retain_tool_calls_with_outputs(tool_calls, &following_tools);
-                    if retained_calls.is_empty() {
-                        if assistant_has_content(message) {
-                            let mut assistant = message.clone();
-                            if let Some(object) = assistant.as_object_mut() {
-                                object.remove("tool_calls");
-                            }
-                            out.push(assistant);
-                        }
-                    } else {
-                        let retained_ids = retained_calls
-                            .iter()
-                            .filter_map(tool_call_id)
-                            .collect::<Vec<_>>();
-                        let mut assistant = message.clone();
-                        if let Some(object) = assistant.as_object_mut() {
-                            object.insert(
-                                "tool_calls".to_string(),
-                                serde_json::Value::Array(retained_calls),
-                            );
-                        }
-                        out.push(assistant);
-
-                        for tool in following_tools {
-                            let Some(tool_call_id) =
-                                tool.get("tool_call_id").and_then(|v| v.as_str())
-                            else {
-                                continue;
-                            };
-                            if retained_ids.iter().any(|id| id.as_str() == tool_call_id) {
-                                out.push(tool);
-                            }
-                        }
-                    }
-                    index = next;
-                    continue;
-                }
-            }
-        }
-
-        if message_role(message) != Some("tool") {
-            out.push(message.clone());
-        }
-        index += 1;
-    }
-    out
-}
-
-fn retain_tool_calls_with_outputs(
-    tool_calls: &[serde_json::Value],
-    following_tools: &[serde_json::Value],
-) -> Vec<serde_json::Value> {
-    let available_ids = following_tools
-        .iter()
-        .filter_map(|tool| {
-            tool.get("tool_call_id")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        })
-        .collect::<Vec<_>>();
-
-    tool_calls
-        .iter()
-        .filter_map(|tool_call| {
-            let id = tool_call_id(tool_call)?;
-            if available_ids.iter().any(|available_id| available_id == &id) {
-                Some(tool_call.clone())
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 fn tool_call_id(tool_call: &serde_json::Value) -> Option<String> {
     tool_call
         .get("id")
@@ -634,14 +755,6 @@ fn tool_call_id(tool_call: &serde_json::Value) -> Option<String> {
 
 fn message_role(message: &serde_json::Value) -> Option<&str> {
     message.get("role").and_then(|value| value.as_str())
-}
-
-fn assistant_has_content(message: &serde_json::Value) -> bool {
-    extract_text_value(message.get("content"))
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some()
 }
 
 fn normalize_direct_tool_calls(
@@ -953,80 +1066,17 @@ fn stringify_tool_output(value: Option<&serde_json::Value>) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| String::new())
 }
 
-fn chat_to_openai_response(value: &serde_json::Value, model: &str) -> serde_json::Value {
-    let choice = value
-        .get("choices")
-        .and_then(|v| v.as_array())
-        .and_then(|choices| choices.first());
-    let message = choice.and_then(|choice| choice.get("message"));
-    let content = message
-        .and_then(|message| message.get("content"))
-        .and_then(|value| extract_text_value(Some(value)))
-        .unwrap_or_default();
-    let reasoning_content = message
-        .and_then(|message| message.get("reasoning_content"))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string());
-    let tool_calls = message
-        .and_then(|message| message.get("tool_calls"))
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let usage = value.get("usage").cloned().unwrap_or_default();
-    let reasoning_tokens = usage
-        .get("completion_tokens_details")
-        .and_then(|v| v.get("reasoning_tokens"))
-        .and_then(|v| v.as_u64())
-        .or_else(|| usage.get("reasoning_tokens").and_then(|v| v.as_u64()))
-        .unwrap_or(0);
-
+fn anthropic_to_openai_response(value: &serde_json::Value, model: &str) -> serde_json::Value {
     let mut output = Vec::new();
-    if let Some(reasoning_content) = reasoning_content.as_ref() {
-        output.push(json!({
-            "id": format!("rs_{}", Uuid::new_v4().simple()),
-            "type": "reasoning",
-            "summary": [{
-                "type": "summary_text",
-                "text": reasoning_content
-            }],
-            "content": reasoning_content
-        }));
-    }
+    let mut output_text_parts = Vec::new();
+    let mut pending_text = String::new();
 
-    if !tool_calls.is_empty() {
-        for tool_call in tool_calls {
-            let call_id = tool_call
-                .get("id")
-                .and_then(|v| v.as_str())
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| format!("call_{}", Uuid::new_v4().simple()));
-            let function = tool_call.get("function").cloned().unwrap_or_default();
-            let name = function
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("tool");
-            let arguments = function
-                .get("arguments")
-                .and_then(|v| v.as_str())
-                .unwrap_or("{}");
-            let mut function_call = json!({
-                "id": format!("fc_{}", Uuid::new_v4().simple()),
-                "type": "function_call",
-                "call_id": call_id,
-                "name": name,
-                "arguments": arguments,
-                "status": "completed"
-            });
-            if let Some(reasoning_content) = reasoning_content.as_ref() {
-                function_call["reasoning_content"] = json!(reasoning_content);
-            }
-            output.push(function_call);
+    let flush_text = |output: &mut Vec<serde_json::Value>, pending_text: &mut String| {
+        if pending_text.trim().is_empty() {
+            pending_text.clear();
+            return;
         }
-    }
-
-    if output.is_empty() || !content.trim().is_empty() {
+        let text = std::mem::take(pending_text);
         output.push(json!({
             "type": "message",
             "id": format!("msg_{}", Uuid::new_v4().simple()),
@@ -1034,11 +1084,114 @@ fn chat_to_openai_response(value: &serde_json::Value, model: &str) -> serde_json
             "role": "assistant",
             "content": [{
                 "type": "output_text",
-                "text": content,
+                "text": text,
+                "annotations": []
+            }]
+        }));
+    };
+
+    if let Some(content) = value.get("content").and_then(|v| v.as_array()) {
+        for block in content {
+            match block.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+                "thinking" => {
+                    let thinking = block
+                        .get("thinking")
+                        .or_else(|| block.get("text"))
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty());
+                    if let Some(thinking) = thinking {
+                        output.push(json!({
+                            "id": format!("rs_{}", Uuid::new_v4().simple()),
+                            "type": "reasoning",
+                            "summary": [{
+                                "type": "summary_text",
+                                "text": thinking
+                            }],
+                            "content": thinking
+                        }));
+                    }
+                }
+                "text" => {
+                    if let Some(text) = block
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .filter(|value| !value.is_empty())
+                    {
+                        if !pending_text.is_empty() {
+                            pending_text.push('\n');
+                        }
+                        pending_text.push_str(text);
+                        output_text_parts.push(text.to_string());
+                    }
+                }
+                "tool_use" => {
+                    flush_text(&mut output, &mut pending_text);
+                    let call_id = block
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| format!("call_{}", Uuid::new_v4().simple()));
+                    let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                    let arguments = block
+                        .get("input")
+                        .map(|value| {
+                            serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string())
+                        })
+                        .unwrap_or_else(|| "{}".to_string());
+                    output.push(json!({
+                        "id": format!("fc_{}", Uuid::new_v4().simple()),
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": arguments,
+                        "status": "completed"
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+    flush_text(&mut output, &mut pending_text);
+
+    let output_text = output_text_parts.join("\n");
+    if output.is_empty() {
+        output.push(json!({
+            "type": "message",
+            "id": format!("msg_{}", Uuid::new_v4().simple()),
+            "status": "completed",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": output_text,
                 "annotations": []
             }]
         }));
     }
+
+    let usage = value.get("usage").cloned().unwrap_or_default();
+    let input_tokens = usage
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("output_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_read_tokens = usage
+        .get("cache_read_input_tokens")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            usage
+                .get("input_tokens_details")
+                .and_then(|v| v.get("cached_tokens"))
+                .and_then(|v| v.as_u64())
+        })
+        .unwrap_or(0);
+    let stop_reason = value
+        .get("stop_reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     json!({
         "id": format!(
@@ -1051,21 +1204,24 @@ fn chat_to_openai_response(value: &serde_json::Value, model: &str) -> serde_json
         ),
         "object": "response",
         "created_at": chrono::Utc::now().timestamp(),
-        "status": "completed",
-        "model": model,
+        "status": if stop_reason == "max_tokens" { "incomplete" } else { "completed" },
+        "model": value
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(model),
         "output": output,
-        "output_text": content,
+        "output_text": output_text,
         "usage": {
-            "input_tokens": usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            "output_tokens": usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            "total_tokens": usage.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "cache_creation_input_tokens": usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            "cache_read_input_tokens": cache_read_tokens,
             "input_tokens_details": {
-                "cached_tokens": usage.get("prompt_cache_hit_tokens").and_then(|v| v.as_u64())
-                    .or_else(|| usage.get("prompt_tokens_details").and_then(|v| v.get("cached_tokens")).and_then(|v| v.as_u64()))
-                    .unwrap_or(0),
+                "cached_tokens": cache_read_tokens
             },
             "output_tokens_details": {
-                "reasoning_tokens": reasoning_tokens
+                "reasoning_tokens": usage.get("reasoning_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
             }
         }
     })
@@ -1136,7 +1292,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_chat_payload_preserves_tool_call_turns_and_outputs() {
+    fn anthropic_messages_url_uses_deepseek_anthropic_base() {
+        assert_eq!(
+            anthropic_messages_url("https://api.deepseek.com"),
+            "https://api.deepseek.com/anthropic/v1/messages"
+        );
+        assert_eq!(
+            anthropic_messages_url("https://api.deepseek.com/anthropic"),
+            "https://api.deepseek.com/anthropic/v1/messages"
+        );
+        assert_eq!(
+            anthropic_messages_url("https://api.deepseek.com/anthropic/v1"),
+            "https://api.deepseek.com/anthropic/v1/messages"
+        );
+        assert_eq!(
+            anthropic_messages_url("https://api.deepseek.com/v1"),
+            "https://api.deepseek.com/anthropic/v1/messages"
+        );
+    }
+
+    #[test]
+    fn build_anthropic_payload_maps_responses_tool_history() {
         let request = json!({
             "model": "deepseek-v4-pro",
             "instructions": "You are helpful",
@@ -1157,15 +1333,12 @@ mod tests {
             "reasoning": {
                 "effort": "xhigh"
             },
+            "max_output_tokens": 2048,
             "input": [
                 {
                     "type": "message",
                     "role": "user",
                     "content": [{ "type": "input_text", "text": "Weather in Tokyo?" }]
-                },
-                {
-                    "type": "reasoning",
-                    "summary": [{ "type": "summary_text", "text": "Need weather tool." }]
                 },
                 {
                     "type": "function_call",
@@ -1181,27 +1354,29 @@ mod tests {
             ]
         });
 
-        let payload = build_chat_payload(&request, "deepseek-v4-pro").unwrap();
+        let payload = build_anthropic_payload(&request, "deepseek-v4-pro").unwrap();
         let messages = payload["messages"].as_array().unwrap();
 
-        assert_eq!(messages[0]["role"], "system");
-        assert_eq!(messages[1]["role"], "user");
-        assert_eq!(messages[2]["role"], "assistant");
-        assert_eq!(messages[2]["content"], "");
-        assert_eq!(messages[2]["reasoning_content"], "Need weather tool.");
-        assert_eq!(
-            messages[2]["tool_calls"][0]["function"]["name"],
-            "get_weather"
-        );
-        assert_eq!(messages[3]["role"], "tool");
-        assert_eq!(messages[3]["tool_call_id"], "call_weather");
-        assert_eq!(messages[3]["content"], "{\"temp_c\":24}");
-        assert_eq!(payload["thinking"]["type"], "enabled");
-        assert_eq!(payload["reasoning_effort"], "max");
+        assert_eq!(payload["system"], "You are helpful");
+        assert_eq!(payload["max_tokens"], 2048);
+        assert_eq!(payload["output_config"]["effort"], "max");
+        assert_eq!(payload["tools"][0]["name"], "get_weather");
+        assert_eq!(payload["tools"][0]["input_schema"]["type"], "object");
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"][0]["type"], "text");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][0]["id"], "call_weather");
+        assert_eq!(messages[1]["content"][0]["name"], "get_weather");
+        assert_eq!(messages[1]["content"][0]["input"]["city"], "Tokyo");
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[2]["content"][0]["tool_use_id"], "call_weather");
+        assert_eq!(messages[2]["content"][0]["content"], "{\"temp_c\":24}");
     }
 
     #[test]
-    fn build_chat_payload_drops_unanswered_tool_call_turns() {
+    fn build_anthropic_payload_drops_unanswered_tool_call_turns() {
         let request = json!({
             "model": "deepseek-v4-pro",
             "input": [
@@ -1219,18 +1394,16 @@ mod tests {
             ]
         });
 
-        let payload = build_chat_payload(&request, "deepseek-v4-pro").unwrap();
+        let payload = build_anthropic_payload(&request, "deepseek-v4-pro").unwrap();
         let messages = payload["messages"].as_array().unwrap();
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "user");
-        assert!(messages
-            .iter()
-            .all(|message| message.get("tool_calls").is_none()));
+        assert_eq!(messages[0]["content"][0]["text"], "List files");
     }
 
     #[test]
-    fn build_chat_payload_filters_partially_answered_tool_calls() {
+    fn build_anthropic_payload_filters_partially_answered_tool_calls() {
         let request = json!({
             "model": "deepseek-v4-pro",
             "input": [
@@ -1259,22 +1432,23 @@ mod tests {
             ]
         });
 
-        let payload = build_chat_payload(&request, "deepseek-v4-pro").unwrap();
+        let payload = build_anthropic_payload(&request, "deepseek-v4-pro").unwrap();
         let messages = payload["messages"].as_array().unwrap();
 
         assert_eq!(messages[1]["role"], "assistant");
-        assert_eq!(messages[1]["tool_calls"].as_array().unwrap().len(), 1);
-        assert_eq!(messages[1]["tool_calls"][0]["id"], "call_one");
-        assert_eq!(messages[2]["role"], "tool");
-        assert_eq!(messages[2]["tool_call_id"], "call_one");
-        assert!(!messages.iter().any(|message| message
-            .get("tool_call_id")
-            .and_then(|value| value.as_str())
-            == Some("call_two")));
+        assert_eq!(messages[1]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][0]["id"], "call_one");
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[2]["content"][0]["tool_use_id"], "call_one");
+        assert!(!serde_json::to_string(&messages)
+            .unwrap()
+            .contains("call_two"));
     }
 
     #[test]
-    fn build_chat_payload_filters_direct_messages_with_missing_tool_outputs() {
+    fn build_anthropic_payload_maps_direct_messages_with_tools() {
         let request = json!({
             "model": "deepseek-v4-pro",
             "messages": [
@@ -1312,16 +1486,21 @@ mod tests {
             ]
         });
 
-        let payload = build_chat_payload(&request, "deepseek-v4-pro").unwrap();
+        let payload = build_anthropic_payload(&request, "deepseek-v4-pro").unwrap();
         let messages = payload["messages"].as_array().unwrap();
 
-        assert_eq!(messages[1]["tool_calls"].as_array().unwrap().len(), 1);
-        assert_eq!(messages[1]["tool_calls"][0]["id"], "call_one");
-        assert_eq!(messages[2]["tool_call_id"], "call_one");
+        assert_eq!(messages[1]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][0]["id"], "call_one");
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[2]["content"][0]["tool_use_id"], "call_one");
+        assert!(!serde_json::to_string(&messages)
+            .unwrap()
+            .contains("call_two"));
     }
 
     #[test]
-    fn build_chat_payload_maps_developer_role_to_system() {
+    fn build_anthropic_payload_maps_developer_role_to_system() {
         let request = json!({
             "model": "deepseek-v4-pro",
             "input": [
@@ -1338,79 +1517,57 @@ mod tests {
             ]
         });
 
-        let payload = build_chat_payload(&request, "deepseek-v4-pro").unwrap();
+        let payload = build_anthropic_payload(&request, "deepseek-v4-pro").unwrap();
         let messages = payload["messages"].as_array().unwrap();
 
+        assert_eq!(payload["system"], "keep answers concise");
+        assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "user");
-        assert_eq!(messages[1]["role"], "system");
-        assert_eq!(messages[1]["content"], "keep answers concise");
+        assert_eq!(messages[0]["content"][0]["text"], "hello");
     }
 
     #[test]
-    fn build_chat_payload_maps_developer_chat_message_to_system() {
-        let request = json!({
+    fn anthropic_to_openai_response_maps_text_thinking_and_tool_use() {
+        let upstream = json!({
+            "id": "msg-test",
             "model": "deepseek-v4-pro",
-            "messages": [
+            "content": [
                 {
-                    "role": "developer",
-                    "content": "keep answers concise"
+                    "type": "thinking",
+                    "thinking": "Need the weather tool first."
                 },
                 {
-                    "role": "user",
-                    "content": "hello"
+                    "type": "text",
+                    "text": "Checking."
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call_weather",
+                    "name": "get_weather",
+                    "input": { "city": "Tokyo" }
                 }
-            ]
-        });
-
-        let payload = build_chat_payload(&request, "deepseek-v4-pro").unwrap();
-        let messages = payload["messages"].as_array().unwrap();
-
-        assert_eq!(messages[0]["role"], "system");
-        assert_eq!(messages[0]["content"], "keep answers concise");
-        assert_eq!(messages[1]["role"], "user");
-    }
-
-    #[test]
-    fn chat_to_openai_response_maps_reasoning_and_function_calls() {
-        let upstream = json!({
-            "id": "chatcmpl-test",
+            ],
+            "stop_reason": "tool_use",
             "usage": {
-                "prompt_tokens": 10,
-                "completion_tokens": 5,
-                "total_tokens": 15,
-                "completion_tokens_details": {
-                    "reasoning_tokens": 3
-                }
-            },
-            "choices": [{
-                "message": {
-                    "content": null,
-                    "reasoning_content": "Need the weather tool first.",
-                    "tool_calls": [{
-                        "id": "call_weather",
-                        "type": "function",
-                        "function": {
-                            "name": "get_weather",
-                            "arguments": "{\"city\":\"Tokyo\"}"
-                        }
-                    }]
-                }
-            }]
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 2
+            }
         });
 
-        let response = chat_to_openai_response(&upstream, "deepseek-v4-pro");
+        let response = anthropic_to_openai_response(&upstream, "deepseek-v4-pro");
         let output = response["output"].as_array().unwrap();
 
         assert_eq!(response["object"], "response");
         assert_eq!(response["model"], "deepseek-v4-pro");
-        assert_eq!(
-            response["usage"]["output_tokens_details"]["reasoning_tokens"],
-            3
-        );
+        assert_eq!(response["output_text"], "Checking.");
+        assert_eq!(response["usage"]["input_tokens"], 10);
+        assert_eq!(response["usage"]["cache_read_input_tokens"], 2);
         assert_eq!(output[0]["type"], "reasoning");
-        assert_eq!(output[1]["type"], "function_call");
-        assert_eq!(output[1]["call_id"], "call_weather");
-        assert_eq!(output[1]["name"], "get_weather");
-        assert_eq!(output[1]["arguments"], "{\"city\":\"Tokyo\"}");
+        assert_eq!(output[1]["type"], "message");
+        assert_eq!(output[2]["type"], "function_call");
+        assert_eq!(output[2]["call_id"], "call_weather");
+        assert_eq!(output[2]["name"], "get_weather");
+        assert_eq!(output[2]["arguments"], "{\"city\":\"Tokyo\"}");
     }
 }
