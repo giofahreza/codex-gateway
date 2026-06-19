@@ -530,8 +530,12 @@ async fn dashboard() -> impl IntoResponse {
       .modal {
         position: fixed;
         inset: 0;
+        z-index: 1000;
         background: var(--overlay);
         padding: 24px 12px;
+      }
+      #adminLoginGate {
+        z-index: 1100;
       }
       .modal-card {
         background: var(--surface);
@@ -877,6 +881,7 @@ async fn dashboard() -> impl IntoResponse {
     <script>
       let adminAuthEnabled = false;
       let adminAuthenticated = false;
+      let adminAuthEpoch = 0;
       let dashboardIntervalsStarted = false;
       let lastQuota = new Map();
       let lastAgwQuota = new Map();
@@ -902,8 +907,16 @@ async fn dashboard() -> impl IntoResponse {
           localStorage.setItem(THEME_KEY, theme);
         } catch (_) {}
       }
+      function closeProviderMenu() {
+        const menu = document.getElementById('providerMenu');
+        if (menu) {
+          menu.style.display = 'none';
+        }
+      }
       function showAdminLogin(message) {
         adminAuthenticated = false;
+        adminAuthEpoch += 1;
+        closeProviderMenu();
         document.getElementById('adminLoginGate').style.display = 'block';
         document.getElementById('logoutBtn').style.display = 'none';
         document.getElementById('adminLoginStatus').textContent = message || '';
@@ -916,15 +929,18 @@ async fn dashboard() -> impl IntoResponse {
         }
       }
       async function adminFetch(url, options) {
-        const res = await fetch(url, options);
+        const requestEpoch = adminAuthEpoch;
+        const res = await fetch(url, Object.assign({ credentials: 'same-origin' }, options || {}));
         if (res.status === 401) {
-          showAdminLogin('Session expired. Log in again.');
+          if (requestEpoch === adminAuthEpoch) {
+            showAdminLogin('Session expired. Log in again.');
+          }
           return null;
         }
         return res;
       }
       async function bootstrapAdmin() {
-        const res = await fetch('/admin/session');
+        const res = await fetch('/admin/session', { credentials: 'same-origin' });
         const data = await res.json();
         adminAuthEnabled = !!data.enabled;
         adminAuthenticated = !!data.authenticated || !adminAuthEnabled;
@@ -1524,7 +1540,7 @@ async fn dashboard() -> impl IntoResponse {
         menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
       });
       document.addEventListener('click', function() {
-        document.getElementById('providerMenu').style.display = 'none';
+        closeProviderMenu();
       });
       document.getElementById('providerMenu').addEventListener('click', function(e) {
         e.stopPropagation();
@@ -1867,6 +1883,7 @@ async fn dashboard() -> impl IntoResponse {
         }
         const res = await fetch('/admin/login', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({ api_key: apiKey, otp: otp })
         });
@@ -1875,13 +1892,14 @@ async fn dashboard() -> impl IntoResponse {
           document.getElementById('adminLoginStatus').textContent = data.message || 'Login failed.';
           return;
         }
+        adminAuthEpoch += 1;
         adminAuthenticated = true;
         document.getElementById('adminOtpInput').value = '';
         hideAdminLogin();
         startDashboard();
       });
       document.getElementById('logoutBtn').addEventListener('click', async () => {
-        const res = await fetch('/admin/logout', { method: 'POST' });
+        const res = await fetch('/admin/logout', { method: 'POST', credentials: 'same-origin' });
         if (res) {
           try { await res.json(); } catch (_) {}
         }
