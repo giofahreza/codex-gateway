@@ -3,6 +3,7 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Deserialize;
+use std::collections::HashMap;
 
 #[derive(Deserialize)]
 pub struct CallbackForm {
@@ -63,7 +64,7 @@ pub async fn login_start(State(state): State<crate::AppState>) -> impl IntoRespo
         "ok": true,
         "state": state_token,
         "url": url,
-        "message": "Open the URL, complete login, then paste the URL you're redirected to."
+        "message": "Open the URL, complete login, then paste the callback URL, ?code=...&state=... fragment, or the bare authorization code if xAI shows it directly."
     }))
     .into_response()
 }
@@ -72,76 +73,42 @@ pub async fn login_submit(
     State(state): State<crate::AppState>,
     Form(form): Form<CallbackForm>,
 ) -> impl IntoResponse {
-    let redirect_url = form.redirect_url.trim();
-    if redirect_url.is_empty() {
+    let submitted = form.redirect_url.trim();
+    if submitted.is_empty() {
         return axum::Json(serde_json::json!({
             "ok": false,
-            "message": "Callback URL is required"
+            "message": "Callback URL or authorization code is required"
         }))
         .into_response();
     }
 
-    // Parse callback URL
-    let parsed = match url::Url::parse(redirect_url) {
-        Ok(url) => url,
-        Err(_) => {
-            // Try adding a scheme
-            match url::Url::parse(&format!("http://{}", redirect_url)) {
-                Ok(url) => url,
-                Err(_) => {
-                    return axum::Json(serde_json::json!({
-                        "ok": false,
-                        "message": "Invalid callback URL"
-                    }))
-                    .into_response();
-                }
-            }
-        }
-    };
-
-    let code = match parsed
-        .query_pairs()
-        .find(|(k, _)| k == "code")
-        .map(|(_, v)| v.to_string())
-    {
-        Some(code) if !code.is_empty() => code,
-        _ => {
+    let (code, state_param) = match parse_submitted_code(submitted, form.state.as_deref()) {
+        Ok(result) => result,
+        Err(message) => {
             return axum::Json(serde_json::json!({
                 "ok": false,
-                "message": "No authorization code found in callback URL"
+                "message": message
             }))
             .into_response();
         }
     };
-
-    let state_param = parsed
-        .query_pairs()
-        .find(|(k, _)| k == "state")
-        .map(|(_, v)| v.to_string())
-        .or_else(|| form.state.clone());
 
     // Find pending OAuth state
     let pending = if let Some(ref st) = state_param {
         let mut lock = state.grok_oauth_pending.lock().unwrap();
         lock.remove(st)
     } else {
-        // Try all pending states
-        let mut lock = state.grok_oauth_pending.lock().unwrap();
-        if lock.is_empty() {
-            None
-        } else {
-            let keys: Vec<_> = lock.keys().cloned().collect();
-            lock.remove(&keys[0])
-        }
+        take_latest_pending_oauth(&mut state.grok_oauth_pending.lock().unwrap())
     };
 
     let pending = match pending {
         Some(p) => p,
         None => {
-            // Allow code exchange without a stored state (for copy-paste flows)
-            // Create a temporary pending with empty verifier/challenge
-            // This may fail with xAI if they validate the challenge
-            super::auth::PendingOAuth::new()
+            return axum::Json(serde_json::json!({
+                "ok": false,
+                "message": "No pending Grok login was found for that code. Click Start Login again, then paste the callback URL or authorization code from the same attempt."
+            }))
+            .into_response();
         }
     };
 
@@ -208,4 +175,109 @@ pub async fn login_status(
         "pending": pending.is_some()
     }))
     .into_response()
+}
+
+fn parse_submitted_code(
+    submitted: &str,
+    fallback_state: Option<&str>,
+) -> Result<(String, Option<String>), String> {
+    if let Ok(url) = url::Url::parse(submitted) {
+        return parse_query_pairs(url.query_pairs().into_owned().collect(), fallback_state);
+    }
+
+    if let Ok(url) = url::Url::parse(&format!("http://{}", submitted)) {
+        if url.query().is_some() {
+            return parse_query_pairs(url.query_pairs().into_owned().collect(), fallback_state);
+        }
+    }
+
+    let trimmed = submitted.trim_start_matches('?').trim();
+    if trimmed.contains("code=") || trimmed.contains("state=") {
+        let params = url::form_urlencoded::parse(trimmed.as_bytes())
+            .into_owned()
+            .collect::<Vec<_>>();
+        return parse_query_pairs(params, fallback_state);
+    }
+
+    if is_probable_auth_code(trimmed) {
+        return Ok((
+            trimmed.to_string(),
+            fallback_state
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+        ));
+    }
+
+    Err("Invalid callback value. Paste the full callback URL, ?code=...&state=... fragment, or the bare authorization code shown by xAI.".to_string())
+}
+
+fn parse_query_pairs(
+    pairs: Vec<(String, String)>,
+    fallback_state: Option<&str>,
+) -> Result<(String, Option<String>), String> {
+    let params = pairs.into_iter().collect::<HashMap<_, _>>();
+    let code = params
+        .get("code")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "No authorization code was found. Paste the full callback URL, ?code=...&state=... fragment, or the bare authorization code shown by xAI.".to_string())?;
+    let state = params
+        .get("state")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            fallback_state
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        });
+    Ok((code.to_string(), state))
+}
+
+fn is_probable_auth_code(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains(char::is_whitespace)
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~'))
+}
+
+fn take_latest_pending_oauth(
+    pending: &mut HashMap<String, super::auth::PendingOAuth>,
+) -> Option<super::auth::PendingOAuth> {
+    let latest_state = pending
+        .iter()
+        .max_by_key(|(_, oauth)| oauth.created_at)
+        .map(|(state, _)| state.clone())?;
+    pending.remove(&latest_state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_submitted_code;
+
+    #[test]
+    fn accepts_full_callback_url() {
+        let (code, state) = parse_submitted_code(
+            "http://127.0.0.1:56121/callback?code=test-code&state=test-state",
+            None,
+        )
+        .expect("parse");
+        assert_eq!(code, "test-code");
+        assert_eq!(state.as_deref(), Some("test-state"));
+    }
+
+    #[test]
+    fn accepts_query_fragment() {
+        let (code, state) =
+            parse_submitted_code("?code=test-code&state=test-state", None).expect("parse");
+        assert_eq!(code, "test-code");
+        assert_eq!(state.as_deref(), Some("test-state"));
+    }
+
+    #[test]
+    fn accepts_bare_code_with_fallback_state() {
+        let (code, state) = parse_submitted_code("test-code", Some("saved-state")).expect("parse");
+        assert_eq!(code, "test-code");
+        assert_eq!(state.as_deref(), Some("saved-state"));
+    }
 }

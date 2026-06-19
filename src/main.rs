@@ -1503,13 +1503,14 @@ async fn dashboard() -> impl IntoResponse {
     <div id="addGrokModal" class="modal" style="display:none;">
       <div class="modal-card">
         <h2 style="margin-top:0;">Add Grok Account</h2>
-        <p>Click start, open the URL in a new tab, complete login with your SuperGrok or X Premium+ account, then paste the callback URL you are redirected to.</p>
+        <p>Click start, open the URL in a new tab, complete login with your SuperGrok or X Premium+ account, then paste the callback URL, the <code>?code=...&amp;state=...</code> fragment, or just the authorization code if xAI shows a completion page instead of redirecting.</p>
         <button onclick="startGrokLogin()">Start Login</button>
         <div id="grokStatus" class="muted" style="margin-top:8px;"></div>
         <pre id="grokAuthUrl" class="auth-url"></pre>
         <form id="grokLoginForm" style="margin-top:16px;">
-          <label>Callback URL</label>
-          <input name="redirect_url" placeholder="http://127.0.0.1:56121/callback?code=...&state=...">
+          <label>Callback URL or Authorization Code</label>
+          <input name="redirect_url" placeholder="http://127.0.0.1:56121/callback?code=...&state=... or paste bare code">
+          <input type="hidden" name="state" value="">
           <div class="modal-actions" style="margin-top:8px;">
             <button type="submit">Submit</button>
             <button type="button" id="closeGrokModalBtn" class="secondary-button">Close</button>
@@ -1694,6 +1695,9 @@ async fn dashboard() -> impl IntoResponse {
       // Grok modal
       function closeGrokModal() {
         document.getElementById('addGrokModal').style.display = 'none';
+        const form = document.getElementById('grokLoginForm');
+        form.querySelector('input[name="state"]').value = '';
+        form.querySelector('input[name="redirect_url"]').value = '';
       }
       async function startGrokLogin() {
         document.getElementById('grokStatus').textContent = 'Starting login...';
@@ -1701,8 +1705,9 @@ async fn dashboard() -> impl IntoResponse {
         if (!res) return;
         const data = await res.json();
         if (data.url) {
+          document.getElementById('grokLoginForm').querySelector('input[name="state"]').value = data.state || '';
           window.open(data.url, '_blank');
-          document.getElementById('grokStatus').textContent = 'Opened login URL. Complete login and paste the redirect URL below.';
+          document.getElementById('grokStatus').textContent = 'Opened login URL. Complete login, then paste the callback URL or the bare authorization code if xAI shows it directly.';
           const pre = document.getElementById('grokAuthUrl');
           pre.textContent = data.url;
           pre.style.display = 'block';
@@ -1722,21 +1727,23 @@ async fn dashboard() -> impl IntoResponse {
         e.preventDefault();
         const form = e.target;
         const input = form.querySelector('input[name="redirect_url"]');
+        const stateInput = form.querySelector('input[name="state"]');
         const redirectUrl = input.value.trim();
         if (!redirectUrl) {
-          document.getElementById('grokStatus').textContent = 'Callback URL is required.';
+          document.getElementById('grokStatus').textContent = 'Callback URL or authorization code is required.';
           return;
         }
         const res = await adminFetch('/login/grok/submit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({ redirect_url: redirectUrl })
+          body: new URLSearchParams({ redirect_url: redirectUrl, state: stateInput.value || '' })
         });
         if (!res) return;
         const data = await res.json();
         document.getElementById('grokStatus').textContent = data.message || 'Login completed.';
         if (data.ok) {
           input.value = '';
+          stateInput.value = '';
           refreshGrokAccounts();
         }
       });
