@@ -17,6 +17,10 @@ People with multiple Codex accounts who want to share usage evenly from a single
 
 Open `http://127.0.0.1:8319/` to see per‑account usage and errors.
 
+If `admin_auth.enabled` is on, the dashboard requires:
+- the configured admin API key
+- a 6-digit TOTP code from Google Authenticator
+
 ## Codex Login (Web UI)
 
 Open `http://127.0.0.1:8319/` and scroll to **Codex OAuth Login**.
@@ -50,7 +54,31 @@ cp config.example.json config.json
 export CODEX_GATEWAY_KEY="your-random-key"
 ```
 
-4. Run the gateway:
+4. Configure admin login for dashboard/account management.
+
+You can either put the values in `config.json`:
+
+```json
+"admin_auth": {
+  "enabled": true,
+  "api_key": "your-admin-api-key",
+  "totp_secret": "BASE32_SECRET_FROM_GOOGLE_AUTHENTICATOR",
+  "session_ttl_seconds": 43200
+}
+```
+
+Or set them with environment variables:
+
+```bash
+export ADMIN_AUTH_ENABLED=true
+export ADMIN_AUTH_API_KEY="your-admin-api-key"
+export ADMIN_AUTH_TOTP_SECRET="BASE32_SECRET_FROM_GOOGLE_AUTHENTICATOR"
+export ADMIN_AUTH_SESSION_TTL_SECONDS=43200
+```
+
+`totp_secret` must be a Base32 TOTP secret that Google Authenticator can import.
+
+5. Run the gateway:
 
 ```bash
 cargo run
@@ -67,6 +95,12 @@ cargo run
   "proxy_api_key": "your-shared-proxy-key",
   "tokens": [],
   "auth_dir": "/root/dev/yow/gpt-gateway/auths",
+  "admin_auth": {
+    "enabled": true,
+    "api_key": "your-admin-api-key",
+    "totp_secret": "BASE32_SECRET_FROM_GOOGLE_AUTHENTICATOR",
+    "session_ttl_seconds": 43200
+  },
   "oauth": {
     "providers": {
       "qwen": {
@@ -89,6 +123,9 @@ cargo run
 Notes:
 - `tokens` is optional. If empty, tokens are loaded from `auth_dir`.
 - Tokens are de‑duplicated and rotated in round‑robin order.
+- `admin_auth.api_key` falls back to `proxy_api_key` if left empty, but using a separate key is safer.
+- `admin_auth.totp_secret` can also be provided by `ADMIN_AUTH_TOTP_SECRET`.
+- `admin_auth.session_ttl_seconds` defaults to 12 hours.
 - `oauth.providers.qwen` is optional. Built-in defaults are used when omitted, and any field can also be overridden with `QWEN_OAUTH_*` environment variables from `.env.example`.
 
 ## Qwen Browser Token Flow

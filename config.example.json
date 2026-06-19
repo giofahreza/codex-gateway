@@ -4,6 +4,12 @@
   "proxy_api_key": "your-shared-proxy-key",
   "tokens": [],
   "auth_dir": "./auths",
+  "admin_auth": {
+    "enabled": true,
+    "api_key": "your-admin-api-key",
+    "totp_secret": "PASTE_BASE32_SECRET_FROM_GOOGLE_AUTHENTICATOR_SETUP",
+    "session_ttl_seconds": 43200
+  },
   "oauth": {
     "providers": {
       "qwen": {

@@ -3,7 +3,7 @@ use axum::{
     body::Body,
     extract::{Form, OriginalUri, Path, Query, State},
     http::{HeaderMap, Method, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::any,
     Router,
 };
@@ -18,6 +18,7 @@ use std::{
 };
 use tracing::{error, info};
 use uuid::Uuid;
+mod admin_auth;
 mod source;
 mod stats_store;
 mod target;
@@ -59,6 +60,7 @@ struct AppState {
     gemini_oauth_pending: Arc<Mutex<HashSet<String>>>,
     qwen_oauth_pending: Arc<Mutex<HashMap<String, target::qwen::auth::PendingOAuth>>>,
     grok_oauth_pending: Arc<Mutex<HashMap<String, target::grok::auth::PendingOAuth>>>,
+    admin_sessions: Arc<Mutex<HashMap<String, admin_auth::AdminSession>>>,
     disabled: Arc<Mutex<HashSet<String>>>,
     usage_history_lock: Arc<Mutex<()>>,
 }
@@ -84,6 +86,8 @@ struct Config {
     auth_dir: Option<String>,
     // Optional list of disabled credential filenames
     disabled_files: Option<Vec<String>>,
+    #[serde(default)]
+    admin_auth: admin_auth::AdminAuthConfig,
     #[serde(default)]
     oauth: target::oauth::OAuthConfig,
 }
@@ -240,6 +244,7 @@ async fn main() {
         gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),
         qwen_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         grok_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
+        admin_sessions: Arc::new(Mutex::new(HashMap::new())),
         disabled: Arc::new(Mutex::new(disabled)),
         usage_history_lock: Arc::new(Mutex::new(())),
     };
@@ -250,6 +255,9 @@ async fn main() {
         .route("/health", any(health))
         .route("/", any(dashboard_root))
         .route("/dashboard", any(dashboard))
+        .route("/admin/session", any(admin_session_route))
+        .route("/admin/login", any(admin_login_route))
+        .route("/admin/logout", any(admin_logout_route))
         .route("/dashboard.json", any(dashboard_json))
         .route("/quota.json", any(quota_json_route))
         .route("/credentials/delete", any(delete_credential_route))
@@ -751,6 +759,19 @@ async fn dashboard() -> impl IntoResponse {
       .card-model-legend-dot {
         width: 8px; height: 8px; border-radius: 2px; display: inline-block;
       }
+      .admin-login-card {
+        max-width: 420px;
+        margin: 6vh auto;
+      }
+      .admin-login-copy {
+        margin: 0 0 14px 0;
+        line-height: 1.5;
+      }
+      .admin-login-form {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
     </style>
     <script>
       (() => {
@@ -765,11 +786,30 @@ async fn dashboard() -> impl IntoResponse {
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   </head>
   <body>
+    <div id="adminLoginGate" class="modal" style="display:none;">
+      <div class="modal-card admin-login-card">
+        <h2 style="margin-top:0;">Admin Login</h2>
+        <p class="admin-login-copy">Enter the management API key and the 6-digit OTP from Google Authenticator to manage accounts.</p>
+        <form id="adminLoginForm" class="admin-login-form">
+          <div>
+            <label>API Key</label>
+            <input id="adminApiKeyInput" name="api_key" type="password" autocomplete="current-password" placeholder="Enter management API key">
+          </div>
+          <div>
+            <label>Google Authenticator OTP</label>
+            <input id="adminOtpInput" name="otp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" placeholder="123456">
+          </div>
+          <button type="submit">Log in</button>
+          <div id="adminLoginStatus" class="muted"></div>
+        </form>
+      </div>
+    </div>
     <div class="page-shell">
       <h1 class="page-header">
         <span>Codex Gateway Usage</span>
         <span class="header-actions">
           <button type="button" id="themeToggleBtn" class="secondary-button">Theme: Dark</button>
+          <button type="button" id="logoutBtn" class="secondary-button" style="display:none;">Log out</button>
           <div style="position:relative;">
             <button id="addProviderBtn">+ Add account</button>
             <div id="providerMenu" style="display:none;position:absolute;right:0;top:100%;z-index:100;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);min-width:200px;margin-top:4px;overflow:hidden;">
@@ -835,6 +875,9 @@ async fn dashboard() -> impl IntoResponse {
       </div>
     </div>
     <script>
+      let adminAuthEnabled = false;
+      let adminAuthenticated = false;
+      let dashboardIntervalsStarted = false;
       let lastQuota = new Map();
       let lastAgwQuota = new Map();
       let lastGeminiQuota = new Map();
@@ -858,6 +901,48 @@ async fn dashboard() -> impl IntoResponse {
         try {
           localStorage.setItem(THEME_KEY, theme);
         } catch (_) {}
+      }
+      function showAdminLogin(message) {
+        adminAuthenticated = false;
+        document.getElementById('adminLoginGate').style.display = 'block';
+        document.getElementById('logoutBtn').style.display = 'none';
+        document.getElementById('adminLoginStatus').textContent = message || '';
+      }
+      function hideAdminLogin() {
+        document.getElementById('adminLoginGate').style.display = 'none';
+        document.getElementById('adminLoginStatus').textContent = '';
+        if (adminAuthEnabled) {
+          document.getElementById('logoutBtn').style.display = 'inline-block';
+        }
+      }
+      async function adminFetch(url, options) {
+        const res = await fetch(url, options);
+        if (res.status === 401) {
+          showAdminLogin('Session expired. Log in again.');
+          return null;
+        }
+        return res;
+      }
+      async function bootstrapAdmin() {
+        const res = await fetch('/admin/session');
+        const data = await res.json();
+        adminAuthEnabled = !!data.enabled;
+        adminAuthenticated = !!data.authenticated || !adminAuthEnabled;
+        if (!adminAuthEnabled) {
+          hideAdminLogin();
+          startDashboard();
+          return;
+        }
+        if (!data.configured) {
+          showAdminLogin('Admin auth is enabled but not configured. Set admin_auth.totp_secret or ADMIN_AUTH_TOTP_SECRET.');
+          return;
+        }
+        if (adminAuthenticated) {
+          hideAdminLogin();
+          startDashboard();
+          return;
+        }
+        showAdminLogin('Enter the management API key and your current Google Authenticator code.');
       }
       function setThemeToggleLabel(theme) {
         const btn = document.getElementById('themeToggleBtn');
@@ -1004,7 +1089,8 @@ async fn dashboard() -> impl IntoResponse {
           + '</div>';
       }
       async function refresh() {
-        const res = await fetch('/dashboard.json');
+        const res = await adminFetch('/dashboard.json');
+        if (!res) return;
         const data = await res.json();
         document.getElementById('totals').textContent =
           'Total requests: ' + data.total_requests + ' | Total errors: ' + data.total_errors;
@@ -1013,7 +1099,8 @@ async fn dashboard() -> impl IntoResponse {
         document.getElementById('codexBadgeCount').textContent = data.accounts.length + ' accounts';
       }
       async function refreshQuota() {
-        const res = await fetch('/quota.json');
+        const res = await adminFetch('/quota.json');
+        if (!res) return;
         const quota = await res.json();
         const quotaMap = new Map();
         (quota.accounts || []).forEach(q => {
@@ -1090,7 +1177,8 @@ async fn dashboard() -> impl IntoResponse {
           + '</div>';
       }
       async function refreshAgwAccounts() {
-        var res = await fetch('/agw/accounts.json');
+        var res = await adminFetch('/agw/accounts.json');
+        if (!res) return;
         var data = await res.json();
         var accounts = data.accounts || [];
         var cards = accounts.map(function(a) { return buildProviderCard(a, lastAgwQuota.get(a.file_name || a.label)); }).join('');
@@ -1098,7 +1186,8 @@ async fn dashboard() -> impl IntoResponse {
         document.getElementById('agwBadgeCount').textContent = accounts.length + ' accounts';
       }
       async function refreshAgwQuota() {
-        const res = await fetch('/agw/quota.json');
+        const res = await adminFetch('/agw/quota.json');
+        if (!res) return;
         const quota = await res.json();
         const quotaMap = new Map();
         (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
@@ -1106,7 +1195,8 @@ async fn dashboard() -> impl IntoResponse {
         refreshAgwAccounts();
       }
       async function refreshGeminiAccounts() {
-        var res = await fetch('/gemini/accounts.json');
+        var res = await adminFetch('/gemini/accounts.json');
+        if (!res) return;
         var data = await res.json();
         var accounts = data.accounts || [];
         var cards = accounts.map(function(a) { return buildProviderCard(a, lastGeminiQuota.get(a.file_name || a.label)); }).join('');
@@ -1114,7 +1204,8 @@ async fn dashboard() -> impl IntoResponse {
         document.getElementById('geminiBadgeCount').textContent = accounts.length + ' accounts';
       }
       async function refreshGeminiQuota() {
-        const res = await fetch('/gemini/quota.json');
+        const res = await adminFetch('/gemini/quota.json');
+        if (!res) return;
         const quota = await res.json();
         const quotaMap = new Map();
         (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
@@ -1122,7 +1213,8 @@ async fn dashboard() -> impl IntoResponse {
         refreshGeminiAccounts();
       }
       async function refreshQwenAccounts() {
-        var res = await fetch('/qwen/accounts.json');
+        var res = await adminFetch('/qwen/accounts.json');
+        if (!res) return;
         var data = await res.json();
         var accounts = data.accounts || [];
         var cards = accounts.map(function(a) { return buildQwenCard(a); }).join('');
@@ -1130,7 +1222,8 @@ async fn dashboard() -> impl IntoResponse {
         document.getElementById('qwenBadgeCount').textContent = accounts.length + ' accounts';
       }
       async function refreshDeepSeekAccounts() {
-        var res = await fetch('/deepseek/accounts.json');
+        var res = await adminFetch('/deepseek/accounts.json');
+        if (!res) return;
         var data = await res.json();
         var accounts = data.accounts || [];
         var cards = accounts.map(buildProviderCard).join('');
@@ -1138,7 +1231,8 @@ async fn dashboard() -> impl IntoResponse {
         document.getElementById('deepseekBadgeCount').textContent = accounts.length + ' accounts';
       }
       async function refreshGrokAccounts() {
-        var res = await fetch('/grok/accounts.json');
+        var res = await adminFetch('/grok/accounts.json');
+        if (!res) return;
         var data = await res.json();
         var accounts = data.accounts || [];
         var cards = accounts.map(buildProviderCard).join('');
@@ -1160,7 +1254,8 @@ async fn dashboard() -> impl IntoResponse {
       }
       async function refreshContextChart() {
         try {
-          const res = await fetch('/usage/context-history.json?hours=24&bucket_minutes=5');
+          const res = await adminFetch('/usage/context-history.json?hours=24&bucket_minutes=5');
+          if (!res) return;
           const data = await res.json();
           const labels = data.labels || [];
           const buckets = data.buckets || [];
@@ -1298,24 +1393,6 @@ async fn dashboard() -> impl IntoResponse {
           // Chart refresh is best-effort
         }
       }
-      refresh();
-      refreshContextChart();
-      refreshQuota();
-      refreshAgwQuota().then(() => refreshAgwAccounts());
-      refreshGeminiQuota().then(() => refreshGeminiAccounts());
-      refreshQwenAccounts();
-      refreshDeepSeekAccounts();
-      refreshGrokAccounts();
-      setInterval(refresh, 5000);
-      setInterval(refreshQuota, 60000);
-      setInterval(refreshAgwQuota, 60000);
-      setInterval(refreshGeminiQuota, 60000);
-      setInterval(refreshAgwAccounts, 10000);
-      setInterval(refreshGeminiAccounts, 10000);
-      setInterval(refreshQwenAccounts, 10000);
-      setInterval(refreshDeepSeekAccounts, 10000);
-      setInterval(refreshGrokAccounts, 10000);
-      setInterval(refreshContextChart, 60000);
     </script>
     <div id="addModal" class="modal" style="display:none;">
       <div class="modal-card">
@@ -1426,7 +1503,8 @@ async fn dashboard() -> impl IntoResponse {
     </div>
     <script>
       async function startLogin() {
-        const res = await fetch('/login/codex/start');
+        const res = await adminFetch('/login/codex/start');
+        if (!res) return;
         const data = await res.json();
         if (data.url) {
           window.open(data.url, '_blank');
@@ -1472,7 +1550,8 @@ async fn dashboard() -> impl IntoResponse {
         }
       });
       async function startAgwLogin() {
-        const res = await fetch('/login/antigravity/start');
+        const res = await adminFetch('/login/antigravity/start');
+        if (!res) return;
         const data = await res.json();
         if (data.url) {
           window.open(data.url, '_blank');
@@ -1493,7 +1572,8 @@ async fn dashboard() -> impl IntoResponse {
         }
       });
       async function startGeminiLogin() {
-        const res = await fetch('/login/gemini/start');
+        const res = await adminFetch('/login/gemini/start');
+        if (!res) return;
         const data = await res.json();
         if (data.url) {
           window.open(data.url, '_blank');
@@ -1530,13 +1610,14 @@ async fn dashboard() -> impl IntoResponse {
           document.getElementById('qwenStatus').textContent = 'Paste a Qwen browser token first.';
           return;
         }
-        const res = await fetch('/login/qwen/start', {
+        const res = await adminFetch('/login/qwen/start', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({ token })
         });
+        if (!res) return;
         const data = await res.json();
         document.getElementById('qwenStatus').textContent = data.message || 'Failed to save Qwen token';
         if (!data.ok) {
@@ -1564,7 +1645,7 @@ async fn dashboard() -> impl IntoResponse {
           document.getElementById('deepseekStatus').textContent = 'Paste a DeepSeek API key first.';
           return;
         }
-        const res = await fetch('/login/deepseek/start', {
+        const res = await adminFetch('/login/deepseek/start', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -1575,6 +1656,7 @@ async fn dashboard() -> impl IntoResponse {
             base_url: baseUrl || undefined
           })
         });
+        if (!res) return;
         const data = await res.json();
         document.getElementById('deepseekStatus').textContent = data.message || 'Failed to save DeepSeek key';
         if (!data.ok) {
@@ -1599,7 +1681,8 @@ async fn dashboard() -> impl IntoResponse {
       }
       async function startGrokLogin() {
         document.getElementById('grokStatus').textContent = 'Starting login...';
-        const res = await fetch('/login/grok/start');
+        const res = await adminFetch('/login/grok/start');
+        if (!res) return;
         const data = await res.json();
         if (data.url) {
           window.open(data.url, '_blank');
@@ -1628,11 +1711,12 @@ async fn dashboard() -> impl IntoResponse {
           document.getElementById('grokStatus').textContent = 'Callback URL is required.';
           return;
         }
-        const res = await fetch('/login/grok/submit', {
+        const res = await adminFetch('/login/grok/submit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({ redirect_url: redirectUrl })
         });
+        if (!res) return;
         const data = await res.json();
         document.getElementById('grokStatus').textContent = data.message || 'Login completed.';
         if (data.ok) {
@@ -1649,11 +1733,12 @@ async fn dashboard() -> impl IntoResponse {
           document.getElementById('status').textContent = 'Callback URL is required.';
           return;
         }
-        const res = await fetch('/login/codex/submit', {
+        const res = await adminFetch('/login/codex/submit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({ redirect_url: redirectUrl })
         });
+        if (!res) return;
         const data = await res.json();
         document.getElementById('status').textContent = data.message || 'Login completed.';
         if (data.ok) {
@@ -1669,11 +1754,12 @@ async fn dashboard() -> impl IntoResponse {
           document.getElementById('agwStatus').textContent = 'Callback URL is required.';
           return;
         }
-        const res = await fetch('/login/antigravity/submit', {
+        const res = await adminFetch('/login/antigravity/submit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({ redirect_url: redirectUrl })
         });
+        if (!res) return;
         const data = await res.json();
         document.getElementById('agwStatus').textContent = data.message || 'Login completed.';
         if (data.ok) {
@@ -1692,11 +1778,12 @@ async fn dashboard() -> impl IntoResponse {
           document.getElementById('geminiStatus').textContent = 'Callback URL is required.';
           return;
         }
-        const res = await fetch('/login/gemini/submit', {
+        const res = await adminFetch('/login/gemini/submit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({ redirect_url: redirectUrl, project_id: projectId })
         });
+        if (!res) return;
         const data = await res.json();
         document.getElementById('geminiStatus').textContent = data.message || 'Login completed.';
         if (data.ok) {
@@ -1705,16 +1792,14 @@ async fn dashboard() -> impl IntoResponse {
         }
       });
       async function deleteCred(fileName) {
-        const key = prompt('Proxy API key for delete:');
-        if (!key) return;
-        const res = await fetch('/credentials/delete', {
+        const res = await adminFetch('/credentials/delete', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Authorization': 'Bearer ' + key
+            'Content-Type': 'application/x-www-form-urlencoded'
           },
           body: new URLSearchParams({ file_name: fileName })
         });
+        if (!res) return;
         const data = await res.json();
         alert(data.message || 'done');
         refresh();
@@ -1728,16 +1813,14 @@ async fn dashboard() -> impl IntoResponse {
         refreshGrokAccounts();
       }
       async function toggleCred(fileName, enabled) {
-        const key = prompt('Proxy API key for toggle:');
-        if (!key) return;
-        const res = await fetch('/credentials/toggle', {
+        const res = await adminFetch('/credentials/toggle', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Authorization': 'Bearer ' + key
+            'Content-Type': 'application/x-www-form-urlencoded'
           },
           body: new URLSearchParams({ file_name: fileName, enabled: enabled ? 'true' : 'false' })
         });
+        if (!res) return;
         const data = await res.json();
         alert(data.message || 'done');
         refresh();
@@ -1750,6 +1833,61 @@ async fn dashboard() -> impl IntoResponse {
         refreshDeepSeekAccounts();
         refreshGrokAccounts();
       }
+      async function startDashboard() {
+        refresh();
+        refreshContextChart();
+        refreshQuota();
+        refreshAgwQuota().then(() => refreshAgwAccounts());
+        refreshGeminiQuota().then(() => refreshGeminiAccounts());
+        refreshQwenAccounts();
+        refreshDeepSeekAccounts();
+        refreshGrokAccounts();
+        if (dashboardIntervalsStarted) {
+          return;
+        }
+        dashboardIntervalsStarted = true;
+        setInterval(() => { if (adminAuthenticated) refresh(); }, 5000);
+        setInterval(() => { if (adminAuthenticated) refreshQuota(); }, 60000);
+        setInterval(() => { if (adminAuthenticated) refreshAgwQuota(); }, 60000);
+        setInterval(() => { if (adminAuthenticated) refreshGeminiQuota(); }, 60000);
+        setInterval(() => { if (adminAuthenticated) refreshAgwAccounts(); }, 10000);
+        setInterval(() => { if (adminAuthenticated) refreshGeminiAccounts(); }, 10000);
+        setInterval(() => { if (adminAuthenticated) refreshQwenAccounts(); }, 10000);
+        setInterval(() => { if (adminAuthenticated) refreshDeepSeekAccounts(); }, 10000);
+        setInterval(() => { if (adminAuthenticated) refreshGrokAccounts(); }, 10000);
+        setInterval(() => { if (adminAuthenticated) refreshContextChart(); }, 60000);
+      }
+      document.getElementById('adminLoginForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const apiKey = document.getElementById('adminApiKeyInput').value.trim();
+        const otp = document.getElementById('adminOtpInput').value.trim();
+        if (!apiKey || !otp) {
+          document.getElementById('adminLoginStatus').textContent = 'API key and OTP are required.';
+          return;
+        }
+        const res = await fetch('/admin/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ api_key: apiKey, otp: otp })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          document.getElementById('adminLoginStatus').textContent = data.message || 'Login failed.';
+          return;
+        }
+        adminAuthenticated = true;
+        document.getElementById('adminOtpInput').value = '';
+        hideAdminLogin();
+        startDashboard();
+      });
+      document.getElementById('logoutBtn').addEventListener('click', async () => {
+        const res = await fetch('/admin/logout', { method: 'POST' });
+        if (res) {
+          try { await res.json(); } catch (_) {}
+        }
+        showAdminLogin('Logged out.');
+      });
+      bootstrapAdmin();
     </script>
   </body>
 </html>
@@ -1766,6 +1904,82 @@ async fn dashboard() -> impl IntoResponse {
         .into_response()
 }
 
+async fn admin_session_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let enabled = admin_auth::is_enabled(&state.cfg.admin_auth);
+    let configured = admin_auth::is_configured(&state.cfg.admin_auth, &state.cfg.proxy_api_key);
+    let authenticated = if enabled {
+        let mut sessions = state.admin_sessions.lock().unwrap();
+        admin_auth::validate_session(&headers, &mut sessions)
+    } else {
+        true
+    };
+
+    axum::Json(serde_json::json!({
+        "enabled": enabled,
+        "configured": configured,
+        "authenticated": authenticated
+    }))
+}
+
+async fn admin_login_route(
+    State(state): State<AppState>,
+    Form(form): Form<admin_auth::LoginForm>,
+) -> impl IntoResponse {
+    match admin_auth::verify_login(
+        &state.cfg.admin_auth,
+        &state.cfg.proxy_api_key,
+        &form.api_key,
+        &form.otp,
+        std::time::SystemTime::now(),
+    ) {
+        Ok(()) => {
+            let ttl_seconds = admin_auth::session_ttl_seconds(&state.cfg.admin_auth);
+            let session_id = {
+                let mut sessions = state.admin_sessions.lock().unwrap();
+                admin_auth::create_session(&mut sessions, ttl_seconds)
+            };
+            let mut response = axum::Json(serde_json::json!({
+                "ok": true,
+                "message": "logged in"
+            }))
+            .into_response();
+            admin_auth::append_set_cookie(
+                response.headers_mut(),
+                &admin_auth::build_session_cookie(&session_id, ttl_seconds),
+            );
+            response
+        }
+        Err(err) => (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "message": err
+            })),
+        )
+            .into_response(),
+    }
+}
+
+async fn admin_logout_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    {
+        let mut sessions = state.admin_sessions.lock().unwrap();
+        admin_auth::remove_session(&headers, &mut sessions);
+    }
+    let mut response = axum::Json(serde_json::json!({
+        "ok": true,
+        "message": "logged out"
+    }))
+    .into_response();
+    admin_auth::append_set_cookie(response.headers_mut(), &admin_auth::clear_session_cookie());
+    response
+}
+
 /// Returns the dashboard counters and per-account request totals.
 #[utoipa::path(
     get,
@@ -1776,7 +1990,10 @@ async fn dashboard() -> impl IntoResponse {
         body = crate::source::openapi::DashboardJsonResponse
     ))
 )]
-async fn dashboard_json(State(state): State<AppState>) -> impl IntoResponse {
+async fn dashboard_json(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
     let snapshot = {
         let stats = state.stats.lock().unwrap();
         stats.clone()
@@ -1823,6 +2040,7 @@ async fn dashboard_json(State(state): State<AppState>) -> impl IntoResponse {
         "last_recorded_at": snapshot.last_recorded_at,
         "accounts": accounts
     }))
+    .into_response()
 }
 
 /// Returns cached quota usage for each configured Codex credential.
@@ -1835,8 +2053,13 @@ async fn dashboard_json(State(state): State<AppState>) -> impl IntoResponse {
         body = crate::source::openapi::QuotaResponse
     ))
 )]
-async fn quota_json_route(State(state): State<AppState>) -> impl IntoResponse {
-    target::codex::admin::quota_json(State(state)).await
+async fn quota_json_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::codex::admin::quota_json(State(state))
+        .await
+        .into_response()
 }
 
 /// Starts the Codex OAuth login flow and returns the upstream authorization URL.
@@ -1849,8 +2072,13 @@ async fn quota_json_route(State(state): State<AppState>) -> impl IntoResponse {
         body = crate::source::openapi::LoginStartResponse
     ))
 )]
-async fn login_start_route(State(state): State<AppState>) -> impl IntoResponse {
-    target::codex::admin::login_start(State(state)).await
+async fn login_start_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::codex::admin::login_start(State(state))
+        .await
+        .into_response()
 }
 
 /// Accepts the OAuth callback URL and stores the resulting Codex credentials.
@@ -1870,78 +2098,153 @@ async fn login_start_route(State(state): State<AppState>) -> impl IntoResponse {
 )]
 async fn login_submit_route(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Form(form): Form<target::codex::admin::CallbackForm>,
-) -> impl IntoResponse {
-    target::codex::admin::login_submit(State(state), Form(form)).await
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::codex::admin::login_submit(State(state), Form(form))
+        .await
+        .into_response()
 }
 
-async fn agw_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
-    target::antigravity::admin::accounts_json(State(state)).await
+async fn agw_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::antigravity::admin::accounts_json(State(state))
+        .await
+        .into_response()
 }
 
-async fn agw_quota_json_route(State(state): State<AppState>) -> impl IntoResponse {
-    target::antigravity::admin::quota_json(State(state)).await
+async fn agw_quota_json_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::antigravity::admin::quota_json(State(state))
+        .await
+        .into_response()
 }
 
-async fn agw_login_start_route(State(state): State<AppState>) -> impl IntoResponse {
-    target::antigravity::admin::login_start(State(state)).await
+async fn agw_login_start_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::antigravity::admin::login_start(State(state))
+        .await
+        .into_response()
 }
 
 async fn agw_login_submit_route(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Form(form): Form<target::antigravity::admin::CallbackForm>,
-) -> impl IntoResponse {
-    target::antigravity::admin::login_submit(State(state), Form(form)).await
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::antigravity::admin::login_submit(State(state), Form(form))
+        .await
+        .into_response()
 }
 
-async fn gemini_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
-    target::gemini::admin::accounts_json(State(state)).await
+async fn gemini_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::gemini::admin::accounts_json(State(state))
+        .await
+        .into_response()
 }
 
-async fn gemini_quota_json_route(State(state): State<AppState>) -> impl IntoResponse {
-    target::gemini::admin::quota_json(State(state)).await
+async fn gemini_quota_json_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::gemini::admin::quota_json(State(state))
+        .await
+        .into_response()
 }
 
-async fn gemini_login_start_route(State(state): State<AppState>) -> impl IntoResponse {
-    target::gemini::admin::login_start(State(state)).await
+async fn gemini_login_start_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::gemini::admin::login_start(State(state))
+        .await
+        .into_response()
 }
 
 async fn gemini_login_submit_route(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Form(form): Form<target::gemini::admin::CallbackForm>,
-) -> impl IntoResponse {
-    target::gemini::admin::login_submit(State(state), Form(form)).await
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::gemini::admin::login_submit(State(state), Form(form))
+        .await
+        .into_response()
 }
 
-async fn qwen_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
-    target::qwen::admin::accounts_json(State(state)).await
+async fn qwen_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::qwen::admin::accounts_json(State(state))
+        .await
+        .into_response()
 }
 
-async fn qwen_quota_json_route(State(state): State<AppState>) -> impl IntoResponse {
-    target::qwen::admin::quota_json(State(state)).await
+async fn qwen_quota_json_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::qwen::admin::quota_json(State(state))
+        .await
+        .into_response()
 }
 
 async fn qwen_login_start_route(
     State(state): State<AppState>,
+    headers: HeaderMap,
     method: Method,
     body: Bytes,
-) -> impl IntoResponse {
-    target::qwen::admin::login_start(State(state), method, body).await
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::qwen::admin::login_start(State(state), method, body)
+        .await
+        .into_response()
 }
 
 async fn qwen_login_submit_route(
     State(state): State<AppState>,
     headers: HeaderMap,
     Form(form): Form<target::qwen::admin::CallbackForm>,
-) -> impl IntoResponse {
-    target::qwen::admin::login_submit(State(state), headers, Form(form)).await
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::qwen::admin::login_submit(State(state), headers, Form(form))
+        .await
+        .into_response()
 }
 
 async fn qwen_login_status_route(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<target::qwen::admin::LoginStatusQuery>,
-) -> impl IntoResponse {
-    target::qwen::admin::login_status(State(state), Query(query)).await
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::qwen::admin::login_status(State(state), Query(query))
+        .await
+        .into_response()
 }
 
 async fn oauth_login_callback_route(
@@ -1950,45 +2253,86 @@ async fn oauth_login_callback_route(
     method: Method,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
-) -> impl IntoResponse {
-    target::oauth::login_callback_route(state, provider, method, headers, uri).await
+) -> Response {
+    if let Some(response) = require_admin_session_text(&state, &headers) {
+        return response;
+    }
+    target::oauth::login_callback_route(state, provider, method, headers, uri)
+        .await
+        .into_response()
 }
 
-async fn deepseek_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
-    target::deepseek::admin::accounts_json(State(state)).await
+async fn deepseek_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::deepseek::admin::accounts_json(State(state))
+        .await
+        .into_response()
 }
 
 async fn deepseek_login_start_route(
     State(state): State<AppState>,
+    headers: HeaderMap,
     method: Method,
     body: Bytes,
-) -> impl IntoResponse {
-    target::deepseek::admin::login_start(State(state), method, body).await
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::deepseek::admin::login_start(State(state), method, body)
+        .await
+        .into_response()
 }
 
-async fn grok_accounts_route(State(state): State<AppState>) -> impl IntoResponse {
-    target::grok::admin::accounts_json(State(state)).await
+async fn grok_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::grok::admin::accounts_json(State(state))
+        .await
+        .into_response()
 }
 
-async fn grok_login_start_route(State(state): State<AppState>) -> impl IntoResponse {
-    target::grok::admin::login_start(State(state)).await
+async fn grok_login_start_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::grok::admin::login_start(State(state))
+        .await
+        .into_response()
 }
 
 async fn grok_login_submit_route(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Form(form): Form<target::grok::admin::CallbackForm>,
-) -> impl IntoResponse {
-    target::grok::admin::login_submit(State(state), Form(form)).await
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::grok::admin::login_submit(State(state), Form(form))
+        .await
+        .into_response()
 }
 
 async fn grok_login_status_route(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<target::grok::admin::LoginStatusQuery>,
-) -> impl IntoResponse {
-    target::grok::admin::login_status(State(state), Query(query)).await
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::grok::admin::login_status(State(state), Query(query))
+        .await
+        .into_response()
 }
 
-async fn usage_summary_route(State(state): State<AppState>) -> impl IntoResponse {
+async fn usage_summary_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
     let persisted = state.persisted_stats.lock().unwrap().clone();
     let mut codex = persisted
         .codex
@@ -2049,12 +2393,17 @@ async fn usage_summary_route(State(state): State<AppState>) -> impl IntoResponse
             "grok": grok
         }
     }))
+    .into_response()
 }
 
 async fn usage_history_route(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<usage_store::UsageHistoryQuery>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
     match usage_store::load(&state.cfg, &query) {
         Ok(events) => axum::Json(serde_json::json!({ "events": events })).into_response(),
         Err(err) => (
@@ -2087,8 +2436,12 @@ fn default_context_bucket_minutes() -> u64 {
 
 async fn context_history_route(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<ContextHistoryQuery>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
     let hours = query.hours.max(1).min(720);
     let bucket_minutes = query.bucket_minutes.max(1).min(60);
     let account_filter = query
@@ -2233,7 +2586,14 @@ async fn context_history_route(
     .into_response()
 }
 
-async fn temp_file_route(Path(name): Path<String>) -> impl IntoResponse {
+async fn temp_file_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if let Some(response) = require_admin_session_text(&state, &headers) {
+        return response;
+    }
     if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
         return (StatusCode::BAD_REQUEST, "invalid file name").into_response();
     }
@@ -2304,8 +2664,13 @@ async fn delete_credential_route(
     State(state): State<AppState>,
     headers: HeaderMap,
     Form(form): Form<target::codex::admin::DeleteForm>,
-) -> impl IntoResponse {
-    target::codex::admin::delete_credential(State(state), headers, Form(form)).await
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::codex::admin::delete_credential(State(state), Form(form))
+        .await
+        .into_response()
 }
 
 /// Enables or disables a saved credential file and persists the disabled list.
@@ -2335,8 +2700,13 @@ async fn toggle_credential_route(
     State(state): State<AppState>,
     headers: HeaderMap,
     Form(form): Form<target::codex::admin::ToggleForm>,
-) -> impl IntoResponse {
-    target::codex::admin::toggle_credential(State(state), headers, Form(form)).await
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::codex::admin::toggle_credential(State(state), Form(form))
+        .await
+        .into_response()
 }
 
 pub(crate) fn model_from_request_value(value: &serde_json::Value) -> Option<String> {
@@ -4017,6 +4387,46 @@ fn check_api_key(headers: &HeaderMap, expected: &str) -> bool {
     false
 }
 
+fn require_admin_session_json(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+    if !admin_auth::is_enabled(&state.cfg.admin_auth) {
+        return None;
+    }
+    let mut sessions = state.admin_sessions.lock().unwrap();
+    if admin_auth::validate_session(headers, &mut sessions) {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::UNAUTHORIZED,
+            [("Content-Type", "application/json")],
+            serde_json::to_vec(&serde_json::json!({
+                "ok": false,
+                "message": "admin login required"
+            }))
+            .unwrap_or_default(),
+        )
+            .into_response(),
+    )
+}
+
+fn require_admin_session_text(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+    if !admin_auth::is_enabled(&state.cfg.admin_auth) {
+        return None;
+    }
+    let mut sessions = state.admin_sessions.lock().unwrap();
+    if admin_auth::validate_session(headers, &mut sessions) {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::UNAUTHORIZED,
+            [("Content-Type", "text/plain; charset=utf-8")],
+            "admin login required".to_string(),
+        )
+            .into_response(),
+    )
+}
+
 fn pick_token(state: &AppState) -> Option<(usize, UpstreamToken)> {
     let mut idx = state.rr.lock().unwrap();
     let tokens = state.tokens.lock().unwrap();
@@ -4348,7 +4758,9 @@ fn should_drop_incoming_header(name: &str) -> bool {
 fn load_config() -> Config {
     // expects config.json in working dir
     let data = std::fs::read_to_string("config.json").expect("config.json missing");
-    serde_json::from_str(&data).expect("invalid config.json")
+    let mut cfg: Config = serde_json::from_str(&data).expect("invalid config.json");
+    admin_auth::apply_env_overrides(&mut cfg.admin_auth);
+    cfg
 }
 
 fn detect_source_api(raw_path: &str) -> SourceApi {

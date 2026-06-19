@@ -1,6 +1,6 @@
 use axum::{
     extract::{Form, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
 };
 use serde::Deserialize;
@@ -115,16 +115,8 @@ pub async fn login_submit(
 
 pub async fn delete_credential(
     State(state): State<crate::AppState>,
-    headers: HeaderMap,
     Form(form): Form<DeleteForm>,
 ) -> impl IntoResponse {
-    if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
-        return axum::Json(serde_json::json!({
-            "ok": false,
-            "message": "unauthorized"
-        }))
-        .into_response();
-    }
     let file_name = form.file_name.trim();
     if file_name.is_empty() {
         return axum::Json(serde_json::json!({
@@ -162,16 +154,8 @@ pub async fn delete_credential(
 
 pub async fn toggle_credential(
     State(state): State<crate::AppState>,
-    headers: HeaderMap,
     Form(form): Form<ToggleForm>,
 ) -> impl IntoResponse {
-    if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
-        return axum::Json(serde_json::json!({
-            "ok": false,
-            "message": "unauthorized"
-        }))
-        .into_response();
-    }
     let file_name = form.file_name.trim();
     if file_name.is_empty() {
         return axum::Json(serde_json::json!({

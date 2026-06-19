@@ -793,6 +793,7 @@ mod tests {
                 tokens: vec![],
                 auth_dir: Some(auth_dir.to_string_lossy().to_string()),
                 disabled_files: None,
+                admin_auth: crate::admin_auth::AdminAuthConfig::default(),
                 oauth: super::super::super::oauth::OAuthConfig {
                     providers: super::super::super::oauth::OAuthProvidersConfig {
                         qwen: super::super::super::oauth::OAuthProviderOverride {
@@ -843,6 +844,7 @@ mod tests {
                 gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),
                 qwen_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 grok_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
+                admin_sessions: Arc::new(Mutex::new(HashMap::new())),
                 disabled: Arc::new(Mutex::new(HashSet::new())),
                 usage_history_lock: Arc::new(Mutex::new(())),
             };

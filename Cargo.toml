@@ -24,3 +24,6 @@ async-stream = "0.3"
 serde_urlencoded = "0.7"
 utoipa = { version = "5.4", features = ["macros"] }
 utoipa-swagger-ui = "9.0.2"
+hmac = "0.12"
+sha1 = "0.10"
+data-encoding = "2.9"
