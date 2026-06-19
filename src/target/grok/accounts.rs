@@ -203,6 +203,35 @@ pub fn reload_state(state: &crate::AppState) {
     crate::sync_usage_stats(state);
 }
 
+pub fn update_runtime_metadata(
+    state: &crate::AppState,
+    file_name: Option<&str>,
+    effective_model: Option<&str>,
+    rate_limits: &[super::auth::GrokRateLimitInfo],
+) {
+    let Some(file_name) = file_name.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+
+    let mut accounts = state.grok_accounts.lock().unwrap();
+    let Some(account) = accounts
+        .iter_mut()
+        .find(|account| account.file_name.as_deref() == Some(file_name))
+    else {
+        return;
+    };
+
+    if let Some(model) = effective_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        account.last_effective_model = Some(model.to_string());
+    }
+    if !rate_limits.is_empty() {
+        account.rate_limits = rate_limits.to_vec();
+    }
+}
+
 pub fn pick_account(state: &crate::AppState) -> Option<GrokAccount> {
     let mut idx = state.grok_rr.lock().unwrap();
     let accounts = state.grok_accounts.lock().unwrap();

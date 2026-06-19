@@ -195,14 +195,13 @@ pub async fn responses(
             let status = resp.status();
             let rate_limits = super::auth::extract_rate_limits(resp.headers());
             if !status.is_success() {
-                if let Err(err) = super::auth::persist_runtime_metadata(
-                    &state.cfg,
-                    account.file_name.as_deref(),
+                persist_runtime_metadata(
+                    &state,
+                    &account,
                     Some(model.as_str()),
                     &rate_limits,
-                ) {
-                    tracing::warn!("failed to persist Grok rate limits after error: {}", err);
-                }
+                    "after error",
+                );
                 let err_body = resp.text().await.unwrap_or_default();
                 let message = err_body.clone();
                 crate::record_grok_error(&state, &context, &message);
@@ -216,14 +215,7 @@ pub async fn responses(
             }
 
             if stream {
-                if let Err(err) = super::auth::persist_runtime_metadata(
-                    &state.cfg,
-                    account.file_name.as_deref(),
-                    Some(model.as_str()),
-                    &rate_limits,
-                ) {
-                    tracing::warn!("failed to persist Grok runtime metadata: {}", err);
-                }
+                persist_runtime_metadata(&state, &account, Some(model.as_str()), &rate_limits, "");
                 let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, axum::Error>>(16);
                 let state_clone = state.clone();
                 let context_clone = context.clone();
@@ -266,14 +258,7 @@ pub async fn responses(
                     .and_then(|v| v.as_str())
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or(model.as_str());
-                if let Err(err) = super::auth::persist_runtime_metadata(
-                    &state.cfg,
-                    account.file_name.as_deref(),
-                    Some(effective_model),
-                    &rate_limits,
-                ) {
-                    tracing::warn!("failed to persist Grok runtime metadata: {}", err);
-                }
+                persist_runtime_metadata(&state, &account, Some(effective_model), &rate_limits, "");
                 (
                     StatusCode::OK,
                     [("Content-Type", "application/json")],
@@ -296,6 +281,33 @@ pub async fn responses(
             )
                 .into_response()
         }
+    }
+}
+
+fn persist_runtime_metadata(
+    state: &crate::AppState,
+    account: &super::accounts::GrokAccount,
+    effective_model: Option<&str>,
+    rate_limits: &[super::auth::GrokRateLimitInfo],
+    context: &str,
+) {
+    match super::auth::persist_runtime_metadata(
+        &state.cfg,
+        account.file_name.as_deref(),
+        effective_model,
+        rate_limits,
+    ) {
+        Ok(()) => super::accounts::update_runtime_metadata(
+            state,
+            account.file_name.as_deref(),
+            effective_model,
+            rate_limits,
+        ),
+        Err(err) => tracing::warn!(
+            "failed to persist Grok runtime metadata {}: {}",
+            context,
+            err
+        ),
     }
 }
 
