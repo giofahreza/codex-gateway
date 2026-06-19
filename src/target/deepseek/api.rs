@@ -473,10 +473,7 @@ fn normalize_chat_messages(
 ) -> Result<Vec<serde_json::Value>, String> {
     let mut out = Vec::new();
     for message in messages {
-        let role = message
-            .get("role")
-            .and_then(|v| v.as_str())
-            .unwrap_or("user");
+        let role = normalize_message_role(message.get("role").and_then(|v| v.as_str()));
         let content = extract_text_value(message.get("content"));
         let content_text = content.clone().unwrap_or_default();
         let mut normalized = json!({
@@ -519,6 +516,22 @@ fn normalize_chat_messages(
         out.push(normalized);
     }
     Ok(out)
+}
+
+fn normalize_message_role(role: Option<&str>) -> &'static str {
+    match role
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("user")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "system" | "developer" => "system",
+        "assistant" => "assistant",
+        "tool" => "tool",
+        "latest_reminder" => "latest_reminder",
+        _ => "user",
+    }
 }
 
 fn normalize_direct_tool_calls(
@@ -651,7 +664,7 @@ fn build_messages_from_input(
                 }));
             }
             _ => {
-                let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+                let role = normalize_message_role(item.get("role").and_then(|v| v.as_str()));
                 let content = extract_text_value(Some(item));
                 let direct_tool_calls = item.get("tool_calls").and_then(|v| v.as_array());
 
@@ -1075,6 +1088,56 @@ mod tests {
         assert_eq!(messages[3]["content"], "{\"temp_c\":24}");
         assert_eq!(payload["thinking"]["type"], "enabled");
         assert_eq!(payload["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn build_chat_payload_maps_developer_role_to_system() {
+        let request = json!({
+            "model": "deepseek-v4-pro",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "hello" }]
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{ "type": "input_text", "text": "keep answers concise" }]
+                }
+            ]
+        });
+
+        let payload = build_chat_payload(&request, "deepseek-v4-pro").unwrap();
+        let messages = payload["messages"].as_array().unwrap();
+
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "system");
+        assert_eq!(messages[1]["content"], "keep answers concise");
+    }
+
+    #[test]
+    fn build_chat_payload_maps_developer_chat_message_to_system() {
+        let request = json!({
+            "model": "deepseek-v4-pro",
+            "messages": [
+                {
+                    "role": "developer",
+                    "content": "keep answers concise"
+                },
+                {
+                    "role": "user",
+                    "content": "hello"
+                }
+            ]
+        });
+
+        let payload = build_chat_payload(&request, "deepseek-v4-pro").unwrap();
+        let messages = payload["messages"].as_array().unwrap();
+
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "keep answers concise");
+        assert_eq!(messages[1]["role"], "user");
     }
 
     #[test]
