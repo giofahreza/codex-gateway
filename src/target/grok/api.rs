@@ -7,7 +7,7 @@ use axum::{
 use bytes::Bytes;
 use std::time::Duration;
 
-const DEFAULT_BASE_URL: &str = "https://api.x.ai";
+const DEFAULT_BASE_URL: &str = "https://api.x.ai/v1";
 
 const MODEL_FALLBACKS: &[(&str, &str)] = &[
     ("grok-4.3", "Grok 4.3"),
@@ -32,19 +32,32 @@ pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) ->
             .into_response();
     }
 
-    let models: Vec<serde_json::Value> = MODEL_FALLBACKS
-        .iter()
-        .map(|(id, name)| {
-            serde_json::json!({
-                "id": id,
-                "object": "model",
-                "created": 0u64,
-                "owned_by": "xai",
-                "display_name": name,
-                "capabilities": ["chat", "text", "images", "video"]
-            })
-        })
-        .collect();
+    let models: Vec<serde_json::Value> = if let Some(account) =
+        super::accounts::first_enabled(&state)
+    {
+        if !account.models.is_empty() {
+            account
+                .models
+                .iter()
+                .map(|model| {
+                    serde_json::json!({
+                        "id": model.model_id,
+                        "object": "model",
+                        "created": 0u64,
+                        "owned_by": if model.owned_by.is_empty() { "xai" } else { model.owned_by.as_str() },
+                        "display_name": if model.display_name.is_empty() { model.model_id.as_str() } else { model.display_name.as_str() },
+                        "aliases": model.aliases,
+                        "context_window": model.context_window,
+                        "capabilities": ["chat", "text", "images", "video"]
+                    })
+                })
+                .collect()
+        } else {
+            fallback_models()
+        }
+    } else {
+        fallback_models()
+    };
 
     axum::Json(serde_json::json!({
         "object": "list",
@@ -150,7 +163,12 @@ pub async fn responses(
         payload["stream"] = serde_json::Value::Bool(true);
     }
 
-    let upstream_url = format!("{}/v1/responses", DEFAULT_BASE_URL.trim_end_matches('/'));
+    let upstream_base = account
+        .api_base_url
+        .as_deref()
+        .unwrap_or(DEFAULT_BASE_URL)
+        .trim_end_matches('/');
+    let upstream_url = format!("{}/responses", upstream_base);
 
     match state
         .client
@@ -175,7 +193,16 @@ pub async fn responses(
     {
         Ok(resp) => {
             let status = resp.status();
+            let rate_limits = super::auth::extract_rate_limits(resp.headers());
             if !status.is_success() {
+                if let Err(err) = super::auth::persist_runtime_metadata(
+                    &state.cfg,
+                    account.file_name.as_deref(),
+                    Some(model.as_str()),
+                    &rate_limits,
+                ) {
+                    tracing::warn!("failed to persist Grok rate limits after error: {}", err);
+                }
                 let err_body = resp.text().await.unwrap_or_default();
                 let message = err_body.clone();
                 crate::record_grok_error(&state, &context, &message);
@@ -189,6 +216,14 @@ pub async fn responses(
             }
 
             if stream {
+                if let Err(err) = super::auth::persist_runtime_metadata(
+                    &state.cfg,
+                    account.file_name.as_deref(),
+                    Some(model.as_str()),
+                    &rate_limits,
+                ) {
+                    tracing::warn!("failed to persist Grok runtime metadata: {}", err);
+                }
                 let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, axum::Error>>(16);
                 let state_clone = state.clone();
                 let context_clone = context.clone();
@@ -226,6 +261,19 @@ pub async fn responses(
                     serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
                 let usage = crate::usage_metrics_from_response_value(&response_value);
                 crate::record_grok_success(&state, &context, &usage);
+                let effective_model = response_value
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or(model.as_str());
+                if let Err(err) = super::auth::persist_runtime_metadata(
+                    &state.cfg,
+                    account.file_name.as_deref(),
+                    Some(effective_model),
+                    &rate_limits,
+                ) {
+                    tracing::warn!("failed to persist Grok runtime metadata: {}", err);
+                }
                 (
                     StatusCode::OK,
                     [("Content-Type", "application/json")],
@@ -261,13 +309,29 @@ fn rx_stream(
     }
 }
 
+fn fallback_models() -> Vec<serde_json::Value> {
+    MODEL_FALLBACKS
+        .iter()
+        .map(|(id, name)| {
+            serde_json::json!({
+                "id": id,
+                "object": "model",
+                "created": 0u64,
+                "owned_by": "xai",
+                "display_name": name,
+                "capabilities": ["chat", "text", "images", "video"]
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::DEFAULT_BASE_URL;
 
     #[test]
     fn grok_responses_url_matches_xai_docs() {
-        let upstream_url = format!("{}/v1/responses", DEFAULT_BASE_URL.trim_end_matches('/'));
+        let upstream_url = format!("{}/responses", DEFAULT_BASE_URL.trim_end_matches('/'));
         assert_eq!(upstream_url, "https://api.x.ai/v1/responses");
     }
 }

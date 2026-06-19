@@ -4,11 +4,21 @@ use std::collections::HashSet;
 #[derive(Clone, Default, Serialize)]
 pub struct GrokAccount {
     pub label: String,
+    pub name: Option<String>,
     pub email: Option<String>,
+    pub email_verified: Option<bool>,
+    pub user_id: Option<String>,
+    pub team_id: Option<String>,
+    pub team_blocked: Option<bool>,
+    pub zdr_status: Option<String>,
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub token_type: String,
     pub expires_at: Option<String>,
+    pub api_base_url: Option<String>,
+    pub models: Vec<super::auth::GrokModelInfo>,
+    pub rate_limits: Vec<super::auth::GrokRateLimitInfo>,
+    pub last_effective_model: Option<String>,
     pub file_name: Option<String>,
     pub enabled: bool,
 }
@@ -67,16 +77,37 @@ pub fn load_accounts(cfg: &crate::Config, disabled: &HashSet<String>) -> Vec<Gro
             .map(|v| !disabled.contains(v))
             .unwrap_or(true);
 
-        let label = value
-            .get("label")
+        let name = value
+            .get("name")
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|v| !v.is_empty())
-            .map(|v| v.to_string())
+            .map(|v| v.to_string());
+
+        let label = name
+            .clone()
+            .or_else(|| {
+                value
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.to_string())
+            })
             .or_else(|| {
                 value
                     .get("email")
                     .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.to_string())
+            })
+            .or_else(|| {
+                value
+                    .get("user_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
                     .map(|v| v.to_string())
             })
             .or_else(|| {
@@ -95,7 +126,28 @@ pub fn load_accounts(cfg: &crate::Config, disabled: &HashSet<String>) -> Vec<Gro
 
         accounts.push(GrokAccount {
             label,
+            name,
             email,
+            email_verified: value.get("email_verified").and_then(|v| v.as_bool()),
+            user_id: value
+                .get("user_id")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(|v| v.to_string()),
+            team_id: value
+                .get("team_id")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(|v| v.to_string()),
+            team_blocked: value.get("team_blocked").and_then(|v| v.as_bool()),
+            zdr_status: value
+                .get("zdr_status")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(|v| v.to_string()),
             access_token,
             refresh_token: value
                 .get("refresh_token")
@@ -109,6 +161,28 @@ pub fn load_accounts(cfg: &crate::Config, disabled: &HashSet<String>) -> Vec<Gro
             expires_at: value
                 .get("expires_at")
                 .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
+            api_base_url: value
+                .get("api_base_url")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(|v| v.to_string()),
+            models: value
+                .get("models")
+                .cloned()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default(),
+            rate_limits: value
+                .get("rate_limits")
+                .cloned()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default(),
+            last_effective_model: value
+                .get("last_effective_model")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
                 .map(|v| v.to_string()),
             file_name,
             enabled,
@@ -125,6 +199,7 @@ pub fn reload_state(state: &crate::AppState) {
         let mut lock = state.grok_accounts.lock().unwrap();
         *lock = accounts;
     }
+    crate::migrate_grok_usage_keys(state);
     crate::sync_usage_stats(state);
 }
 

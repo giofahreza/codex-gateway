@@ -18,12 +18,30 @@ pub struct LoginStatusQuery {
 }
 
 pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoResponse {
+    maybe_backfill_missing_metadata(&state).await;
+
     let usage_by_key = {
         let stats = state.stats.lock().unwrap();
         stats
             .grok_accounts
             .iter()
-            .map(|u| (u.key.clone(), (u.requests, u.errors)))
+            .map(|u| {
+                (
+                    u.key.clone(),
+                    (
+                        u.requests,
+                        u.errors,
+                        u.prompt_total,
+                        u.input_tokens,
+                        u.output_tokens,
+                        u.total_tokens,
+                        u.cache_tokens,
+                        u.reasoning_tokens,
+                        u.last_success_at.clone(),
+                        u.last_error_at.clone(),
+                    ),
+                )
+            })
             .collect::<std::collections::HashMap<_, _>>()
     };
 
@@ -34,14 +52,47 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
         .iter()
         .map(|a| {
             let stats_key = crate::grok_stats_key(a);
-            let (requests, errors) = usage_by_key.get(&stats_key).copied().unwrap_or((0, 0));
+            let (
+                requests,
+                errors,
+                prompt_total,
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                cache_tokens,
+                reasoning_tokens,
+                last_success_at,
+                last_error_at,
+            ) = usage_by_key
+                .get(&stats_key)
+                .cloned()
+                .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, None, None));
             serde_json::json!({
+                "account_id": a.user_id.as_ref().or(a.email.as_ref()).cloned().unwrap_or_else(|| a.label.clone()),
                 "label": a.label,
+                "name": a.name,
                 "email": a.email,
+                "email_verified": a.email_verified,
+                "user_id": a.user_id,
+                "team_id": a.team_id,
+                "team_blocked": a.team_blocked,
+                "zdr_status": a.zdr_status,
                 "file_name": a.file_name,
                 "enabled": a.enabled,
+                "api_base_url": a.api_base_url,
+                "models": a.models,
+                "rate_limits": a.rate_limits,
+                "last_effective_model": a.last_effective_model,
                 "requests": requests,
                 "errors": errors,
+                "prompt_total": prompt_total,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+                "cache_tokens": cache_tokens,
+                "reasoning_tokens": reasoning_tokens,
+                "last_success_at": last_success_at,
+                "last_error_at": last_error_at,
                 "expired_at": a.expires_at
             })
         })
@@ -115,36 +166,44 @@ pub async fn login_submit(
     // Exchange code
     match super::auth::exchange_code(&state.client, &code, &pending).await {
         Ok(token) => {
-            // Extract email from id_token JWT
-            let email = token.id_token.as_deref().and_then(|jwt| {
-                jwt.split('.')
-                    .nth(1)
-                    .and_then(|payload| {
-                        use base64::Engine;
-                        let padded = payload.to_string() + "=";
-                        base64::engine::general_purpose::URL_SAFE
-                            .decode(padded.as_bytes())
-                            .ok()
-                    })
-                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                    .and_then(|claims| {
-                        claims
-                            .get("email")
-                            .and_then(|v| v.as_str())
-                            .map(|v| v.to_string())
-                    })
-            });
+            let mut profile = token
+                .id_token
+                .as_deref()
+                .and_then(super::auth::profile_from_id_token)
+                .unwrap_or_default();
+            if let Ok(fetched_profile) =
+                super::auth::fetch_profile(&state.client, &token.access_token).await
+            {
+                super::auth::merge_profile(&mut profile, fetched_profile);
+            }
+            let models = super::auth::fetch_models(&state.client, &token.access_token)
+                .await
+                .unwrap_or_default();
+            let profile = if grok_profile_is_empty(&profile) {
+                None
+            } else {
+                Some(profile)
+            };
 
-            let email_display = email.as_deref().unwrap_or("unknown@x.ai");
-            let label = email.as_deref().unwrap_or("grok");
+            let label = profile
+                .as_ref()
+                .and_then(|profile| profile.name.as_deref())
+                .or_else(|| {
+                    profile
+                        .as_ref()
+                        .and_then(|profile| profile.email.as_deref())
+                })
+                .unwrap_or("grok");
 
-            match super::auth::save_auth(&state.cfg, &token, Some(label), email.as_deref()) {
+            match super::auth::save_auth(&state.cfg, &token, profile.as_ref(), &models) {
                 Ok(path) => {
                     super::accounts::reload_state(&state);
                     axum::Json(serde_json::json!({
                         "ok": true,
-                        "message": format!("Grok account saved: {} ({})", email_display, path),
-                        "email": email,
+                        "message": format!("Grok account saved: {} ({})", label, path),
+                        "email": profile.as_ref().and_then(|profile| profile.email.clone()),
+                        "name": profile.as_ref().and_then(|profile| profile.name.clone()),
+                        "models": models.len(),
                         "saved_path": path
                     }))
                     .into_response()
@@ -175,6 +234,40 @@ pub async fn login_status(
         "pending": pending.is_some()
     }))
     .into_response()
+}
+
+async fn maybe_backfill_missing_metadata(state: &crate::AppState) {
+    let accounts = state.grok_accounts.lock().unwrap().clone();
+    let mut changed = false;
+    for account in accounts
+        .iter()
+        .filter(|account| needs_metadata_backfill(account))
+    {
+        match super::auth::backfill_account_metadata(state, account).await {
+            Ok(account_changed) => changed |= account_changed,
+            Err(err) => tracing::warn!(
+                "failed to backfill Grok metadata for {}: {}",
+                account.label,
+                err
+            ),
+        }
+    }
+    if changed {
+        super::accounts::reload_state(state);
+    }
+}
+
+fn needs_metadata_backfill(account: &super::accounts::GrokAccount) -> bool {
+    account.user_id.is_none() || account.name.is_none() || account.models.is_empty()
+}
+
+fn grok_profile_is_empty(profile: &super::auth::GrokProfile) -> bool {
+    profile.name.is_none()
+        && profile.email.is_none()
+        && profile.user_id.is_none()
+        && profile.team_id.is_none()
+        && profile.team_blocked.is_none()
+        && profile.zdr_status.is_none()
 }
 
 fn parse_submitted_code(

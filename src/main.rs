@@ -249,6 +249,7 @@ async fn main() {
         usage_history_lock: Arc::new(Mutex::new(())),
     };
     migrate_qwen_usage_keys(&state);
+    migrate_grok_usage_keys(&state);
     sync_usage_stats(&state);
 
     let app = Router::new()
@@ -1192,6 +1193,63 @@ async fn dashboard() -> impl IntoResponse {
           + meta
           + '</div>';
       }
+      function buildGrokCard(a) {
+        var dot = a.enabled ? '#2ecc71' : '#e74c3c';
+        var toggleLabel = a.enabled ? 'Disable' : 'Enable';
+        var actions = '';
+        if (a.file_name) {
+          actions += '<button title="' + toggleLabel + '" onclick="toggleCred(\'' + a.file_name + '\', ' + (a.enabled ? 'false' : 'true') + ')" class="mini-btn" style="background:' + dot + ';color:#fff;">&#9679;</button>';
+          actions += '<button title="Delete" onclick="deleteCred(\'' + a.file_name + '\')" class="mini-btn danger">&#128465;</button>';
+        } else {
+          actions += '<span class="dot-indicator" style="background:' + dot + ';"></span>';
+        }
+        var usage = '';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.prompt_total || 0) + '</span><span class="stat-pill-label">prompt</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.input_tokens || 0) + '</span><span class="stat-pill-label">in tok</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.output_tokens || 0) + '</span><span class="stat-pill-label">out tok</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.total_tokens || 0) + '</span><span class="stat-pill-label">total tok</span></span>';
+        if (a.reasoning_tokens) {
+          usage += '<span class="stat-pill"><span class="stat-pill-value">' + a.reasoning_tokens + '</span><span class="stat-pill-label">reason tok</span></span>';
+        }
+        if (a.email) {
+          usage += '<span class="stat-pill"><span class="stat-pill-label">email</span><span class="stat-pill-value">' + a.email + '</span></span>';
+        }
+        if (a.last_effective_model) {
+          usage += '<span class="stat-pill"><span class="stat-pill-label">model</span><span class="stat-pill-value"><code>' + a.last_effective_model + '</code></span></span>';
+        }
+        var meta = '';
+        if (a.user_id) {
+          meta += '<div class="muted">user id: <code>' + a.user_id + '</code></div>';
+        }
+        if (a.team_id) {
+          meta += '<div class="muted">team id: <code>' + a.team_id + '</code>' + (a.team_blocked ? ' (blocked)' : '') + '</div>';
+        }
+        if (a.zdr_status) {
+          meta += '<div class="muted">zdr: <code>' + a.zdr_status + '</code></div>';
+        }
+        if (a.expired_at) {
+          meta += '<div class="muted">saved token expiry: ' + a.expired_at + '</div>';
+        }
+        if (a.last_success_at) {
+          meta += '<div class="muted">last success: ' + a.last_success_at + '</div>';
+        }
+        if (a.last_error_at) {
+          meta += '<div class="muted">last error: ' + a.last_error_at + '</div>';
+        }
+        if (a.models && a.models.length) {
+          var preview = a.models.slice(0, 8).map(function(model) { return model.model_id; }).join(', ');
+          var suffix = a.models.length > 8 ? ' +' + (a.models.length - 8) + ' more' : '';
+          meta += '<div class="muted">models: <code>' + preview + suffix + '</code></div>';
+        }
+        return '<div class="card">'
+          + '<div class="card-header"><span class="card-email">' + (a.name || a.label || a.email || a.account_id || 'N/A') + '</span><span class="card-actions">' + actions + '</span></div>'
+          + '<div class="stat-pills">' + usage + '</div>'
+          + renderQuotaBars({ limits: a.rate_limits || [] })
+          + meta
+          + '</div>';
+      }
       async function refreshAgwAccounts() {
         var res = await adminFetch('/agw/accounts.json');
         if (!res) return;
@@ -1251,7 +1309,7 @@ async fn dashboard() -> impl IntoResponse {
         if (!res) return;
         var data = await res.json();
         var accounts = data.accounts || [];
-        var cards = accounts.map(buildProviderCard).join('');
+        var cards = accounts.map(buildGrokCard).join('');
         document.getElementById('grokCards').innerHTML = cards || '<div class="empty-state">No Grok accounts</div>';
         document.getElementById('grokBadgeCount').textContent = accounts.length + ' accounts';
       }
@@ -4031,7 +4089,11 @@ fn build_usage_stats(
             AccountUsage {
                 key,
                 label: account.label.clone(),
-                account_id: account.email.clone().unwrap_or_default(),
+                account_id: account
+                    .user_id
+                    .clone()
+                    .or_else(|| account.email.clone())
+                    .unwrap_or_default(),
                 requests: stored.requests,
                 errors: stored.errors,
                 prompt_total: stored.prompt_total,
@@ -4162,6 +4224,9 @@ pub(crate) fn deepseek_stats_key(account: &target::deepseek::accounts::DeepSeekA
 }
 
 pub(crate) fn grok_stats_key(account: &target::grok::accounts::GrokAccount) -> String {
+    if let Some(user_id) = account.user_id.as_ref().filter(|s| !s.trim().is_empty()) {
+        return format!("grok:user_id:{}", user_id);
+    }
     if let Some(email) = account.email.as_ref().filter(|s| !s.trim().is_empty()) {
         return format!("grok:email:{}", email);
     }
@@ -4192,6 +4257,20 @@ fn qwen_fallback_stats_keys(account: &target::qwen::accounts::QwenAccount) -> Ve
     keys
 }
 
+fn grok_fallback_stats_keys(account: &target::grok::accounts::GrokAccount) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Some(email) = account.email.as_ref().filter(|s| !s.trim().is_empty()) {
+        keys.push(format!("grok:email:{}", email));
+    }
+    if let Some(file_name) = account.file_name.as_ref().filter(|s| !s.trim().is_empty()) {
+        keys.push(format!("grok:file:{}", file_name));
+    }
+    if !account.label.trim().is_empty() {
+        keys.push(format!("grok:label:{}", account.label));
+    }
+    keys
+}
+
 fn migrate_qwen_usage_keys(state: &AppState) {
     let accounts = state.qwen_accounts.lock().unwrap().clone();
     let mut changed = false;
@@ -4211,6 +4290,36 @@ fn migrate_qwen_usage_keys(state: &AppState) {
                     continue;
                 };
                 let entry = persisted.qwen.entry(stable_key.clone()).or_default();
+                merge_usage(entry, old_usage);
+                changed = true;
+                break;
+            }
+        }
+    }
+    if changed {
+        persist_stats_store(state);
+    }
+}
+
+pub(crate) fn migrate_grok_usage_keys(state: &AppState) {
+    let accounts = state.grok_accounts.lock().unwrap().clone();
+    let mut changed = false;
+    {
+        let mut persisted = state.persisted_stats.lock().unwrap();
+        for account in &accounts {
+            let stable_key = grok_stats_key(account);
+            if persisted.grok.contains_key(&stable_key) {
+                continue;
+            }
+
+            for fallback_key in grok_fallback_stats_keys(account) {
+                if fallback_key == stable_key {
+                    continue;
+                }
+                let Some(old_usage) = persisted.grok.remove(&fallback_key) else {
+                    continue;
+                };
+                let entry = persisted.grok.entry(stable_key.clone()).or_default();
                 merge_usage(entry, old_usage);
                 changed = true;
                 break;
@@ -4357,7 +4466,11 @@ pub(crate) fn grok_usage_context(
         provider_name: "grok",
         key: grok_stats_key(account),
         label: account.label.clone(),
-        account_id: account.email.clone().unwrap_or_default(),
+        account_id: account
+            .user_id
+            .clone()
+            .or_else(|| account.email.clone())
+            .unwrap_or_default(),
         credential_file: account.file_name.clone(),
         model,
         request_path: request_path.into(),
