@@ -308,18 +308,11 @@ MiniMax is exposed as an OpenAI-compatible target. Add a MiniMax API key through
 
 Public routing (the gateway translates to MiniMax internally; no `/minimax/*` routes are exposed to clients):
 
-- `POST /v1/chat/completions`, `POST /v1/responses`, `POST /codex/responses`, `POST /claude/messages` all forward to MiniMax's `/v1/chat/completions`.
+- `POST /v1/responses` and `POST /codex/responses` forward to MiniMax's `/v1/chat/completions`. The gateway owns the public surface, so provider-prefixed paths are not exposed.
 - `GET /v1/models` and `GET /codex/models` include `MiniMax-Text-01`, `abab6.5s-chat`, and `abab6.5-chat` whenever a MiniMax account is enabled.
 - Auth: `Authorization: Bearer <proxy_api_key>`.
 
 Examples:
-
-```bash
-curl http://127.0.0.1:8319/v1/chat/completions \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"MiniMax-Text-01","messages":[{"role":"user","content":"hi"}]}'
-```
 
 ```bash
 curl http://127.0.0.1:8319/v1/responses \
