@@ -1,7 +1,8 @@
 use axum::http::{HeaderMap, Method, Uri};
 use bytes::Bytes;
+use serde_json::{Map, Value};
 
-use crate::source::{RouteError, RoutedRequest};
+use crate::source::{RouteError, RoutedRequest, TargetModel};
 
 pub mod codex;
 pub mod response;
@@ -17,8 +18,9 @@ pub fn route_to_target(
     let upstream_path = route::resolve(path, method)?;
     if upstream_path == "responses" && *method == Method::POST {
         let target = crate::source::v1::provider::target_from_request_body(&body)
-            .unwrap_or(crate::source::TargetModel::Codex);
-        if target != crate::source::TargetModel::Codex {
+            .unwrap_or(TargetModel::Codex);
+        if target != TargetModel::Codex {
+            let body = normalize_codex_provider_body(target, body);
             return Ok(crate::source::v1::provider::convert(
                 target,
                 upstream_path,
@@ -29,6 +31,125 @@ pub fn route_to_target(
     }
 
     Ok(codex::convert(upstream_path, uri, method, headers, body))
+}
+
+fn normalize_codex_provider_body(target: TargetModel, body: Bytes) -> Bytes {
+    let Ok(Value::Object(input)) = serde_json::from_slice::<Value>(&body) else {
+        return body;
+    };
+
+    let mut output = Map::new();
+    copy_json_field(&input, &mut output, "model");
+    copy_json_field(&input, &mut output, "instructions");
+    copy_json_field(&input, &mut output, "input");
+    copy_json_field(&input, &mut output, "messages");
+    copy_json_field(&input, &mut output, "tools");
+    copy_json_field(&input, &mut output, "tool_choice");
+    copy_json_field(&input, &mut output, "parallel_tool_calls");
+    copy_json_field(&input, &mut output, "max_output_tokens");
+    copy_json_field(&input, &mut output, "temperature");
+    copy_json_field(&input, &mut output, "top_p");
+    copy_json_field(&input, &mut output, "stop");
+    copy_json_field(&input, &mut output, "stream");
+    copy_json_field(&input, &mut output, "reasoning");
+    copy_json_field(&input, &mut output, "reasoning_effort");
+    copy_json_field(&input, &mut output, "text");
+    copy_json_field(&input, &mut output, "response_format");
+
+    if matches!(target, TargetModel::Gemini | TargetModel::Antigravity)
+        && !output.contains_key("messages")
+    {
+        if let Some(messages) = codex_input_to_messages(input.get("input")) {
+            output.insert("messages".to_string(), Value::Array(messages));
+        }
+    }
+
+    serde_json::to_vec(&Value::Object(output))
+        .map(Bytes::from)
+        .unwrap_or(body)
+}
+
+fn copy_json_field(input: &Map<String, Value>, output: &mut Map<String, Value>, name: &str) {
+    if let Some(value) = input.get(name) {
+        output.insert(name.to_string(), value.clone());
+    }
+}
+
+fn codex_input_to_messages(input: Option<&Value>) -> Option<Vec<Value>> {
+    let items = input?.as_array()?;
+    let mut messages = Vec::new();
+    for item in items {
+        let role = item
+            .get("role")
+            .and_then(|value| value.as_str())
+            .unwrap_or("user");
+        if let Some(text) = extract_text(item) {
+            messages.push(serde_json::json!({
+                "role": role,
+                "content": text
+            }));
+        }
+    }
+    if messages.is_empty() {
+        None
+    } else {
+        Some(messages)
+    }
+}
+
+fn extract_text(value: &Value) -> Option<String> {
+    if let Some(text) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(text.to_string());
+    }
+    if let Some(text) = value
+        .get("content")
+        .and_then(|content| content.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(text.to_string());
+    }
+
+    let parts = value
+        .get("content")
+        .and_then(|content| content.as_array())
+        .or_else(|| value.as_array())?;
+    let mut out = String::new();
+    for part in parts {
+        let part_type = part
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if !matches!(
+            part_type,
+            "" | "text" | "input_text" | "output_text" | "summary_text"
+        ) {
+            continue;
+        }
+        let text = part
+            .get("text")
+            .and_then(|value| value.as_str())
+            .or_else(|| part.get("input_text").and_then(|value| value.as_str()))
+            .or_else(|| part.get("output_text").and_then(|value| value.as_str()))
+            .or_else(|| part.get("content").and_then(|value| value.as_str()))
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(text) = text {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(text);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 #[cfg(test)]
@@ -44,12 +165,39 @@ mod tests {
             &uri,
             &Method::POST,
             &HeaderMap::new(),
-            Bytes::from_static(br#"{"model":"deepseek-v4-pro","input":"hi"}"#),
+            Bytes::from_static(
+                br#"{"model":"deepseek-v4-pro","input":"hi","store":true,"include":["x"]}"#,
+            ),
         )
         .unwrap();
 
-        assert_eq!(routed.target, crate::source::TargetModel::DeepSeek);
+        assert_eq!(routed.target, TargetModel::DeepSeek);
         assert_eq!(routed.upstream_path, "responses");
+        let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "deepseek-v4-pro");
+        assert_eq!(body["input"], "hi");
+        assert!(body.get("store").is_none());
+        assert!(body.get("include").is_none());
+    }
+
+    #[test]
+    fn codex_responses_converts_gemini_input_array_to_messages() {
+        let uri: Uri = "/codex/responses".parse().unwrap();
+        let routed = route_to_target(
+            "/codex/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(
+                br#"{"model":"gemini-2.5-pro","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}]}"#,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::Gemini);
+        let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"], "hello");
     }
 }
 

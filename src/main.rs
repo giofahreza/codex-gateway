@@ -3315,6 +3315,25 @@ async fn proxy(
         return (status, headers, json_body).into_response();
     }
 
+    if matches!(source_api, SourceApi::Codex) && method == Method::GET {
+        if is_codex_models_list_path(&raw_path) {
+            let body_bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(err) => {
+                    error!("upstream body read failed: {}", err);
+                    return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
+                }
+            };
+            let body_bytes = augment_codex_models_json(&body_bytes, &state);
+            let mut headers = out_headers;
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            return (status, headers, body_bytes).into_response();
+        }
+    }
+
     if matches!(source_api, SourceApi::V1) && method == Method::GET {
         if is_v1_models_list_path(&raw_path) || v1_model_retrieve_id(&raw_path).is_some() {
             let body_bytes = match resp.bytes().await {
@@ -4872,6 +4891,102 @@ fn is_hop_header(name: &str) -> bool {
     )
 }
 
+fn augment_codex_models_json(body: &Bytes, state: &AppState) -> Bytes {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return body.clone();
+    };
+    let Some(models) = value
+        .get_mut("models")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return body.clone();
+    };
+
+    let mut existing = models
+        .iter()
+        .filter_map(|model| model.get("slug").and_then(|value| value.as_str()))
+        .map(|slug| slug.to_string())
+        .collect::<HashSet<_>>();
+
+    for model in codex_provider_model_metadata(state) {
+        let Some(slug) = model.get("slug").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if existing.insert(slug.to_string()) {
+            models.push(model);
+        }
+    }
+
+    serde_json::to_vec(&value)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| body.clone())
+}
+
+fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
+    let mut models = Vec::new();
+    if state
+        .deepseek_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|account| account.enabled)
+    {
+        models.push(codex_provider_model(
+            "deepseek-v4-pro",
+            "DeepSeek V4 Pro",
+            "DeepSeek model routed through the configured DeepSeek account.",
+            64_000,
+            true,
+        ));
+        models.push(codex_provider_model(
+            "deepseek-v4-flash",
+            "DeepSeek V4 Flash",
+            "Fast DeepSeek model routed through the configured DeepSeek account.",
+            64_000,
+            false,
+        ));
+    }
+    models
+}
+
+fn codex_provider_model(
+    slug: &str,
+    display_name: &str,
+    description: &str,
+    context_window: u64,
+    supports_reasoning: bool,
+) -> serde_json::Value {
+    let reasoning_levels = if supports_reasoning {
+        serde_json::json!([
+            { "effort": "low", "description": "Fast responses with lighter reasoning" },
+            { "effort": "medium", "description": "Balanced reasoning depth" },
+            { "effort": "high", "description": "More reasoning depth" }
+        ])
+    } else {
+        serde_json::json!([])
+    };
+
+    serde_json::json!({
+        "slug": slug,
+        "display_name": display_name,
+        "description": description,
+        "context_window": context_window,
+        "max_context_window": context_window,
+        "input_modalities": ["text"],
+        "supports_parallel_tool_calls": true,
+        "support_verbosity": false,
+        "default_verbosity": "low",
+        "supported_in_api": true,
+        "visibility": "list",
+        "shell_type": "shell_command",
+        "tool_mode": null,
+        "default_reasoning_level": if supports_reasoning { "medium" } else { "" },
+        "supported_reasoning_levels": reasoning_levels,
+        "supports_reasoning_summaries": false,
+        "base_instructions": "You are a coding agent. Follow the user's instructions and use tools carefully."
+    })
+}
+
 fn should_drop_incoming_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     if is_hop_header(&lower)
@@ -4914,6 +5029,13 @@ fn detect_source_api(raw_path: &str) -> SourceApi {
 
 fn is_v1_models_list_path(raw_path: &str) -> bool {
     normalize_v1_path(raw_path) == "models"
+}
+
+fn is_codex_models_list_path(raw_path: &str) -> bool {
+    raw_path
+        .trim_start_matches('/')
+        .trim_end_matches('/')
+        .eq("codex/models")
 }
 
 fn v1_model_retrieve_id(raw_path: &str) -> Option<String> {
