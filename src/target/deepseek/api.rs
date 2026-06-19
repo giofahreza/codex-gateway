@@ -330,12 +330,13 @@ fn build_chat_payload(
     request_value: &serde_json::Value,
     model: &str,
 ) -> Result<serde_json::Value, String> {
-    let messages = if let Some(messages) = request_value.get("messages").and_then(|v| v.as_array())
-    {
-        normalize_chat_messages(messages)?
-    } else {
-        build_messages_from_input(request_value)?
-    };
+    let mut messages =
+        if let Some(messages) = request_value.get("messages").and_then(|v| v.as_array()) {
+            normalize_chat_messages(messages)?
+        } else {
+            build_messages_from_input(request_value)?
+        };
+    messages = sanitize_tool_call_messages(messages);
 
     if messages.is_empty() {
         return Err("messages must not be empty".to_string());
@@ -532,6 +533,115 @@ fn normalize_message_role(role: Option<&str>) -> &'static str {
         "latest_reminder" => "latest_reminder",
         _ => "user",
     }
+}
+
+fn sanitize_tool_call_messages(messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < messages.len() {
+        let message = &messages[index];
+        if message_role(message) == Some("assistant") {
+            if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+                if !tool_calls.is_empty() {
+                    let mut next = index + 1;
+                    let mut following_tools = Vec::new();
+                    while next < messages.len() && message_role(&messages[next]) == Some("tool") {
+                        following_tools.push(messages[next].clone());
+                        next += 1;
+                    }
+
+                    let retained_calls =
+                        retain_tool_calls_with_outputs(tool_calls, &following_tools);
+                    if retained_calls.is_empty() {
+                        if assistant_has_content(message) {
+                            let mut assistant = message.clone();
+                            if let Some(object) = assistant.as_object_mut() {
+                                object.remove("tool_calls");
+                            }
+                            out.push(assistant);
+                        }
+                    } else {
+                        let retained_ids = retained_calls
+                            .iter()
+                            .filter_map(tool_call_id)
+                            .collect::<Vec<_>>();
+                        let mut assistant = message.clone();
+                        if let Some(object) = assistant.as_object_mut() {
+                            object.insert(
+                                "tool_calls".to_string(),
+                                serde_json::Value::Array(retained_calls),
+                            );
+                        }
+                        out.push(assistant);
+
+                        for tool in following_tools {
+                            let Some(tool_call_id) =
+                                tool.get("tool_call_id").and_then(|v| v.as_str())
+                            else {
+                                continue;
+                            };
+                            if retained_ids.iter().any(|id| id.as_str() == tool_call_id) {
+                                out.push(tool);
+                            }
+                        }
+                    }
+                    index = next;
+                    continue;
+                }
+            }
+        }
+
+        if message_role(message) != Some("tool") {
+            out.push(message.clone());
+        }
+        index += 1;
+    }
+    out
+}
+
+fn retain_tool_calls_with_outputs(
+    tool_calls: &[serde_json::Value],
+    following_tools: &[serde_json::Value],
+) -> Vec<serde_json::Value> {
+    let available_ids = following_tools
+        .iter()
+        .filter_map(|tool| {
+            tool.get("tool_call_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+
+    tool_calls
+        .iter()
+        .filter_map(|tool_call| {
+            let id = tool_call_id(tool_call)?;
+            if available_ids.iter().any(|available_id| available_id == &id) {
+                Some(tool_call.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn tool_call_id(tool_call: &serde_json::Value) -> Option<String> {
+    tool_call
+        .get("id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn message_role(message: &serde_json::Value) -> Option<&str> {
+    message.get("role").and_then(|value| value.as_str())
+}
+
+fn assistant_has_content(message: &serde_json::Value) -> bool {
+    extract_text_value(message.get("content"))
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
 }
 
 fn normalize_direct_tool_calls(
@@ -1088,6 +1198,126 @@ mod tests {
         assert_eq!(messages[3]["content"], "{\"temp_c\":24}");
         assert_eq!(payload["thinking"]["type"], "enabled");
         assert_eq!(payload["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn build_chat_payload_drops_unanswered_tool_call_turns() {
+        let request = json!({
+            "model": "deepseek-v4-pro",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "List files" }]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_ls",
+                    "name": "shell",
+                    "arguments": "{\"cmd\":\"ls\"}"
+                }
+            ]
+        });
+
+        let payload = build_chat_payload(&request, "deepseek-v4-pro").unwrap();
+        let messages = payload["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        assert!(messages
+            .iter()
+            .all(|message| message.get("tool_calls").is_none()));
+    }
+
+    #[test]
+    fn build_chat_payload_filters_partially_answered_tool_calls() {
+        let request = json!({
+            "model": "deepseek-v4-pro",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "Run two commands" }]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_one",
+                    "name": "shell",
+                    "arguments": "{\"cmd\":\"pwd\"}"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_two",
+                    "name": "shell",
+                    "arguments": "{\"cmd\":\"ls\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_one",
+                    "output": "/tmp"
+                }
+            ]
+        });
+
+        let payload = build_chat_payload(&request, "deepseek-v4-pro").unwrap();
+        let messages = payload["messages"].as_array().unwrap();
+
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(messages[1]["tool_calls"][0]["id"], "call_one");
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "call_one");
+        assert!(!messages.iter().any(|message| message
+            .get("tool_call_id")
+            .and_then(|value| value.as_str())
+            == Some("call_two")));
+    }
+
+    #[test]
+    fn build_chat_payload_filters_direct_messages_with_missing_tool_outputs() {
+        let request = json!({
+            "model": "deepseek-v4-pro",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Run two commands"
+                },
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_one",
+                            "type": "function",
+                            "function": {
+                                "name": "shell",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            }
+                        },
+                        {
+                            "id": "call_two",
+                            "type": "function",
+                            "function": {
+                                "name": "shell",
+                                "arguments": "{\"cmd\":\"ls\"}"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_one",
+                    "content": "/tmp"
+                }
+            ]
+        });
+
+        let payload = build_chat_payload(&request, "deepseek-v4-pro").unwrap();
+        let messages = payload["messages"].as_array().unwrap();
+
+        assert_eq!(messages[1]["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(messages[1]["tool_calls"][0]["id"], "call_one");
+        assert_eq!(messages[2]["tool_call_id"], "call_one");
     }
 
     #[test]
