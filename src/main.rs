@@ -838,7 +838,6 @@ async fn dashboard() -> impl IntoResponse {
       let lastQuota = new Map();
       let lastAgwQuota = new Map();
       let lastGeminiQuota = new Map();
-      let lastQwenQuota = new Map();
       let openAgwRows = new Set();
       let openGeminiRows = new Set();
       let openQwenRows = new Set();
@@ -1046,7 +1045,7 @@ async fn dashboard() -> impl IntoResponse {
           + renderQuotaBars(quota)
           + '</div>';
       }
-      function buildQwenCard(a, quota) {
+      function buildQwenCard(a) {
         var dot = a.enabled ? '#2ecc71' : '#e74c3c';
         var toggleLabel = a.enabled ? 'Disable' : 'Enable';
         var actions = '';
@@ -1056,11 +1055,8 @@ async fn dashboard() -> impl IntoResponse {
         } else {
           actions += '<span class="dot-indicator" style="background:' + dot + ';"></span>';
         }
-        var resource = (quota && quota.resource_url) || a.resource_url || 'https://portal.qwen.ai/v1';
+        var resource = a.resource_url || 'https://portal.qwen.ai/v1';
         var meta = '';
-        if (quota && quota.tier_name) {
-          meta += '<div class="muted">tier: ' + quota.tier_name + (quota.tier_id ? ' | ' + quota.tier_id : '') + '</div>';
-        }
         meta += '<div class="muted">resource: <code>' + resource + '</code></div>';
         if (a.expired_at) {
           meta += '<div class="muted">saved token expiry: ' + a.expired_at + '</div>';
@@ -1070,11 +1066,6 @@ async fn dashboard() -> impl IntoResponse {
         }
         if (a.last_error_at) {
           meta += '<div class="muted">last error: ' + a.last_error_at + '</div>';
-        }
-        if (quota && quota.error) {
-          meta += '<div class="muted">live quota lookup: ' + quota.error + '</div>';
-        } else if (quota && quota.description) {
-          meta += '<div class="muted">' + quota.description + '</div>';
         }
         var usage = '';
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>';
@@ -1096,7 +1087,6 @@ async fn dashboard() -> impl IntoResponse {
           + '<div class="card-header"><span class="card-email">' + (a.label || a.email || a.account_id || 'N/A') + '</span><span class="card-actions">' + actions + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
           + meta
-          + renderQuotaBars(quota)
           + '</div>';
       }
       async function refreshAgwAccounts() {
@@ -1135,17 +1125,9 @@ async fn dashboard() -> impl IntoResponse {
         var res = await fetch('/qwen/accounts.json');
         var data = await res.json();
         var accounts = data.accounts || [];
-        var cards = accounts.map(function(a) { return buildQwenCard(a, lastQwenQuota.get(a.file_name || a.label)); }).join('');
+        var cards = accounts.map(function(a) { return buildQwenCard(a); }).join('');
         document.getElementById('qwenCards').innerHTML = cards || '<div class="empty-state">No Qwen accounts</div>';
         document.getElementById('qwenBadgeCount').textContent = accounts.length + ' accounts';
-      }
-      async function refreshQwenQuota() {
-        const res = await fetch('/qwen/quota.json');
-        const quota = await res.json();
-        const quotaMap = new Map();
-        (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
-        lastQwenQuota = quotaMap;
-        refreshQwenAccounts();
       }
       async function refreshDeepSeekAccounts() {
         var res = await fetch('/deepseek/accounts.json');
@@ -1321,14 +1303,13 @@ async fn dashboard() -> impl IntoResponse {
       refreshQuota();
       refreshAgwQuota().then(() => refreshAgwAccounts());
       refreshGeminiQuota().then(() => refreshGeminiAccounts());
-      refreshQwenQuota().then(() => refreshQwenAccounts());
+      refreshQwenAccounts();
       refreshDeepSeekAccounts();
       refreshGrokAccounts();
       setInterval(refresh, 5000);
       setInterval(refreshQuota, 60000);
       setInterval(refreshAgwQuota, 60000);
       setInterval(refreshGeminiQuota, 60000);
-      setInterval(refreshQwenQuota, 60000);
       setInterval(refreshAgwAccounts, 10000);
       setInterval(refreshGeminiAccounts, 10000);
       setInterval(refreshQwenAccounts, 10000);
@@ -2500,6 +2481,70 @@ pub(crate) fn usage_metrics_from_response_value(value: &serde_json::Value) -> Us
         cache_tokens,
         reasoning_tokens,
         raw_usage: if usage.is_null() { None } else { Some(usage) },
+    }
+}
+
+pub(crate) fn apply_estimated_usage_fallback(
+    metrics: &mut UsageMetrics,
+    prompt: &PromptMetrics,
+    output_text: &str,
+) {
+    let output_chars = output_text.trim().chars().count() as u64;
+    let mut estimated = false;
+
+    if metrics.input_tokens == 0 {
+        let input_tokens = estimated_tokens_from_chars(prompt.input_chars);
+        if input_tokens > 0 {
+            metrics.input_tokens = input_tokens;
+            estimated = true;
+        }
+    }
+
+    if metrics.output_tokens == 0 {
+        let output_tokens = estimated_tokens_from_chars(output_chars);
+        if output_tokens > 0 {
+            metrics.output_tokens = output_tokens;
+            estimated = true;
+        }
+    }
+
+    if metrics.total_tokens == 0 {
+        metrics.total_tokens = metrics.input_tokens.saturating_add(metrics.output_tokens);
+    }
+
+    if !estimated {
+        return;
+    }
+
+    let estimated_usage = serde_json::json!({
+        "provider": "qwen",
+        "input_chars": prompt.input_chars,
+        "output_chars": output_chars,
+        "input_tokens": metrics.input_tokens,
+        "output_tokens": metrics.output_tokens,
+        "total_tokens": metrics.total_tokens
+    });
+
+    metrics.raw_usage = Some(match metrics.raw_usage.take() {
+        Some(serde_json::Value::Object(mut usage)) => {
+            usage.insert("estimated_usage".to_string(), estimated_usage);
+            serde_json::Value::Object(usage)
+        }
+        Some(usage) => serde_json::json!({
+            "upstream_usage": usage,
+            "estimated_usage": estimated_usage
+        }),
+        None => serde_json::json!({
+            "estimated_usage": estimated_usage
+        }),
+    });
+}
+
+fn estimated_tokens_from_chars(chars: u64) -> u64 {
+    if chars == 0 {
+        0
+    } else {
+        chars.saturating_add(3) / 4
     }
 }
 

@@ -221,7 +221,15 @@ pub async fn responses(
     };
 
     let response = chat_to_openai_response(&upstream, &model);
-    let usage = crate::usage_metrics_from_response_value(&response);
+    let mut usage = crate::usage_metrics_from_response_value(&response);
+    crate::apply_estimated_usage_fallback(
+        &mut usage,
+        &context.prompt,
+        response
+            .get("output_text")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default(),
+    );
     crate::record_qwen_success(&state, &context, &usage);
     if crate::source::wants_stream(&headers, &body) {
         return (
@@ -595,7 +603,8 @@ fn sse_json(value: &serde_json::Value) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_proxy_footer;
+    use super::{chat_to_openai_response, strip_proxy_footer};
+    use serde_json::json;
 
     #[test]
     fn strip_proxy_footer_removes_qwen_api_debug_block() {
@@ -607,5 +616,109 @@ mod tests {
     fn strip_proxy_footer_keeps_normal_content() {
         let content = "normal response\n\n<details>\nno proxy ids here\n</details>".to_string();
         assert_eq!(strip_proxy_footer(content.clone()), content);
+    }
+
+    #[test]
+    fn estimated_usage_fallback_populates_missing_qwen_usage() {
+        let request = json!({
+            "model": "qwen3-coder-plus",
+            "input": "write a rust function that sums two numbers"
+        });
+        let upstream = json!({
+            "id": "chatcmpl_test",
+            "choices": [{
+                "message": {
+                    "content": "fn sum(a: i32, b: i32) -> i32 { a + b }"
+                }
+            }]
+        });
+
+        let response = chat_to_openai_response(&upstream, "qwen3-coder-plus");
+        let mut usage = crate::usage_metrics_from_response_value(&response);
+        crate::apply_estimated_usage_fallback(
+            &mut usage,
+            &crate::prompt_metrics_from_request_value(&request),
+            response
+                .get("output_text")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default(),
+        );
+
+        assert!(usage.input_tokens > 0);
+        assert!(usage.output_tokens > 0);
+        assert_eq!(usage.total_tokens, usage.input_tokens + usage.output_tokens);
+        let estimated_usage = usage
+            .raw_usage
+            .as_ref()
+            .and_then(|value| value.get("estimated_usage"))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(estimated_usage.get("provider"), Some(&json!("qwen")));
+        assert_eq!(estimated_usage.get("input_chars"), Some(&json!(43u64)));
+        assert_eq!(
+            estimated_usage.get("input_tokens"),
+            Some(&json!(usage.input_tokens))
+        );
+        assert_eq!(
+            estimated_usage.get("output_tokens"),
+            Some(&json!(usage.output_tokens))
+        );
+        assert_eq!(
+            estimated_usage.get("total_tokens"),
+            Some(&json!(usage.total_tokens))
+        );
+        assert!(
+            estimated_usage
+                .get("output_chars")
+                .and_then(|value| value.as_u64())
+                .unwrap_or_default()
+                > 0
+        );
+    }
+
+    #[test]
+    fn estimated_usage_fallback_preserves_upstream_qwen_usage() {
+        let request = json!({
+            "model": "qwen3-coder-plus",
+            "input": "say hello"
+        });
+        let upstream = json!({
+            "id": "chatcmpl_test",
+            "choices": [{
+                "message": {
+                    "content": "hello"
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 18,
+                "prompt_tokens_details": {
+                    "cached_tokens": 2
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": 1
+                }
+            }
+        });
+
+        let response = chat_to_openai_response(&upstream, "qwen3-coder-plus");
+        let mut usage = crate::usage_metrics_from_response_value(&response);
+        let raw_usage_before = usage.raw_usage.clone();
+        crate::apply_estimated_usage_fallback(
+            &mut usage,
+            &crate::prompt_metrics_from_request_value(&request),
+            response
+                .get("output_text")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default(),
+        );
+
+        assert_eq!(usage.input_tokens, 11);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.total_tokens, 18);
+        assert_eq!(usage.cache_tokens, 2);
+        assert_eq!(usage.reasoning_tokens, 1);
+        assert_eq!(usage.raw_usage, raw_usage_before);
     }
 }
