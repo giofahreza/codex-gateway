@@ -41,6 +41,7 @@ struct AppState {
     gemini_rr: Arc<Mutex<usize>>,
     qwen_rr: Arc<Mutex<usize>>,
     deepseek_rr: Arc<Mutex<usize>>,
+    minimax_rr: Arc<Mutex<usize>>,
     grok_rr: Arc<Mutex<usize>>,
     client: reqwest::Client,
     tokens: Arc<Mutex<Vec<UpstreamToken>>>,
@@ -48,6 +49,7 @@ struct AppState {
     gemini_accounts: Arc<Mutex<Vec<target::gemini::accounts::GeminiAccount>>>,
     qwen_accounts: Arc<Mutex<Vec<target::qwen::accounts::QwenAccount>>>,
     deepseek_accounts: Arc<Mutex<Vec<target::deepseek::accounts::DeepSeekAccount>>>,
+    minimax_accounts: Arc<Mutex<Vec<target::minimax::accounts::MiniMaxAccount>>>,
     grok_accounts: Arc<Mutex<Vec<target::grok::accounts::GrokAccount>>>,
     stats: Arc<Mutex<UsageStats>>,
     persisted_stats: Arc<Mutex<StatsStore>>,
@@ -99,6 +101,7 @@ struct UsageStats {
     gemini_accounts: Vec<AccountUsage>,
     qwen_accounts: Vec<AccountUsage>,
     deepseek_accounts: Vec<AccountUsage>,
+    minimax_accounts: Vec<AccountUsage>,
     grok_accounts: Vec<AccountUsage>,
     total_requests: u64,
     total_errors: u64,
@@ -195,6 +198,7 @@ async fn main() {
     let qwen_accounts = target::qwen::accounts::load_accounts(&cfg, &disabled);
     let deepseek_accounts = target::deepseek::accounts::load_accounts(&cfg, &disabled);
     let grok_accounts = target::grok::accounts::load_accounts(&cfg, &disabled);
+    let minimax_accounts = target::minimax::accounts::load_accounts(&cfg, &disabled);
     let persisted_stats = stats_store::load(&cfg);
     let stats = build_usage_stats(
         &tokens,
@@ -203,6 +207,7 @@ async fn main() {
         &qwen_accounts,
         &deepseek_accounts,
         &grok_accounts,
+        &minimax_accounts,
         &persisted_stats,
     );
     let quota_cache = vec![None; tokens.len()];
@@ -226,6 +231,7 @@ async fn main() {
         qwen_rr: Arc::new(Mutex::new(0)),
         deepseek_rr: Arc::new(Mutex::new(0)),
         grok_rr: Arc::new(Mutex::new(0)),
+        minimax_rr: Arc::new(Mutex::new(0)),
         client,
         tokens: Arc::new(Mutex::new(tokens)),
         agw_accounts: Arc::new(Mutex::new(agw_accounts)),
@@ -233,6 +239,7 @@ async fn main() {
         qwen_accounts: Arc::new(Mutex::new(qwen_accounts)),
         deepseek_accounts: Arc::new(Mutex::new(deepseek_accounts)),
         grok_accounts: Arc::new(Mutex::new(grok_accounts)),
+        minimax_accounts: Arc::new(Mutex::new(minimax_accounts)),
         stats: Arc::new(Mutex::new(stats)),
         persisted_stats: Arc::new(Mutex::new(persisted_stats)),
         quota_cache: Arc::new(Mutex::new(quota_cache)),
@@ -285,6 +292,8 @@ async fn main() {
         .route("/login/grok/start", any(grok_login_start_route))
         .route("/login/grok/submit", any(grok_login_submit_route))
         .route("/login/grok/status", any(grok_login_status_route))
+        .route("/minimax/accounts.json", any(minimax_accounts_route))
+        .route("/login/minimax/start", any(minimax_login_start_route))
         .route("/usage/summary.json", any(usage_summary_route))
         .route("/usage/history.json", any(usage_history_route))
         .route("/usage/context-history.json", any(context_history_route))
@@ -1803,6 +1812,7 @@ async fn dashboard() -> impl IntoResponse {
           input.value = '';
           stateInput.value = '';
           refreshGrokAccounts();
+          refreshMiniMaxAccounts();
         }
       });
       document.getElementById('loginForm').addEventListener('submit', async (e) => {
@@ -1892,6 +1902,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshQwenAccounts();
         refreshDeepSeekAccounts();
         refreshGrokAccounts();
+        refreshMiniMaxAccounts();
       }
       async function toggleCred(fileName, enabled) {
         const res = await adminFetch('/credentials/toggle', {
@@ -1913,6 +1924,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshQwenAccounts();
         refreshDeepSeekAccounts();
         refreshGrokAccounts();
+        refreshMiniMaxAccounts();
       }
       async function startDashboard() {
         refresh();
@@ -1923,6 +1935,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshQwenAccounts();
         refreshDeepSeekAccounts();
         refreshGrokAccounts();
+        refreshMiniMaxAccounts();
         if (dashboardIntervalsStarted) {
           return;
         }
@@ -2354,6 +2367,29 @@ async fn deepseek_accounts_route(State(state): State<AppState>, headers: HeaderM
         .into_response()
 }
 
+async fn minimax_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::minimax::admin::accounts_json(State(state))
+        .await
+        .into_response()
+}
+
+async fn minimax_login_start_route(
+    State(state): State<AppState>,
+    method: Method,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::minimax::admin::login_start(State(state), method, body)
+        .await
+        .into_response()
+}
+
 async fn deepseek_login_start_route(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2447,12 +2483,18 @@ async fn usage_summary_route(State(state): State<AppState>, headers: HeaderMap) 
         .into_iter()
         .map(|(key, usage)| serde_json::json!({ "key": key, "usage": usage }))
         .collect::<Vec<_>>();
+    let mut minimax = persisted
+        .minimax
+        .into_iter()
+        .map(|(key, usage)| serde_json::json!({ "key": key, "usage": usage }))
+        .collect::<Vec<_>>();
     codex.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     antigravity.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     gemini.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     qwen.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     deepseek.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     grok.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+    minimax.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     axum::Json(serde_json::json!({
         "totals": {
             "requests": persisted.total_requests,
@@ -2473,7 +2515,8 @@ async fn usage_summary_route(State(state): State<AppState>, headers: HeaderMap) 
             "gemini": gemini,
             "qwen": qwen,
             "deepseek": deepseek,
-            "grok": grok
+            "grok": grok,
+            "minimax": minimax
         }
     }))
     .into_response()
@@ -3126,6 +3169,11 @@ async fn proxy(
                 .await
                 .into_response();
         }
+        TargetModel::MiniMax => {
+            return target::minimax::api::responses(State(state), headers, routed.upstream_body)
+                .await
+                .into_response();
+        }
         TargetModel::Codex => {}
     }
     let upstream = match routed.target {
@@ -3139,6 +3187,7 @@ async fn proxy(
         | TargetModel::Qwen
         | TargetModel::DeepSeek
         | TargetModel::Grok
+        | TargetModel::MiniMax
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
     let session_id = Uuid::new_v4().to_string();
@@ -3188,6 +3237,7 @@ async fn proxy(
         | TargetModel::Qwen
         | TargetModel::DeepSeek
         | TargetModel::Grok
+        | TargetModel::MiniMax
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
     let mut req = state
@@ -3215,6 +3265,7 @@ async fn proxy(
         | TargetModel::Qwen
         | TargetModel::DeepSeek
         | TargetModel::Grok
+        | TargetModel::MiniMax
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
 
@@ -3563,6 +3614,18 @@ async fn collect_unified_v1_models(
         })
         .await,
     );
+    append_unique_models(
+        &mut models,
+        &mut seen,
+        fetch_openai_models_from_response(if has_enabled_minimax_account(state) {
+            target::minimax::api::models(State(state.clone()), headers.clone())
+                .await
+                .into_response()
+        } else {
+            (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
+        })
+        .await,
+    );
 
     models
 }
@@ -3570,6 +3633,15 @@ async fn collect_unified_v1_models(
 fn has_enabled_grok_account(state: &AppState) -> bool {
     state
         .grok_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|account| account.enabled)
+}
+
+fn has_enabled_minimax_account(state: &AppState) -> bool {
+    state
+        .minimax_accounts
         .lock()
         .unwrap()
         .iter()
@@ -3950,6 +4022,7 @@ fn build_usage_stats(
     qwen_accounts: &[target::qwen::accounts::QwenAccount],
     deepseek_accounts: &[target::deepseek::accounts::DeepSeekAccount],
     grok_accounts: &[target::grok::accounts::GrokAccount],
+    minimax_accounts: &[target::minimax::accounts::MiniMaxAccount],
     persisted_stats: &StatsStore,
 ) -> UsageStats {
     let codex_accounts = tokens
@@ -4130,6 +4203,35 @@ fn build_usage_stats(
         })
         .collect();
 
+    let minimax_accounts = minimax_accounts
+        .iter()
+        .map(|account| {
+            let key = minimax_stats_key(account);
+            let stored = persisted_stats
+                .account_usage(Provider::MiniMax, &key)
+                .cloned()
+                .unwrap_or_default();
+            AccountUsage {
+                key,
+                label: account.label.clone(),
+                account_id: account.account_id.clone(),
+                requests: stored.requests,
+                errors: stored.errors,
+                prompt_total: stored.prompt_total,
+                prompt_error_total: stored.prompt_error_total,
+                input_tokens: stored.input_tokens,
+                output_tokens: stored.output_tokens,
+                total_tokens: stored.total_tokens,
+                cache_tokens: stored.cache_tokens,
+                reasoning_tokens: stored.reasoning_tokens,
+                first_seen_at: stored.first_seen_at,
+                last_seen_at: stored.last_seen_at,
+                last_success_at: stored.last_success_at,
+                last_error_at: stored.last_error_at,
+            }
+        })
+        .collect();
+
     UsageStats {
         codex_accounts,
         agw_accounts,
@@ -4137,6 +4239,7 @@ fn build_usage_stats(
         qwen_accounts,
         deepseek_accounts,
         grok_accounts,
+        minimax_accounts,
         total_requests: persisted_stats.total_requests,
         total_errors: persisted_stats.total_errors,
         total_prompt_total: persisted_stats.total_prompt_total,
@@ -4158,6 +4261,7 @@ pub(crate) fn sync_usage_stats(state: &AppState) {
     let qwen_accounts = state.qwen_accounts.lock().unwrap().clone();
     let deepseek_accounts = state.deepseek_accounts.lock().unwrap().clone();
     let grok_accounts = state.grok_accounts.lock().unwrap().clone();
+    let minimax_accounts = state.minimax_accounts.lock().unwrap().clone();
     let persisted_stats = state.persisted_stats.lock().unwrap().clone();
     let mut stats = state.stats.lock().unwrap();
     *stats = build_usage_stats(
@@ -4167,6 +4271,7 @@ pub(crate) fn sync_usage_stats(state: &AppState) {
         &qwen_accounts,
         &deepseek_accounts,
         &grok_accounts,
+        &minimax_accounts,
         &persisted_stats,
     );
 }
@@ -4370,6 +4475,35 @@ fn merge_usage(
     target.last_success_at =
         latest_timestamp(target.last_success_at.take(), source.last_success_at);
     target.last_error_at = latest_timestamp(target.last_error_at.take(), source.last_error_at);
+}
+
+pub(crate) fn minimax_stats_key(account: &target::minimax::accounts::MiniMaxAccount) -> String {
+    if !account.account_id.trim().is_empty() {
+        return format!("minimax:account_id:{}", account.account_id);
+    }
+    if let Some(file_name) = account.file_name.as_ref().filter(|s| !s.is_empty()) {
+        return format!("minimax:file:{}", file_name);
+    }
+    format!("minimax:label:{}", account.label)
+}
+
+pub(crate) fn minimax_usage_context(
+    account: &target::minimax::accounts::MiniMaxAccount,
+    model: Option<String>,
+    request_path: impl Into<String>,
+    prompt: PromptMetrics,
+) -> UsageContext {
+    UsageContext {
+        provider: Provider::MiniMax,
+        provider_name: "minimax",
+        key: minimax_stats_key(account),
+        label: account.label.clone(),
+        account_id: account.account_id.clone(),
+        credential_file: account.file_name.clone(),
+        model,
+        request_path: request_path.into(),
+        prompt,
+    }
 }
 
 pub(crate) fn codex_usage_context(
@@ -4877,6 +5011,26 @@ pub(crate) fn record_grok_success(
     record_usage_success(state, context, metrics);
 }
 
+pub(crate) fn record_minimax_request(state: &AppState, context: &UsageContext) {
+    record_request_started(state, context);
+}
+
+pub(crate) fn record_minimax_error(
+    state: &AppState,
+    context: &UsageContext,
+    message: impl Into<String>,
+) {
+    record_request_error(state, context, message);
+}
+
+pub(crate) fn record_minimax_success(
+    state: &AppState,
+    context: &UsageContext,
+    metrics: &UsageMetrics,
+) {
+    record_usage_success(state, context, metrics);
+}
+
 fn is_hop_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -5002,6 +5156,35 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             "Grok model routed through the configured xAI account.",
             131_072,
             false,
+        ));
+    }
+    if state
+        .minimax_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|account| account.enabled)
+    {
+        models.push(codex_provider_model(
+            "MiniMax-Text-01",
+            "MiniMax Text 01",
+            "MiniMax model routed through the configured MiniMax account.",
+            1_000_192,
+            true,
+        ));
+        models.push(codex_provider_model(
+            "abab6.5s-chat",
+            "MiniMax abab6.5s",
+            "Fast MiniMax model routed through the configured MiniMax account.",
+            245_760,
+            false,
+        ));
+        models.push(codex_provider_model(
+            "abab6.5-chat",
+            "MiniMax abab6.5",
+            "MiniMax chat model routed through the configured MiniMax account.",
+            245_760,
+            true,
         ));
     }
     models

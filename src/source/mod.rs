@@ -14,6 +14,7 @@ pub enum TargetModel {
     Qwen,
     DeepSeek,
     Grok,
+    MiniMax,
     UnifiedV1Models,
 }
 

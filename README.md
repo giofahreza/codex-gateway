@@ -301,3 +301,31 @@ Notes:
 - `403 cloudflare`: usually missing headers or wrong upstream. Use the provided gateway build.
 - `Instructions are required`: your payload is too minimal (Codex CLI sends proper instructions).
 - `502 Bad Gateway`: port collision or proxy isn’t running.
+
+## MiniMax provider
+
+MiniMax is exposed as an OpenAI-compatible target. Add a MiniMax API key through the dashboard, or `POST /login/minimax/start` with JSON `{"api_key":"...","label":"optional","base_url":"optional"}`.
+
+Public routing (the gateway translates to MiniMax internally; no `/minimax/*` routes are exposed to clients):
+
+- `POST /v1/chat/completions`, `POST /v1/responses`, `POST /codex/responses`, `POST /claude/messages` all forward to MiniMax's `/v1/chat/completions`.
+- `GET /v1/models` and `GET /codex/models` include `MiniMax-Text-01`, `abab6.5s-chat`, and `abab6.5-chat` whenever a MiniMax account is enabled.
+- Auth: `Authorization: Bearer <proxy_api_key>`.
+
+Examples:
+
+```bash
+curl http://127.0.0.1:8319/v1/chat/completions \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"MiniMax-Text-01","messages":[{"role":"user","content":"hi"}]}'
+```
+
+```bash
+curl http://127.0.0.1:8319/v1/responses \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"MiniMax-Text-01","input":"say hi in one word"}'
+```
+
+MiniMax is OpenAI-compatible, so tool/function-call shapes from Codex CLI are mapped to MiniMax's `tools` / `tool_calls` format and back.

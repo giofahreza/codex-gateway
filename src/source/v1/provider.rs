@@ -17,6 +17,11 @@ pub fn target_from_model(model: &str) -> TargetModel {
         TargetModel::DeepSeek
     } else if lower.starts_with("grok") {
         TargetModel::Grok
+    } else if lower.starts_with("minimax")
+        || lower.starts_with("abab")
+        || lower.starts_with("MiniMax")
+    {
+        TargetModel::MiniMax
     } else if lower.starts_with("claude") {
         TargetModel::Antigravity
     } else if lower.starts_with("gemini") {
@@ -63,6 +68,9 @@ mod tests {
         assert_eq!(target_from_model("qwen3.7-plus"), TargetModel::Qwen);
         assert_eq!(target_from_model("deepseek-v4-pro"), TargetModel::DeepSeek);
         assert_eq!(target_from_model("grok-4.3"), TargetModel::Grok);
+        assert_eq!(target_from_model("MiniMax-Text-01"), TargetModel::MiniMax);
+        assert_eq!(target_from_model("abab6.5s-chat"), TargetModel::MiniMax);
+        assert_eq!(target_from_model("minimax-text-01"), TargetModel::MiniMax);
         assert_eq!(
             target_from_model("claude-sonnet-4-5"),
             TargetModel::Antigravity

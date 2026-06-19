@@ -365,6 +365,9 @@ fn build_anthropic_payload(
         }
     }
 
+    let disable_thinking_for_tool_history =
+        has_assistant_tool_calls_without_reasoning(&chat_messages)
+            && request_value.get("thinking").is_none();
     let messages = chat_messages_to_anthropic(chat_messages, &mut system_parts);
     if messages.is_empty() {
         return Err("messages must not be empty".to_string());
@@ -401,8 +404,15 @@ fn build_anthropic_payload(
     if let Some(stop) = build_stop_sequences(request_value.get("stop")) {
         payload["stop_sequences"] = stop;
     }
-    if let Some(effort) = build_reasoning_effort(request_value) {
-        payload["output_config"] = json!({ "effort": effort });
+    if !disable_thinking_for_tool_history {
+        if let Some(effort) = build_reasoning_effort(request_value) {
+            payload["output_config"] = json!({ "effort": effort });
+        }
+    }
+    if let Some(thinking) = request_value.get("thinking") {
+        payload["thinking"] = thinking.clone();
+    } else if disable_thinking_for_tool_history {
+        payload["thinking"] = json!({ "type": "disabled" });
     }
     if let Some(metadata) = build_anthropic_metadata(request_value) {
         payload["metadata"] = metadata;
@@ -444,6 +454,9 @@ fn chat_messages_to_anthropic(
                         })
                         .collect::<Vec<_>>();
                     let mut content = Vec::new();
+                    if let Some(reasoning) = assistant_reasoning_text(message) {
+                        content.push(json!({ "type": "thinking", "thinking": reasoning }));
+                    }
                     if let Some(text) = extract_text_value(message.get("content")) {
                         content.push(json!({ "type": "text", "text": text }));
                     }
@@ -517,6 +530,27 @@ fn chat_messages_to_anthropic(
         }
     }
     out
+}
+
+fn has_assistant_tool_calls_without_reasoning(messages: &[serde_json::Value]) -> bool {
+    messages.iter().any(|message| {
+        message_role(message) == Some("assistant")
+            && message
+                .get("tool_calls")
+                .and_then(|value| value.as_array())
+                .map(|tool_calls| !tool_calls.is_empty())
+                .unwrap_or(false)
+            && assistant_reasoning_text(message).is_none()
+    })
+}
+
+fn assistant_reasoning_text(message: &serde_json::Value) -> Option<String> {
+    message
+        .get("reasoning_content")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn tool_call_to_anthropic(tool_call: &serde_json::Value, id: &str) -> Option<serde_json::Value> {
@@ -912,15 +946,12 @@ fn build_messages_from_input(
                     continue;
                 }
 
-                flush_pending_assistant_turn(&mut messages, &mut pending);
                 if role == "assistant" {
                     if let Some(text) = content {
-                        messages.push(json!({
-                            "role": "assistant",
-                            "content": text
-                        }));
+                        pending.push_content(text);
                     }
                 } else if role == "tool" {
+                    flush_pending_assistant_turn(&mut messages, &mut pending);
                     let Some(tool_call_id) = item.get("tool_call_id").and_then(|v| v.as_str())
                     else {
                         return Err("tool items require tool_call_id".to_string());
@@ -931,6 +962,7 @@ fn build_messages_from_input(
                         "content": content.unwrap_or_default()
                     }));
                 } else if let Some(text) = content {
+                    flush_pending_assistant_turn(&mut messages, &mut pending);
                     messages.push(json!({
                         "role": role,
                         "content": text
@@ -951,11 +983,27 @@ fn build_messages_from_input(
 
 #[derive(Default)]
 struct PendingAssistantTurn {
+    content: Option<String>,
     reasoning_content: Option<String>,
     tool_calls: Vec<serde_json::Value>,
 }
 
 impl PendingAssistantTurn {
+    fn push_content(&mut self, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
+        match &mut self.content {
+            Some(existing) => {
+                if !existing.is_empty() {
+                    existing.push('\n');
+                }
+                existing.push_str(&text);
+            }
+            None => self.content = Some(text),
+        }
+    }
+
     fn push_reasoning(&mut self, text: String) {
         if text.trim().is_empty() {
             return;
@@ -976,16 +1024,18 @@ fn flush_pending_assistant_turn(
     messages: &mut Vec<serde_json::Value>,
     pending: &mut PendingAssistantTurn,
 ) {
-    if pending.tool_calls.is_empty() {
+    if pending.tool_calls.is_empty() && pending.content.is_none() {
         pending.reasoning_content = None;
         return;
     }
 
     let mut assistant = json!({
         "role": "assistant",
-        "content": "",
-        "tool_calls": serde_json::Value::Array(std::mem::take(&mut pending.tool_calls))
+        "content": pending.content.take().unwrap_or_default()
     });
+    if !pending.tool_calls.is_empty() {
+        assistant["tool_calls"] = serde_json::Value::Array(std::mem::take(&mut pending.tool_calls));
+    }
     if let Some(reasoning_content) = pending.reasoning_content.take() {
         assistant["reasoning_content"] = json!(reasoning_content);
     }
@@ -1341,6 +1391,10 @@ mod tests {
                     "content": [{ "type": "input_text", "text": "Weather in Tokyo?" }]
                 },
                 {
+                    "type": "reasoning",
+                    "content": "Need the weather tool."
+                },
+                {
                     "type": "function_call",
                     "call_id": "call_weather",
                     "name": "get_weather",
@@ -1365,10 +1419,15 @@ mod tests {
         assert_eq!(messages[0]["role"], "user");
         assert_eq!(messages[0]["content"][0]["type"], "text");
         assert_eq!(messages[1]["role"], "assistant");
-        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
-        assert_eq!(messages[1]["content"][0]["id"], "call_weather");
-        assert_eq!(messages[1]["content"][0]["name"], "get_weather");
-        assert_eq!(messages[1]["content"][0]["input"]["city"], "Tokyo");
+        assert_eq!(messages[1]["content"][0]["type"], "thinking");
+        assert_eq!(
+            messages[1]["content"][0]["thinking"],
+            "Need the weather tool."
+        );
+        assert_eq!(messages[1]["content"][1]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][1]["id"], "call_weather");
+        assert_eq!(messages[1]["content"][1]["name"], "get_weather");
+        assert_eq!(messages[1]["content"][1]["input"]["city"], "Tokyo");
         assert_eq!(messages[2]["role"], "user");
         assert_eq!(messages[2]["content"][0]["type"], "tool_result");
         assert_eq!(messages[2]["content"][0]["tool_use_id"], "call_weather");
@@ -1436,6 +1495,7 @@ mod tests {
         let messages = payload["messages"].as_array().unwrap();
 
         assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(payload["thinking"]["type"], "disabled");
         assert_eq!(messages[1]["content"].as_array().unwrap().len(), 1);
         assert_eq!(messages[1]["content"][0]["type"], "tool_use");
         assert_eq!(messages[1]["content"][0]["id"], "call_one");
@@ -1445,6 +1505,52 @@ mod tests {
         assert!(!serde_json::to_string(&messages)
             .unwrap()
             .contains("call_two"));
+    }
+
+    #[test]
+    fn build_anthropic_payload_preserves_reasoning_across_assistant_text_before_tool_call() {
+        let request = json!({
+            "model": "deepseek-v4-pro",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "Run a command" }]
+                },
+                {
+                    "type": "reasoning",
+                    "content": "Need shell output."
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "Checking." }]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_shell",
+                    "name": "shell",
+                    "arguments": "{\"cmd\":\"pwd\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_shell",
+                    "output": "/tmp"
+                }
+            ]
+        });
+
+        let payload = build_anthropic_payload(&request, "deepseek-v4-pro").unwrap();
+        let messages = payload["messages"].as_array().unwrap();
+
+        assert!(payload.get("thinking").is_none());
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"][0]["type"], "thinking");
+        assert_eq!(messages[1]["content"][0]["thinking"], "Need shell output.");
+        assert_eq!(messages[1]["content"][1]["type"], "text");
+        assert_eq!(messages[1]["content"][1]["text"], "Checking.");
+        assert_eq!(messages[1]["content"][2]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][2]["id"], "call_shell");
     }
 
     #[test]
