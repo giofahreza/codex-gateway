@@ -309,7 +309,7 @@ MiniMax is exposed as an OpenAI-compatible target. Add a MiniMax API key through
 Public routing (the gateway translates to MiniMax internally; no `/minimax/*` routes are exposed to clients):
 
 - `POST /v1/responses` and `POST /codex/responses` forward to MiniMax's `/v1/chat/completions`. The gateway owns the public surface, so provider-prefixed paths are not exposed.
-- `GET /v1/models` and `GET /codex/models` include `MiniMax-Text-01`, `abab6.5s-chat`, and `abab6.5-chat` whenever a MiniMax account is enabled.
+- `GET /v1/models` and `GET /codex/models` include live MiniMax models such as `MiniMax-M3`, `MiniMax-M2.7`, and `MiniMax-M2.7-highspeed` whenever a MiniMax account is enabled.
 - Auth: `Authorization: Bearer <proxy_api_key>`.
 
 Examples:
@@ -318,7 +318,7 @@ Examples:
 curl http://127.0.0.1:8319/v1/responses \
   -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"MiniMax-Text-01","input":"say hi in one word"}'
+  -d '{"model":"MiniMax-M3","input":"say hi in one word"}'
 ```
 
 MiniMax is OpenAI-compatible, so tool/function-call shapes from Codex CLI are mapped to MiniMax's `tools` / `tool_calls` format and back.

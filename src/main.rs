@@ -832,6 +832,7 @@ async fn dashboard() -> impl IntoResponse {
               <div class="provider-menu-item" data-provider="gemini" style="padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);">Gemini (Google)</div>
               <div class="provider-menu-item" data-provider="qwen" style="padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);">Qwen</div>
               <div class="provider-menu-item" data-provider="deepseek" style="padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);">DeepSeek</div>
+              <div class="provider-menu-item" data-provider="minimax" style="padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);">MiniMax</div>
               <div class="provider-menu-item" data-provider="grok" style="padding:10px 16px;cursor:pointer;">Grok (xAI)</div>
             </div>
           </div>
@@ -879,6 +880,13 @@ async fn dashboard() -> impl IntoResponse {
           <span class="provider-badge-count" id="deepseekBadgeCount">0 accounts</span>
         </div>
         <div id="deepseekCards"></div>
+      </div>
+      <div class="provider-section">
+        <div class="provider-badge">
+          <span>MiniMax</span>
+          <span class="provider-badge-count" id="minimaxBadgeCount">0 accounts</span>
+        </div>
+        <div id="minimaxCards"></div>
       </div>
       <div class="provider-section">
         <div class="provider-badge">
@@ -1313,6 +1321,48 @@ async fn dashboard() -> impl IntoResponse {
         document.getElementById('deepseekCards').innerHTML = cards || '<div class="empty-state">No DeepSeek accounts</div>';
         document.getElementById('deepseekBadgeCount').textContent = accounts.length + ' accounts';
       }
+      function buildMiniMaxCard(a) {
+        var dot = a.enabled ? '#2ecc71' : '#e74c3c';
+        var toggleLabel = a.enabled ? 'Disable' : 'Enable';
+        var actions = '';
+        if (a.file_name) {
+          actions += '<button title="' + toggleLabel + '" onclick="toggleCred(\'' + a.file_name + '\', ' + (a.enabled ? 'false' : 'true') + ')" class="mini-btn" style="background:' + dot + ';color:#fff;">&#9679;</button>';
+          actions += '<button title="Delete" onclick="deleteCred(\'' + a.file_name + '\')" class="mini-btn danger">&#128465;</button>';
+        } else {
+          actions += '<span class="dot-indicator" style="background:' + dot + ';"></span>';
+        }
+        var usage = '';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.prompt_total || 0) + '</span><span class="stat-pill-label">prompt</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.input_tokens || 0) + '</span><span class="stat-pill-label">in tok</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.output_tokens || 0) + '</span><span class="stat-pill-label">out tok</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.total_tokens || 0) + '</span><span class="stat-pill-label">total tok</span></span>';
+        var meta = '';
+        if (a.base_url) {
+          meta += '<div class="muted">base URL: <code>' + a.base_url + '</code></div>';
+        }
+        if (a.last_success_at) {
+          meta += '<div class="muted">last success: ' + a.last_success_at + '</div>';
+        }
+        if (a.last_error_at) {
+          meta += '<div class="muted">last error: ' + a.last_error_at + '</div>';
+        }
+        return '<div class="card">'
+          + '<div class="card-header"><span class="card-email">' + (a.label || a.account_id || 'MiniMax') + '</span><span class="card-actions">' + actions + '</span></div>'
+          + '<div class="stat-pills">' + usage + '</div>'
+          + meta
+          + '</div>';
+      }
+      async function refreshMiniMaxAccounts() {
+        var res = await adminFetch('/minimax/accounts.json');
+        if (!res) return;
+        var data = await res.json();
+        var accounts = data.accounts || [];
+        var cards = accounts.map(buildMiniMaxCard).join('');
+        document.getElementById('minimaxCards').innerHTML = cards || '<div class="empty-state">No MiniMax accounts</div>';
+        document.getElementById('minimaxBadgeCount').textContent = accounts.length + ' accounts';
+      }
       async function refreshGrokAccounts() {
         var res = await adminFetch('/grok/accounts.json');
         if (!res) return;
@@ -1567,6 +1617,26 @@ async fn dashboard() -> impl IntoResponse {
         </div>
       </div>
     </div>
+    <div id="addMiniMaxModal" class="modal" style="display:none;">
+      <div class="modal-card">
+        <h2 style="margin-top:0;">Add MiniMax Account</h2>
+        <p>Paste a MiniMax API key. The gateway validates it against <code>/v1/models</code> before saving it.</p>
+        <div class="modal-actions" style="margin-top:8px;">
+          <button type="button" onclick="window.open('/login/minimax/start', '_blank', 'noopener')">Open Helper</button>
+        </div>
+        <label style="margin-top:12px;">API Key</label>
+        <textarea id="minimaxKeyInput" rows="6" placeholder="Paste MiniMax API key here" style="width:100%;box-sizing:border-box;font-family:monospace;"></textarea>
+        <label style="margin-top:12px;">Label</label>
+        <input id="minimaxLabelInput" placeholder="optional label">
+        <label style="margin-top:12px;">Base URL</label>
+        <input id="minimaxBaseUrlInput" placeholder="https://api.minimaxi.chat">
+        <button onclick="submitMiniMaxKey()" style="margin-top:12px;">Save Key</button>
+        <div id="minimaxStatus" class="muted" style="margin-top:8px;"></div>
+        <div class="modal-actions" style="margin-top:16px;">
+          <button type="button" id="closeMiniMaxModalBtn" class="secondary-button">Close</button>
+        </div>
+      </div>
+    </div>
     <div id="addGrokModal" class="modal" style="display:none;">
       <div class="modal-card">
         <h2 style="margin-top:0;">Add Grok Account</h2>
@@ -1622,6 +1692,7 @@ async fn dashboard() -> impl IntoResponse {
           else if (provider === 'gemini') document.getElementById('addGeminiModal').style.display = 'block';
           else if (provider === 'qwen') document.getElementById('addQwenModal').style.display = 'block';
           else if (provider === 'deepseek') document.getElementById('addDeepSeekModal').style.display = 'block';
+          else if (provider === 'minimax') document.getElementById('addMiniMaxModal').style.display = 'block';
           else if (provider === 'grok') document.getElementById('addGrokModal').style.display = 'block';
         });
       });
@@ -1757,6 +1828,47 @@ async fn dashboard() -> impl IntoResponse {
       document.getElementById('addDeepSeekModal').addEventListener('click', (e) => {
         if (e.target.id === 'addDeepSeekModal') {
           closeDeepSeekModal();
+        }
+      });
+      function closeMiniMaxModal() {
+        document.getElementById('addMiniMaxModal').style.display = 'none';
+      }
+      async function submitMiniMaxKey() {
+        const apiKey = document.getElementById('minimaxKeyInput').value.trim();
+        const label = document.getElementById('minimaxLabelInput').value.trim();
+        const baseUrl = document.getElementById('minimaxBaseUrlInput').value.trim();
+        if (!apiKey) {
+          document.getElementById('minimaxStatus').textContent = 'Paste a MiniMax API key first.';
+          return;
+        }
+        const res = await adminFetch('/login/minimax/start', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            api_key: apiKey,
+            label: label || undefined,
+            base_url: baseUrl || undefined
+          })
+        });
+        if (!res) return;
+        const data = await res.json();
+        document.getElementById('minimaxStatus').textContent = data.message || 'Failed to save MiniMax key';
+        if (!data.ok) {
+          return;
+        }
+        document.getElementById('minimaxKeyInput').value = '';
+        document.getElementById('minimaxLabelInput').value = '';
+        document.getElementById('minimaxBaseUrlInput').value = '';
+        refreshMiniMaxAccounts();
+      }
+      document.getElementById('closeMiniMaxModalBtn').addEventListener('click', () => {
+        closeMiniMaxModal();
+      });
+      document.getElementById('addMiniMaxModal').addEventListener('click', (e) => {
+        if (e.target.id === 'addMiniMaxModal') {
+          closeMiniMaxModal();
         }
       });
       // Grok modal
@@ -1948,6 +2060,7 @@ async fn dashboard() -> impl IntoResponse {
         setInterval(() => { if (adminAuthenticated) refreshGeminiAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshQwenAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshDeepSeekAccounts(); }, 10000);
+        setInterval(() => { if (adminAuthenticated) refreshMiniMaxAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshGrokAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshContextChart(); }, 60000);
       }
@@ -5168,24 +5281,24 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
         .any(|account| account.enabled)
     {
         models.push(codex_provider_model(
-            "MiniMax-Text-01",
-            "MiniMax Text 01",
+            "MiniMax-M3",
+            "MiniMax M3",
             "MiniMax model routed through the configured MiniMax account.",
-            1_000_192,
+            512_000,
             true,
         ));
         models.push(codex_provider_model(
-            "abab6.5s-chat",
-            "MiniMax abab6.5s",
-            "Fast MiniMax model routed through the configured MiniMax account.",
-            245_760,
+            "MiniMax-M2.7",
+            "MiniMax M2.7",
+            "MiniMax model routed through the configured MiniMax account.",
+            512_000,
             false,
         ));
         models.push(codex_provider_model(
-            "abab6.5-chat",
-            "MiniMax abab6.5",
-            "MiniMax chat model routed through the configured MiniMax account.",
-            245_760,
+            "MiniMax-M2.7-highspeed",
+            "MiniMax M2.7 Highspeed",
+            "Fast MiniMax model routed through the configured MiniMax account.",
+            512_000,
             true,
         ));
     }

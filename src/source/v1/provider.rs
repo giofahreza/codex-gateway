@@ -67,6 +67,7 @@ mod tests {
         assert_eq!(target_from_model("qwen3.7-plus"), TargetModel::Qwen);
         assert_eq!(target_from_model("deepseek-v4-pro"), TargetModel::DeepSeek);
         assert_eq!(target_from_model("grok-4.3"), TargetModel::Grok);
+        assert_eq!(target_from_model("MiniMax-M3"), TargetModel::MiniMax);
         assert_eq!(target_from_model("MiniMax-Text-01"), TargetModel::MiniMax);
         assert_eq!(target_from_model("abab6.5s-chat"), TargetModel::MiniMax);
         assert_eq!(target_from_model("minimax-text-01"), TargetModel::MiniMax);

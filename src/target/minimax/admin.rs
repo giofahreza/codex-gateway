@@ -19,7 +19,7 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
         stats
             .minimax_accounts
             .iter()
-            .map(|usage| (usage.key.clone(), (usage.requests, usage.errors)))
+            .map(|usage| (usage.key.clone(), usage.clone()))
             .collect::<std::collections::HashMap<_, _>>()
     };
 
@@ -30,15 +30,26 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
         .iter()
         .map(|account| {
             let stats_key = crate::minimax_stats_key(account);
-            let (requests, errors) = usage_by_key.get(&stats_key).copied().unwrap_or((0, 0));
+            let usage = usage_by_key.get(&stats_key).cloned().unwrap_or_default();
             serde_json::json!({
                 "account_id": account.account_id,
                 "label": account.label,
                 "file_name": account.file_name,
                 "enabled": account.enabled,
                 "base_url": account.base_url,
-                "requests": requests,
-                "errors": errors
+                "requests": usage.requests,
+                "errors": usage.errors,
+                "prompt_total": usage.prompt_total,
+                "prompt_error_total": usage.prompt_error_total,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+                "cache_tokens": usage.cache_tokens,
+                "reasoning_tokens": usage.reasoning_tokens,
+                "first_seen_at": usage.first_seen_at,
+                "last_seen_at": usage.last_seen_at,
+                "last_success_at": usage.last_success_at,
+                "last_error_at": usage.last_error_at
             })
         })
         .collect::<Vec<_>>();

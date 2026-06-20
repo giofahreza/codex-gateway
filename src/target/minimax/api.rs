@@ -13,10 +13,10 @@ use uuid::Uuid;
 use super::DEFAULT_BASE_URL;
 
 const MODEL_FALLBACKS: &[&str] = &[
-    "MiniMax-Text-01",
-    "abab6.5s-chat",
-    "abab6.5-chat",
-    "abab5.5-chat",
+    "MiniMax-M3",
+    "MiniMax-M2.7",
+    "MiniMax-M2.7-highspeed",
+    "MiniMax-M2",
 ];
 
 pub fn normalize_base_url(base_url: Option<&str>) -> String {
@@ -805,34 +805,41 @@ fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
     if let Some(choices) = chat.get("choices").and_then(|v| v.as_array()) {
         for choice in choices {
             if let Some(message) = choice.get("message") {
+                let mut had_reasoning = false;
                 if let Some(reasoning) = message
                     .get("reasoning_content")
                     .and_then(|v| v.as_str())
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                 {
-                    output.push(json!({
-                        "id": format!("rs_{}", Uuid::new_v4().simple()),
-                        "type": "reasoning",
-                        "summary": [{
-                            "type": "summary_text",
-                            "text": reasoning
-                        }],
-                        "content": reasoning
-                    }));
+                    push_reasoning_output(&mut output, reasoning);
+                    had_reasoning = true;
                 }
                 let mut had_content = false;
                 if let Some(content) = message.get("content") {
                     if let Some(text) = content.as_str() {
-                        if !text.is_empty() {
-                            output_text.push_str(text);
+                        let (inline_reasoning, visible_text) = split_inline_thinking(text);
+                        if let Some(reasoning) = inline_reasoning {
+                            if !had_reasoning {
+                                push_reasoning_output(&mut output, &reasoning);
+                            }
+                        }
+                        if !visible_text.is_empty() {
+                            output_text.push_str(&visible_text);
                             had_content = true;
                         }
                     } else if let Some(parts) = content.as_array() {
                         for part in parts {
                             if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
-                                if !text.is_empty() {
-                                    output_text.push_str(text);
+                                let (inline_reasoning, visible_text) = split_inline_thinking(text);
+                                if let Some(reasoning) = inline_reasoning {
+                                    if !had_reasoning {
+                                        push_reasoning_output(&mut output, &reasoning);
+                                        had_reasoning = true;
+                                    }
+                                }
+                                if !visible_text.is_empty() {
+                                    output_text.push_str(&visible_text);
                                     had_content = true;
                                 }
                             }
@@ -916,6 +923,39 @@ fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
             "cache_read_input_tokens": 0
         }
     })
+}
+
+fn push_reasoning_output(output: &mut Vec<Value>, reasoning: &str) {
+    output.push(json!({
+        "id": format!("rs_{}", Uuid::new_v4().simple()),
+        "type": "reasoning",
+        "summary": [{
+            "type": "summary_text",
+            "text": reasoning
+        }],
+        "content": reasoning
+    }));
+}
+
+fn split_inline_thinking(text: &str) -> (Option<String>, String) {
+    let trimmed = text.trim_start();
+    let Some(rest) = trimmed.strip_prefix("<think>") else {
+        return (None, text.to_string());
+    };
+    let Some(end) = rest.find("</think>") else {
+        return (None, text.to_string());
+    };
+
+    let reasoning = rest[..end].trim().to_string();
+    let visible = rest[end + "</think>".len()..]
+        .trim_start_matches(['\r', '\n'])
+        .to_string();
+    let reasoning = if reasoning.is_empty() {
+        None
+    } else {
+        Some(reasoning)
+    };
+    (reasoning, visible)
 }
 
 fn chat_usage_to_metrics(usage: &Value) -> crate::UsageMetrics {
@@ -1126,5 +1166,28 @@ mod tests {
         assert_eq!(response["usage"]["input_tokens"], 3);
         assert_eq!(response["usage"]["output_tokens"], 4);
         assert_eq!(response["output_text"], "hello");
+    }
+
+    #[test]
+    fn chat_completion_to_responses_moves_inline_thinking_out_of_output_text() {
+        let chat = json!({
+            "choices": [{
+                "message": {
+                    "content": "<think>\nThe user asked for a short greeting.\n</think>\nHi"
+                }
+            }],
+            "usage": { "prompt_tokens": 3, "completion_tokens": 9, "total_tokens": 12 }
+        });
+
+        let response = chat_completion_to_responses(&chat, "MiniMax-M3");
+        let output = response["output"].as_array().unwrap();
+        assert_eq!(response["output_text"], "Hi");
+        assert_eq!(output[0]["type"], "reasoning");
+        assert_eq!(
+            output[0]["summary"][0]["text"],
+            "The user asked for a short greeting."
+        );
+        assert_eq!(output[1]["type"], "message");
+        assert_eq!(output[1]["content"][0]["text"], "Hi");
     }
 }
