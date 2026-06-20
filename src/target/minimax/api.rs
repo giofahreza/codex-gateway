@@ -5,7 +5,7 @@ use axum::{
     response::IntoResponse,
 };
 use bytes::Bytes;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::time::Duration;
 use uuid::Uuid;
@@ -335,9 +335,15 @@ async fn stream_chat_completions(
     base_url: &str,
     payload: &Value,
     context: &crate::UsageContext,
-    _model: &str,
+    model: &str,
     _headers: &HeaderMap,
 ) -> axum::response::Response {
+    let mut payload = payload.clone();
+    payload["stream"] = json!(true);
+    if payload.get("stream_options").is_none() {
+        payload["stream_options"] = json!({ "include_usage": true });
+    }
+
     let resp = match state
         .client
         .post(chat_completions_url(base_url))
@@ -384,22 +390,52 @@ async fn stream_chat_completions(
 
     let usage_state = state.clone();
     let usage_context = context.clone();
-    let mut buffer: Vec<u8> = Vec::new();
-    let mut recorded = false;
-    let stream = resp.bytes_stream().map(move |chunk| {
-        if let Ok(ref bytes) = chunk {
-            if !recorded {
-                buffer.extend_from_slice(bytes);
-                if let Some(usage) = scan_sse_for_usage(&buffer) {
-                    let metrics = chat_usage_to_metrics(&usage);
-                    crate::record_minimax_success(&usage_state, &usage_context, &metrics);
-                    recorded = true;
+    let model = model.to_string();
+    let stream = async_stream::stream! {
+        let mut upstream = resp.bytes_stream();
+        let mut parser = MiniMaxSseParser::default();
+        let mut accumulator = MiniMaxStreamAccumulator::new(model.clone());
+        yield Ok::<Bytes, std::io::Error>(response_sse_event(&json!({
+            "type": "response.created",
+            "response": accumulator.in_progress_response()
+        })));
+
+        while let Some(chunk) = upstream.next().await {
+            let bytes = match chunk {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    let message = format!("MiniMax stream body read failed: {}", err);
+                    crate::record_minimax_error(&usage_state, &usage_context, &message);
+                    yield Ok(response_sse_event(&json!({
+                        "type": "response.failed",
+                        "error": {
+                            "message": message,
+                            "type": "server_error"
+                        }
+                    })));
+                    yield Ok(done_sse_event());
+                    return;
                 }
+            };
+
+            for event in parser.push(&bytes) {
+                accumulator.absorb_sse_data(&event);
             }
         }
-        chunk.map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "stream"))
-    });
-    let converted_stream = stream.map_ok(move |chunk| chunk);
+
+        for event in parser.finish() {
+            accumulator.absorb_sse_data(&event);
+        }
+
+        let response = accumulator.to_response();
+        let metrics = crate::usage_metrics_from_response_value(&response);
+        crate::record_minimax_success(&usage_state, &usage_context, &metrics);
+        yield Ok(response_sse_event(&json!({
+            "type": "response.completed",
+            "response": response
+        })));
+        yield Ok(done_sse_event());
+    };
 
     (
         StatusCode::OK,
@@ -407,7 +443,7 @@ async fn stream_chat_completions(
             ("Content-Type", "text/event-stream"),
             ("Cache-Control", "no-store"),
         ],
-        Body::from_stream(converted_stream),
+        Body::from_stream(stream),
     )
         .into_response()
 }
@@ -789,6 +825,250 @@ fn build_chat_tool_choice(raw: &Value) -> Option<Value> {
     Some(choice.clone())
 }
 
+#[derive(Default)]
+struct MiniMaxSseParser {
+    buffer: Vec<u8>,
+}
+
+impl MiniMaxSseParser {
+    fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.buffer.extend_from_slice(chunk);
+        let mut events = Vec::new();
+        while let Some((event_end, delimiter_len)) = find_minimax_sse_boundary(&self.buffer) {
+            let raw = self
+                .buffer
+                .drain(..event_end + delimiter_len)
+                .collect::<Vec<_>>();
+            if let Some(data) = parse_minimax_sse_data(&raw[..event_end]) {
+                events.push(data);
+            }
+        }
+        events
+    }
+
+    fn finish(&mut self) -> Vec<String> {
+        if self.buffer.is_empty() {
+            return Vec::new();
+        }
+        let raw = std::mem::take(&mut self.buffer);
+        parse_minimax_sse_data(&raw).into_iter().collect()
+    }
+}
+
+fn find_minimax_sse_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
+    buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|idx| (idx, 4))
+        .or_else(|| {
+            buffer
+                .windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|idx| (idx, 2))
+        })
+}
+
+fn parse_minimax_sse_data(raw_event: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(raw_event);
+    let mut data_lines = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        if let Some(value) = line.strip_prefix("data:") {
+            data_lines.push(value.trim_start().to_string());
+        }
+    }
+    if data_lines.is_empty() {
+        None
+    } else {
+        Some(data_lines.join("\n"))
+    }
+}
+
+#[derive(Clone, Default)]
+struct StreamToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+struct MiniMaxStreamAccumulator {
+    id: String,
+    model: String,
+    created: u64,
+    content: String,
+    reasoning_content: String,
+    tool_calls: Vec<StreamToolCall>,
+    usage: Option<Value>,
+}
+
+impl MiniMaxStreamAccumulator {
+    fn new(model: String) -> Self {
+        Self {
+            id: format!("chatcmpl-{}", Uuid::new_v4().simple()),
+            model,
+            created: chrono::Utc::now().timestamp() as u64,
+            content: String::new(),
+            reasoning_content: String::new(),
+            tool_calls: Vec::new(),
+            usage: None,
+        }
+    }
+
+    fn in_progress_response(&self) -> Value {
+        json!({
+            "id": self.response_id(),
+            "object": "response",
+            "created": self.created,
+            "model": self.model,
+            "status": "in_progress",
+            "output": [],
+            "output_text": ""
+        })
+    }
+
+    fn absorb_sse_data(&mut self, data: &str) {
+        if data.trim() == "[DONE]" {
+            return;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            return;
+        };
+        self.absorb_chat_value(&value);
+    }
+
+    fn absorb_chat_value(&mut self, value: &Value) {
+        if let Some(id) = value.get("id").and_then(|v| v.as_str()) {
+            self.id = id.to_string();
+        }
+        if let Some(created) = value.get("created").and_then(|v| v.as_u64()) {
+            self.created = created;
+        }
+        if let Some(usage) = value.get("usage").filter(|usage| !usage.is_null()) {
+            self.usage = Some(usage.clone());
+        }
+
+        let Some(choices) = value.get("choices").and_then(|v| v.as_array()) else {
+            return;
+        };
+        for choice in choices {
+            if let Some(delta) = choice.get("delta") {
+                self.absorb_delta(delta);
+            }
+            if let Some(message) = choice.get("message") {
+                self.absorb_delta(message);
+            }
+        }
+    }
+
+    fn absorb_delta(&mut self, delta: &Value) {
+        if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
+            self.content.push_str(text);
+        }
+        if let Some(text) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+            self.reasoning_content.push_str(text);
+        }
+        if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+            for tool_call in tool_calls {
+                self.absorb_tool_call(tool_call);
+            }
+        }
+    }
+
+    fn absorb_tool_call(&mut self, value: &Value) {
+        let index = value
+            .get("index")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(self.tool_calls.len() as u64) as usize;
+        while self.tool_calls.len() <= index {
+            self.tool_calls.push(StreamToolCall::default());
+        }
+        let tool_call = &mut self.tool_calls[index];
+        if let Some(id) = value.get("id").and_then(|v| v.as_str()) {
+            tool_call.id = id.to_string();
+        }
+        if let Some(function) = value.get("function") {
+            if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
+                tool_call.name.push_str(name);
+            }
+            if let Some(arguments) = function.get("arguments").and_then(|v| v.as_str()) {
+                tool_call.arguments.push_str(arguments);
+            }
+        }
+    }
+
+    fn to_response(&self) -> Value {
+        let mut message = json!({
+            "role": "assistant",
+            "content": self.content.clone()
+        });
+        if !self.reasoning_content.trim().is_empty() {
+            message["reasoning_content"] = json!(self.reasoning_content.clone());
+        }
+        let tool_calls = self
+            .tool_calls
+            .iter()
+            .filter(|tool_call| !tool_call.name.is_empty())
+            .map(|tool_call| {
+                let id = if tool_call.id.is_empty() {
+                    format!("call_{}", Uuid::new_v4().simple())
+                } else {
+                    tool_call.id.clone()
+                };
+                let arguments = if tool_call.arguments.is_empty() {
+                    "{}".to_string()
+                } else {
+                    tool_call.arguments.clone()
+                };
+                json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.name.clone(),
+                        "arguments": arguments
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        if !tool_calls.is_empty() {
+            message["tool_calls"] = Value::Array(tool_calls);
+        }
+
+        let chat = json!({
+            "id": self.id.clone(),
+            "created": self.created,
+            "model": self.model.clone(),
+            "choices": [{ "message": message }],
+            "usage": self.usage.clone().unwrap_or_else(|| json!({}))
+        });
+        let mut response = chat_completion_to_responses(&chat, &self.model);
+        if let Some(response_obj) = response.as_object_mut() {
+            response_obj.insert("id".to_string(), Value::String(self.response_id()));
+        }
+        response
+    }
+
+    fn response_id(&self) -> String {
+        if self.id.starts_with("resp_") {
+            self.id.clone()
+        } else {
+            format!("resp_{}", self.id)
+        }
+    }
+}
+
+fn response_sse_event(value: &Value) -> Bytes {
+    let data = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
+    let event = value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("message");
+    Bytes::from(format!("event: {}\ndata: {}\n\n", event, data))
+}
+
+fn done_sse_event() -> Bytes {
+    Bytes::from_static(b"data: [DONE]\n\n")
+}
+
 fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
     let id = chat
         .get("id")
@@ -956,68 +1236,6 @@ fn split_inline_thinking(text: &str) -> (Option<String>, String) {
         Some(reasoning)
     };
     (reasoning, visible)
-}
-
-fn chat_usage_to_metrics(usage: &Value) -> crate::UsageMetrics {
-    let input_tokens = usage
-        .get("prompt_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let output_tokens = usage
-        .get("completion_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let total_tokens = usage
-        .get("total_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(input_tokens + output_tokens);
-    let cache_tokens = usage
-        .get("prompt_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    crate::UsageMetrics {
-        input_tokens,
-        output_tokens,
-        total_tokens,
-        cache_tokens,
-        reasoning_tokens: 0,
-        raw_usage: Some(usage.clone()),
-    }
-}
-
-fn scan_sse_for_usage(buffer: &[u8]) -> Option<Value> {
-    let text = String::from_utf8_lossy(buffer);
-    for line in text.lines() {
-        let line = line.trim_end_matches('\r');
-        let data = match line.strip_prefix("data:") {
-            Some(data) => data.trim(),
-            None => continue,
-        };
-        if data == "[DONE]" {
-            return None;
-        }
-        let value: Value = match serde_json::from_str(data) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        if value.get("object").and_then(|v| v.as_str()) == Some("chat.completion") {
-            return value.get("usage").cloned();
-        }
-        if let Some(choice) = value
-            .get("choices")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-        {
-            if let Some(usage) = choice.get("usage") {
-                return Some(usage.clone());
-            }
-        }
-        if let Some(usage) = value.get("usage") {
-            return Some(usage.clone());
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -1189,5 +1407,63 @@ mod tests {
         );
         assert_eq!(output[1]["type"], "message");
         assert_eq!(output[1]["content"][0]["text"], "Hi");
+    }
+
+    #[test]
+    fn minimax_sse_parser_handles_split_events() {
+        let first = json!({
+            "choices": [{ "delta": { "content": "H" } }]
+        })
+        .to_string();
+        let second = json!({
+            "choices": [{ "delta": { "content": "i" } }]
+        })
+        .to_string();
+        let mut parser = MiniMaxSseParser::default();
+
+        assert!(parser
+            .push(format!("data: {}", first).as_bytes())
+            .is_empty());
+        let events = parser.push(format!("\n\ndata: {}\n\n", second).as_bytes());
+
+        assert_eq!(events.len(), 2);
+        assert!(events[0].contains("\"H\""));
+        assert!(events[1].contains("\"i\""));
+    }
+
+    #[test]
+    fn minimax_stream_accumulator_builds_completed_response() {
+        let mut accumulator = MiniMaxStreamAccumulator::new("MiniMax-M3".to_string());
+        accumulator.absorb_chat_value(&json!({
+            "id": "chatcmpl_1",
+            "created": 1700000000,
+            "choices": [{
+                "delta": { "reasoning_content": "think first" }
+            }]
+        }));
+        accumulator.absorb_chat_value(&json!({
+            "choices": [{
+                "delta": { "content": "Hi" }
+            }],
+            "usage": {
+                "prompt_tokens": 3,
+                "completion_tokens": 2,
+                "total_tokens": 5
+            }
+        }));
+
+        let response = accumulator.to_response();
+        let completed = response_sse_event(&json!({
+            "type": "response.completed",
+            "response": response.clone()
+        }));
+        let completed_text = String::from_utf8(completed.to_vec()).unwrap();
+
+        assert!(completed_text.contains("response.completed"));
+        assert_eq!(response["id"], "resp_chatcmpl_1");
+        assert_eq!(response["output_text"], "Hi");
+        assert_eq!(response["output"][0]["type"], "reasoning");
+        assert_eq!(response["output"][1]["type"], "message");
+        assert_eq!(response["usage"]["total_tokens"], 5);
     }
 }
