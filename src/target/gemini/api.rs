@@ -6,7 +6,8 @@ use axum::{
 };
 use base64::Engine;
 use bytes::Bytes;
-use serde_json::json;
+use crate::source::v1::multimodal::{classify_content, is_data_url, split_data_url, PartKind};
+use serde_json::{json, Value};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -315,7 +316,7 @@ fn build_google_payload(
     model: &str,
     project_id: &str,
 ) -> Result<serde_json::Value, String> {
-    let prompt = extract_prompt(request_value)?;
+    let parts = extract_prompt_parts(request_value)?;
     let instructions = request_value
         .get("instructions")
         .and_then(|value| value.as_str())
@@ -325,9 +326,7 @@ fn build_google_payload(
     let mut request = json!({
         "contents": [{
             "role": "user",
-            "parts": [{
-                "text": prompt
-            }]
+            "parts": parts
         }],
         "sessionId": Uuid::new_v4().to_string()
     });
@@ -370,10 +369,18 @@ fn build_google_payload(
     }))
 }
 
-fn extract_prompt(request_value: &serde_json::Value) -> Result<String, String> {
-    if let Some(prompt) = request_value.get("input").and_then(|value| value.as_str()) {
+/// Build a Google Generative AI `parts` array from a Codex/OpenAI
+/// request. Supports text, image (data URL or remote URL), and a mix of
+/// both. Returns an error if no usable content is found.
+fn extract_prompt_parts(request_value: &Value) -> Result<Vec<Value>, String> {
+    let mut out: Vec<Value> = Vec::new();
+
+    if let Some(prompt) = request_value
+        .get("input")
+        .and_then(|value| value.as_str())
+    {
         if !prompt.trim().is_empty() {
-            return Ok(prompt.to_string());
+            out.push(json!({ "text": prompt.trim() }));
         }
     }
 
@@ -381,36 +388,64 @@ fn extract_prompt(request_value: &serde_json::Value) -> Result<String, String> {
         .get("messages")
         .and_then(|value| value.as_array())
     {
-        let mut parts = Vec::new();
         for message in messages {
-            if let Some(content) = message.get("content") {
-                match content {
-                    serde_json::Value::String(text) => {
-                        if !text.trim().is_empty() {
-                            parts.push(text.trim().to_string());
-                        }
-                    }
-                    serde_json::Value::Array(items) => {
-                        for item in items {
-                            if let Some(text) = item
-                                .get("text")
-                                .and_then(|value| value.as_str())
-                                .filter(|text| !text.trim().is_empty())
-                            {
-                                parts.push(text.trim().to_string());
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+            let content = match message.get("content") {
+                Some(c) => c,
+                None => continue,
+            };
+            for part in classify_content(Some(content)) {
+                push_google_part(&mut out, part);
             }
-        }
-        if !parts.is_empty() {
-            return Ok(parts.join("\n\n"));
         }
     }
 
-    Err("only string input is supported for /gemini/v1/responses".to_string())
+    if out.is_empty() {
+        return Err(
+            "only string input or messages[] with content is supported for /gemini/v1/responses"
+                .to_string(),
+        );
+    }
+    Ok(out)
+}
+
+fn push_google_part(out: &mut Vec<Value>, part: PartKind) {
+    match part {
+        PartKind::Text(text) => {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                out.push(json!({ "text": trimmed }));
+            }
+        }
+        PartKind::Image(url) => {
+            if let Some(block) = google_inline_data_part(&url) {
+                out.push(block);
+            }
+        }
+        PartKind::Other(_) => {
+            // Unknown part types are dropped; Google's `parts` vocabulary is fixed.
+        }
+    }
+}
+
+fn google_inline_data_part(url: &str) -> Option<Value> {
+    if is_data_url(url) {
+        let (mime_type, payload) = split_data_url(url)?;
+        return Some(json!({
+            "inline_data": {
+                "mime_type": mime_type,
+                "data": payload,
+            }
+        }));
+    }
+    if url.starts_with("http://") || url.starts_with("https://") {
+        // Google's Generative API supports `file_data` for remote files.
+        return Some(json!({
+            "file_data": {
+                "file_uri": url,
+            }
+        }));
+    }
+    None
 }
 
 fn is_image_request(request_value: &serde_json::Value, model: &str) -> bool {
@@ -735,5 +770,44 @@ mod tests {
             }
             serde_json::from_str::<serde_json::Value>(data).unwrap();
         }
+    }
+
+    #[test]
+    fn build_google_payload_passes_through_image_in_messages() {
+        let request = json!({
+            "model": "gemini-2.5-pro",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "describe" },
+                    { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
+                ]
+            }]
+        });
+        let payload = build_google_payload(&request, "gemini-2.5-pro", "proj-1").unwrap();
+        let parts = payload["request"]["contents"][0]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["text"], "describe");
+        assert_eq!(parts[1]["inline_data"]["mime_type"], "image/png");
+        assert_eq!(parts[1]["inline_data"]["data"], "AAAA");
+    }
+
+    #[test]
+    fn build_google_payload_passes_through_image_url() {
+        let request = json!({
+            "model": "gemini-2.5-pro",
+            "input": "describe",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "input_image", "image_url": "https://example.com/x.png" }
+                ]
+            }]
+        });
+        let payload = build_google_payload(&request, "gemini-2.5-pro", "proj-1").unwrap();
+        let parts = payload["request"]["contents"][0]["parts"].as_array().unwrap();
+        // The string `input` produces a text part, and the message contributes the image.
+        assert!(parts.iter().any(|p| p.get("text").is_some()));
+        assert!(parts.iter().any(|p| p.get("file_data").is_some()));
     }
 }

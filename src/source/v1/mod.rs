@@ -5,6 +5,7 @@ use crate::source::{RouteError, RoutedRequest};
 
 pub mod codex;
 pub mod provider;
+pub mod multimodal;
 pub mod response;
 pub mod route;
 

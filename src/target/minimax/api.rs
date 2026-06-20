@@ -6,6 +6,7 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
+use crate::source::v1::multimodal::openai_chat_content;
 use serde_json::{json, Value};
 use std::time::Duration;
 use uuid::Uuid;
@@ -564,10 +565,10 @@ fn build_chat_messages(raw: &Value) -> Result<Option<Value>, String> {
                 "tool" => "tool",
                 other => other,
             };
-            let content = flatten_message_content(message.get("content"));
+            let content = openai_chat_content(message.get("content"));
             let mut entry = json!({
                 "role": role,
-                "content": content
+                "content": content.unwrap_or(Value::String(String::new()))
             });
             if let Some(name) = message.get("name").and_then(|v| v.as_str()) {
                 entry["name"] = json!(name);
@@ -649,8 +650,8 @@ fn input_item_to_chat_message(item: &Value) -> Result<Option<Value>, String> {
                 "tool" => "tool",
                 other => other,
             };
-            let content = flatten_message_content(item.get("content"));
-            let mut entry = json!({ "role": role, "content": content });
+            let content = openai_chat_content(item.get("content"));
+            let mut entry = json!({ "role": role, "content": content.unwrap_or(Value::String(String::new())) });
             if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
                 entry["name"] = json!(name);
             }
@@ -722,41 +723,7 @@ fn input_item_to_chat_message(item: &Value) -> Result<Option<Value>, String> {
     }
 }
 
-fn flatten_message_content(value: Option<&Value>) -> Value {
-    let Some(value) = value else {
-        return Value::String(String::new());
-    };
-    if let Some(text) = value.as_str() {
-        return Value::String(text.to_string());
-    }
-    if let Some(arr) = value.as_array() {
-        let mut parts = Vec::new();
-        for part in arr {
-            if let Some(text) = part
-                .get("text")
-                .and_then(|v| v.as_str())
-                .or_else(|| part.get("input_text").and_then(|v| v.as_str()))
-                .or_else(|| part.get("output_text").and_then(|v| v.as_str()))
-            {
-                if !text.is_empty() {
-                    parts.push(text.to_string());
-                }
-            } else if let Some(text) = part.as_str() {
-                if !text.is_empty() {
-                    parts.push(text.to_string());
-                }
-            }
-        }
-        if parts.is_empty() {
-            return Value::String(String::new());
-        }
-        return Value::String(parts.join("\n"));
-    }
-    if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
-        return Value::String(text.to_string());
-    }
-    Value::String(String::new())
-}
+
 
 fn build_chat_tools(raw: &Value) -> Option<Value> {
     let tools = raw.get("tools")?.as_array()?;
@@ -1501,6 +1468,106 @@ mod tests {
         assert_eq!(payload["messages"][3]["role"], "tool");
         assert_eq!(payload["messages"][3]["tool_call_id"], "call_1");
         assert_eq!(payload["messages"][3]["content"], "ok");
+    }
+
+    #[test]
+    fn openai_chat_content_passes_through_openai_image_url() {
+        let value = json!([
+            { "type": "text", "text": "describe" },
+            { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
+        ]);
+        let out = openai_chat_content(Some(&value)).unwrap();
+        let arr = out.as_array().expect("multimodal content must be an array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "describe");
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(arr[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
+
+    #[test]
+    fn openai_chat_content_normalizes_responses_input_image() {
+        // Codex Responses API shape: input_image with image_url as a string
+        let value = json!([
+            { "type": "input_text", "text": "what is this?" },
+            { "type": "input_image", "image_url": "data:image/jpeg;base64,BBBB" }
+        ]);
+        let out = openai_chat_content(Some(&value)).unwrap();
+        let arr = out.as_array().expect("must be array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "what is this?");
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(arr[1]["image_url"]["url"], "data:image/jpeg;base64,BBBB");
+    }
+
+    #[test]
+    fn openai_chat_content_collapses_text_only_to_string() {
+        let value = json!([
+            { "type": "input_text", "text": "hello " },
+            { "type": "input_text", "text": "world" }
+        ]);
+        let out = openai_chat_content(Some(&value)).unwrap();
+        assert_eq!(out, "hello \nworld");
+    }
+
+    #[test]
+    fn openai_chat_content_handles_image_only_array() {
+        let value = json!([
+            { "type": "input_image", "image_url": "https://example.com/x.png" }
+        ]);
+        let out = openai_chat_content(Some(&value)).unwrap();
+        let arr = out.as_array().expect("must be array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "image_url");
+        assert_eq!(arr[0]["image_url"]["url"], "https://example.com/x.png");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_preserves_responses_input_image() {
+        let raw = json!({
+            "model": "MiniMax-Text-01",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        { "type": "input_text", "text": "describe the screenshot" },
+                        { "type": "input_image", "image_url": "data:image/png;base64,ZZZZ" }
+                    ]
+                }
+            ]
+        });
+        let payload = build_chat_completions_payload(&raw, "MiniMax-Text-01").unwrap();
+        let content = &payload["messages"][0]["content"];
+        let arr = content.as_array().expect("multimodal content must be an array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "describe the screenshot");
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(arr[1]["image_url"]["url"], "data:image/png;base64,ZZZZ");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_preserves_chat_message_image() {
+        let raw = json!({
+            "model": "MiniMax-M3",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "what is this?" },
+                        { "type": "image_url", "image_url": { "url": "data:image/png;base64,CCCC" } }
+                    ]
+                }
+            ]
+        });
+        let payload = build_chat_completions_payload(&raw, "MiniMax-M3").unwrap();
+        let content = &payload["messages"][0]["content"];
+        let arr = content.as_array().expect("multimodal content must be an array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["text"], "what is this?");
+        assert_eq!(arr[1]["image_url"]["url"], "data:image/png;base64,CCCC");
     }
 
     #[test]

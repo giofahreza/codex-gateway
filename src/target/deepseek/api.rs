@@ -5,6 +5,7 @@ use axum::{
     response::IntoResponse,
 };
 use bytes::Bytes;
+use crate::source::v1::multimodal::{classify_content, is_data_url, split_data_url, PartKind};
 use serde_json::{json, Value};
 use std::time::Duration;
 use uuid::Uuid;
@@ -457,8 +458,8 @@ fn chat_messages_to_anthropic(
                     if let Some(reasoning) = assistant_reasoning_text(message) {
                         content.push(json!({ "type": "thinking", "thinking": reasoning }));
                     }
-                    if let Some(text) = extract_text_value(message.get("content")) {
-                        content.push(json!({ "type": "text", "text": text }));
+                    for block in anthropic_content_blocks(&message["content"]) {
+                        content.push(block);
                     }
                     let mut retained_ids = Vec::new();
                     for tool_call in tool_calls {
@@ -500,10 +501,11 @@ fn chat_messages_to_anthropic(
 
                     index = next;
                 } else {
-                    if let Some(text) = extract_text_value(message.get("content")) {
+                    let blocks = anthropic_content_blocks(&message["content"]);
+                    if !blocks.is_empty() {
                         out.push(json!({
                             "role": "assistant",
-                            "content": [{ "type": "text", "text": text }]
+                            "content": blocks
                         }));
                     }
                     index += 1;
@@ -519,10 +521,11 @@ fn chat_messages_to_anthropic(
                 index += 1;
             }
             _ => {
-                if let Some(text) = extract_text_value(message.get("content")) {
+                let blocks = anthropic_content_blocks(&message["content"]);
+                if !blocks.is_empty() {
                     out.push(json!({
                         "role": "user",
-                        "content": [{ "type": "text", "text": text }]
+                        "content": blocks
                     }));
                 }
                 index += 1;
@@ -720,11 +723,14 @@ fn normalize_chat_messages(
     let mut out = Vec::new();
     for message in messages {
         let role = normalize_message_role(message.get("role").and_then(|v| v.as_str()));
-        let content = extract_text_value(message.get("content"));
-        let content_text = content.clone().unwrap_or_default();
+        // Preserve the original content shape (string or array) so the
+        // downstream Anthropic-format builder can produce text + image
+        // blocks. The string form is left untouched for plain-text
+        // messages; the array form is forwarded as-is.
+        let original_content = message.get("content").cloned().unwrap_or(Value::String(String::new()));
         let mut normalized = json!({
             "role": role,
-            "content": content_text
+            "content": original_content
         });
 
         if role == "assistant" {
@@ -737,7 +743,6 @@ fn normalize_chat_messages(
                 normalized["reasoning_content"] = json!(reasoning_content);
             }
             if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
-                normalized["content"] = json!(content.clone().unwrap_or_default());
                 normalized["tool_calls"] =
                     serde_json::Value::Array(normalize_direct_tool_calls(tool_calls)?);
             }
@@ -749,14 +754,13 @@ fn normalize_chat_messages(
             normalized["tool_call_id"] = json!(tool_call_id);
         }
 
-        if role != "assistant"
-            && role != "tool"
-            && content
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_none()
-        {
+        // Skip messages that have no usable content.
+        let has_content = match normalized.get("content") {
+            Some(Value::String(s)) => !s.trim().is_empty(),
+            Some(Value::Array(a)) => !a.is_empty(),
+            _ => false,
+        };
+        if role != "assistant" && role != "tool" && !has_content {
             continue;
         }
         out.push(normalized);
@@ -922,14 +926,14 @@ fn build_messages_from_input(
             }
             _ => {
                 let role = normalize_message_role(item.get("role").and_then(|v| v.as_str()));
-                let content = extract_text_value(Some(item));
+                let blocks = anthropic_content_blocks(item);
                 let direct_tool_calls = item.get("tool_calls").and_then(|v| v.as_array());
 
                 if role == "assistant" && direct_tool_calls.is_some() {
                     flush_pending_assistant_turn(&mut messages, &mut pending);
                     let mut assistant = json!({
                         "role": "assistant",
-                        "content": content.unwrap_or_default(),
+                        "content": if blocks.is_empty() { json!("") } else { json!(blocks) },
                         "tool_calls": serde_json::Value::Array(
                             normalize_direct_tool_calls(direct_tool_calls.unwrap())?
                         )
@@ -947,7 +951,22 @@ fn build_messages_from_input(
                 }
 
                 if role == "assistant" {
-                    if let Some(text) = content {
+                    // The pending assistant turn only carries text; image
+                    // blocks are intentionally dropped here because the
+                    // OpenAI Responses API -> Anthropic adapter doesn't
+                    // support them on assistant turns.
+                    let text = blocks
+                        .iter()
+                        .filter_map(|b| {
+                            if b.get("type").and_then(|v| v.as_str()) == Some("text") {
+                                b.get("text").and_then(|v| v.as_str()).map(str::to_string)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !text.is_empty() {
                         pending.push_content(text);
                     }
                 } else if role == "tool" {
@@ -956,16 +975,29 @@ fn build_messages_from_input(
                     else {
                         return Err("tool items require tool_call_id".to_string());
                     };
+                    // Tool result content must remain a string (or array
+                    // of blocks). We forward text-only content as-is.
+                    let tool_text = blocks
+                        .iter()
+                        .filter_map(|b| {
+                            if b.get("type").and_then(|v| v.as_str()) == Some("text") {
+                                b.get("text").and_then(|v| v.as_str()).map(str::to_string)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     messages.push(json!({
                         "role": "tool",
                         "tool_call_id": tool_call_id,
-                        "content": content.unwrap_or_default()
+                        "content": tool_text
                     }));
-                } else if let Some(text) = content {
+                } else if !blocks.is_empty() {
                     flush_pending_assistant_turn(&mut messages, &mut pending);
                     messages.push(json!({
                         "role": role,
-                        "content": text
+                        "content": blocks
                     }));
                 }
             }
@@ -1089,6 +1121,84 @@ fn extract_text_value(value: Option<&serde_json::Value>) -> Option<String> {
     } else {
         Some(out)
     }
+}
+
+/// Build an Anthropic `content` array of blocks from a Codex/OpenAI
+/// content value. Returns an empty vector if the value carries no usable
+/// content (caller should typically skip the message in that case).
+///
+/// Supports text parts (`{type: "text"|"input_text"|"output_text", text}`)
+/// and image parts in three shapes:
+///   - `{type: "image_url", image_url: {url: "data:..." | "https://..."}}`
+///   - `{type: "input_image", image_url: "data:..." | "https://..."}`
+///   - `{image_url: "..."}` (no type field)
+fn anthropic_content_blocks(value: &Value) -> Vec<Value> {
+    // If the value is a message-shaped object (Responses API item with
+    // `role` and `content` keys), classify the content field. Otherwise
+    // classify the value itself.
+    let target = if value.is_object() && value.get("content").is_some() {
+        value.get("content").unwrap()
+    } else {
+        value
+    };
+    // Pass-through: if the value is already an array of Anthropic-shaped
+    // blocks (e.g. produced by a prior pass through this function or
+    // forwarded as-is by normalize_chat_messages), keep it as-is.
+    if let Some(arr) = target.as_array() {
+        let all_blocks = arr.iter().all(|item| {
+            item.is_object()
+                && matches!(
+                    item.get("type").and_then(|v| v.as_str()),
+                    Some("text" | "image" | "tool_use" | "tool_result" | "thinking")
+                )
+        });
+        if all_blocks {
+            return arr.clone();
+        }
+    }
+    let parts = classify_content(Some(target));
+    let mut blocks = Vec::new();
+    for part in parts {
+        match part {
+            PartKind::Text(text) => {
+                blocks.push(json!({ "type": "text", "text": text }));
+            }
+            PartKind::Image(url) => {
+                if let Some(block) = anthropic_image_block(&url) {
+                    blocks.push(block);
+                }
+            }
+            PartKind::Other(_) => {
+                // Unknown part types are skipped; Anthropic has a fixed
+                // block vocabulary and we only forward shapes we know.
+            }
+        }
+    }
+    blocks
+}
+
+fn anthropic_image_block(url: &str) -> Option<Value> {
+    if is_data_url(url) {
+        let (mime_type, payload) = split_data_url(url)?;
+        return Some(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": mime_type,
+                "data": payload,
+            }
+        }));
+    }
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return Some(json!({
+            "type": "image",
+            "source": {
+                "type": "url",
+                "url": url,
+            }
+        }));
+    }
+    None
 }
 
 fn extract_reasoning_text(item: &serde_json::Value) -> Option<String> {
@@ -1551,6 +1661,51 @@ mod tests {
         assert_eq!(messages[1]["content"][1]["text"], "Checking.");
         assert_eq!(messages[1]["content"][2]["type"], "tool_use");
         assert_eq!(messages[1]["content"][2]["id"], "call_shell");
+    }
+
+    #[test]
+    fn build_anthropic_payload_passes_through_image_in_responses_input() {
+        let request = json!({
+            "model": "deepseek-v4-pro",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "describe" },
+                    { "type": "input_image", "image_url": "data:image/png;base64,AAAA" }
+                ]
+            }]
+        });
+        let payload = build_anthropic_payload(&request, "deepseek-v4-pro").unwrap();
+        let content = payload["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "describe");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "AAAA");
+    }
+
+    #[test]
+    fn build_anthropic_payload_passes_through_image_in_chat_messages() {
+        let request = json!({
+            "model": "deepseek-v4-pro",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "describe" },
+                    { "type": "image_url", "image_url": { "url": "https://example.com/x.png" } }
+                ]
+            }]
+        });
+        let payload = build_anthropic_payload(&request, "deepseek-v4-pro").unwrap();
+        let content = payload["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "url");
+        assert_eq!(content[1]["source"]["url"], "https://example.com/x.png");
     }
 
     #[test]
