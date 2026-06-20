@@ -46,6 +46,11 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
     axum::Json(serde_json::json!({ "accounts": accounts }))
 }
 
+pub async fn quota_json(State(state): State<crate::AppState>) -> impl IntoResponse {
+    let accounts = super::quota::get_quota_summaries(&state).await;
+    axum::Json(serde_json::json!({ "accounts": accounts }))
+}
+
 pub async fn login_start(
     State(state): State<crate::AppState>,
     method: Method,
@@ -289,6 +294,8 @@ mod tests {
                 agw_quota_cache: Arc::new(Mutex::new(HashMap::new())),
                 gemini_quota_cache: Arc::new(Mutex::new(HashMap::new())),
                 qwen_quota_cache: Arc::new(Mutex::new(HashMap::new())),
+                minimax_quota_cache: Arc::new(Mutex::new(HashMap::new())),
+                deepseek_quota_cache: Arc::new(Mutex::new(HashMap::new())),
                 oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 agw_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),

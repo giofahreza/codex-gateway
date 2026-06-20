@@ -1402,6 +1402,8 @@ mod tests {
                 agw_quota_cache: Arc::new(Mutex::new(HashMap::new())),
                 gemini_quota_cache: Arc::new(Mutex::new(HashMap::new())),
                 qwen_quota_cache: Arc::new(Mutex::new(HashMap::new())),
+                minimax_quota_cache: Arc::new(Mutex::new(HashMap::new())),
+                deepseek_quota_cache: Arc::new(Mutex::new(HashMap::new())),
                 oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 agw_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),

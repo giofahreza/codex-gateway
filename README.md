@@ -258,6 +258,94 @@ sed -n 's/^data: //p' "$tmp" \
   | base64 -d > /tmp/antigravity-image.png
 ```
 
+## Image Input Support
+
+The gateway forwards image parts from Codex Responses API requests to every upstream target. The client can attach images using either of these content-part shapes:
+
+```json
+{
+  "type": "input_image",
+  "image_url": "data:image/png;base64,...."
+}
+```
+
+```json
+{
+  "type": "image_url",
+  "image_url": { "url": "https://example.com/x.png" }
+}
+```
+
+Each target translates the input into its own native content shape:
+
+- **Codex** (passthrough) — native Responses API, no translation.
+- **Grok** (passthrough) — native Responses API, no translation.
+- **MiniMax / Qwen** — OpenAI Chat-Completions content array `[{type: "text", text: ...}, {type: "image_url", image_url: {url: ...}}]`.
+- **DeepSeek** — Anthropic Messages content array with `text` blocks and `image` blocks (base64 or url source).
+- **Gemini** — Google Generative `parts` array with `text`, `inline_data` (data URL), or `file_data` (remote URL).
+- **Antigravity** — same as Gemini, but routed through the Antigravity Cloud endpoint.
+
+Text-only requests are still flattened to a string `content` for backward compatibility — only requests that contain image parts produce a content array.
+
+### Model compatibility on this server
+
+This list reflects the models exposed by the live `/v1/models` endpoint on the gateway host (`DEPLOY_HOST:DEPLOY_PORT` as of the latest deploy) and whether each one actually accepted an attached image in a smoke test against a real screenshot.
+
+#### ✅ Receives image correctly
+
+| Provider | Models |
+|---|---|
+| minimax | `MiniMax-M3` (note: `MiniMax-M2.7` and the older `MiniMax-M2.x` line are text-only) |
+| openai (codex) | `codex-auto-review`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5` |
+| gemini | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-3-pro` |
+| antigravity | `gemini-2.5-flash-thinking`, `gemini-3.1-flash-image`, `gemini-3.1-flash-lite`, `gemini-3.1-pro-low`, `gemini-3.3-flash-extra-low`, `gemini-3.3-flash-low`, `gemini-3-flash-agent`, `gemini-pro-agent`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking` |
+| qwen | `qwen3-vl-plus` (dedicated VL model), `qwen3-coder-plus`, `qwen3.5-plus`, `qwen3.5-flash`, `qwen3.5-max-2026-03-08`, `qwen3.5-27b`, `qwen3.5-omni-flash`, `qwen3.5-omni-plus`, `qwen3.5-397b-a17b`, `qwen3.6-plus`, `qwen3.6-plus-preview`, `qwen3.6-max-preview`, `qwen3.7-plus`, `qwen3.7-max`, `qwen-latest-series-invite-beta-v16`, `qwen-latest-series-invite-beta-v24`, `qwen-plus-2025-07-28`, `qwen3-omni-flash-2025-12-01` |
+| deepseek | `deepseek-v4-pro`, `deepseek-v4-flash` |
+
+#### ❌ Cannot receive image (model itself is text-only)
+
+| Provider | Models | Why |
+|---|---|---|
+| minimax | `MiniMax-M2`, `MiniMax-M2.1`, `MiniMax-M2.1-highspeed`, `MiniMax-M2.5`, `MiniMax-M2.5-highspeed`, `MiniMax-M2.7`, `MiniMax-M2.7-highspeed` | Only `MiniMax-M3` supports vision. The M2.x family replies "Cannot see image. Please describe." |
+
+#### ⚠️ Upstream model is not available in this account (gateway forwards correctly, upstream 404s/400s)
+
+These are not gateway bugs — the request reaches the upstream, the upstream just doesn't have the model. Pick a different model in the same family.
+
+| Model | Upstream error |
+|---|---|
+| `gemini-2.5-flash-image-preview` | Gemini 404 — not in the configured project |
+| `gemini-3-flash` | Gemini 404 — not in the configured project |
+| `gemini-3.1-pro-high` | Antigravity 400 — not in the antigravity catalog |
+| `gemini-3-pro-image` | Antigravity 404 — not in the antigravity catalog |
+
+#### ⚠️ Upstream explicitly rejects image (model doesn't support vision)
+
+| Model | Why |
+|---|---|
+| `gpt-5.3-codex-spark` | OpenAI returns 400 "Model 'gpt-5.3-codex-spark' does not support image inputs". Use `gpt-5.4`, `gpt-5.5`, etc. for vision. |
+
+#### 🔑 Auth / permission issue (image support not tested)
+
+| Model | Why |
+|---|---|
+| `gpt-oss-120b-medium` | The current Codex account isn't entitled to this model ("not supported when using Codex with a ChatGPT account"). |
+| All `grok-*` models | The Grok OAuth token expired on `2026-06-19T14:16:17+00:00`. Re-auth the Grok account on the dashboard (`/admin` → Grok → re-auth) to restore. Once refreshed, the standard grok chat models accept image input. |
+
+#### Best models for image input on this server
+
+Ranked by quality of the answer in the smoke test against the same screenshot:
+
+1. `gemini-2.5-pro`
+2. `gpt-5.5`
+3. `claude-sonnet-4-6`
+4. `claude-opus-4-6-thinking`
+5. `qwen3-vl-plus` (Qwen's dedicated vision-language model)
+6. `qwen3.7-plus`
+7. `MiniMax-M3`
+
+```
+
 ## DeepSeek
 
 DeepSeek still uses the same source-facing `/v1/*` API after you add credentials.

@@ -57,6 +57,8 @@ struct AppState {
     agw_quota_cache: Arc<Mutex<HashMap<String, target::antigravity::quota::QuotaCacheEntry>>>,
     gemini_quota_cache: Arc<Mutex<HashMap<String, target::gemini::quota::QuotaCacheEntry>>>,
     qwen_quota_cache: Arc<Mutex<HashMap<String, target::qwen::quota::QuotaCacheEntry>>>,
+    minimax_quota_cache: Arc<Mutex<HashMap<String, target::minimax::quota::QuotaCacheEntry>>>,
+    deepseek_quota_cache: Arc<Mutex<HashMap<String, target::deepseek::quota::QuotaCacheEntry>>>,
     oauth_pending: Arc<Mutex<HashMap<String, PendingOAuth>>>,
     agw_oauth_pending: Arc<Mutex<HashMap<String, target::antigravity::auth::PendingOAuth>>>,
     gemini_oauth_pending: Arc<Mutex<HashSet<String>>>,
@@ -246,6 +248,8 @@ async fn main() {
         agw_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         gemini_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         qwen_quota_cache: Arc::new(Mutex::new(HashMap::new())),
+        minimax_quota_cache: Arc::new(Mutex::new(HashMap::new())),
+        deepseek_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         agw_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),
@@ -278,6 +282,8 @@ async fn main() {
         .route("/login/antigravity/submit", any(agw_login_submit_route))
         .route("/gemini/accounts.json", any(gemini_accounts_route))
         .route("/gemini/quota.json", any(gemini_quota_json_route))
+        .route("/minimax/quota.json", any(minimax_quota_json_route))
+        .route("/deepseek/quota.json", any(deepseek_quota_json_route))
         .route("/login/gemini/start", any(gemini_login_start_route))
         .route("/login/gemini/submit", any(gemini_login_submit_route))
         .route("/qwen/accounts.json", any(qwen_accounts_route))
@@ -1317,11 +1323,20 @@ async fn dashboard() -> impl IntoResponse {
         if (!res) return;
         var data = await res.json();
         var accounts = data.accounts || [];
-        var cards = accounts.map(buildProviderCard).join('');
+        var cards = accounts.map(function(a) { return buildProviderCard(a, lastDeepSeekQuota.get(a.file_name || a.label)); }).join('');
         document.getElementById('deepseekCards').innerHTML = cards || '<div class="empty-state">No DeepSeek accounts</div>';
         document.getElementById('deepseekBadgeCount').textContent = accounts.length + ' accounts';
       }
-      function buildMiniMaxCard(a) {
+      async function refreshDeepSeekQuota() {
+        const res = await adminFetch('/deepseek/quota.json');
+        if (!res) return;
+        const quota = await res.json();
+        const quotaMap = new Map();
+        (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
+        lastDeepSeekQuota = quotaMap;
+        refreshDeepSeekAccounts();
+      }
+      function buildMiniMaxCard(a, quota) {
         var dot = a.enabled ? '#2ecc71' : '#e74c3c';
         var toggleLabel = a.enabled ? 'Disable' : 'Enable';
         var actions = '';
@@ -1351,17 +1366,29 @@ async fn dashboard() -> impl IntoResponse {
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + (a.label || a.account_id || 'MiniMax') + '</span><span class="card-actions">' + actions + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
+          + renderQuotaBars(quota)
           + meta
           + '</div>';
       }
+      let lastMiniMaxQuota = new Map();
+      let lastDeepSeekQuota = new Map();
       async function refreshMiniMaxAccounts() {
         var res = await adminFetch('/minimax/accounts.json');
         if (!res) return;
         var data = await res.json();
         var accounts = data.accounts || [];
-        var cards = accounts.map(buildMiniMaxCard).join('');
+        var cards = accounts.map(function(a) { return buildMiniMaxCard(a, lastMiniMaxQuota.get(a.file_name || a.label)); }).join('');
         document.getElementById('minimaxCards').innerHTML = cards || '<div class="empty-state">No MiniMax accounts</div>';
         document.getElementById('minimaxBadgeCount').textContent = accounts.length + ' accounts';
+      }
+      async function refreshMiniMaxQuota() {
+        const res = await adminFetch('/minimax/quota.json');
+        if (!res) return;
+        const quota = await res.json();
+        const quotaMap = new Map();
+        (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
+        lastMiniMaxQuota = quotaMap;
+        refreshMiniMaxAccounts();
       }
       async function refreshGrokAccounts() {
         var res = await adminFetch('/grok/accounts.json');
@@ -2013,8 +2040,10 @@ async fn dashboard() -> impl IntoResponse {
         refreshGeminiAccounts();
         refreshQwenAccounts();
         refreshDeepSeekAccounts();
+        refreshDeepSeekQuota();
         refreshGrokAccounts();
         refreshMiniMaxAccounts();
+        refreshMiniMaxQuota();
       }
       async function toggleCred(fileName, enabled) {
         const res = await adminFetch('/credentials/toggle', {
@@ -2035,8 +2064,10 @@ async fn dashboard() -> impl IntoResponse {
         refreshGeminiAccounts();
         refreshQwenAccounts();
         refreshDeepSeekAccounts();
+        refreshDeepSeekQuota();
         refreshGrokAccounts();
         refreshMiniMaxAccounts();
+        refreshMiniMaxQuota();
       }
       async function startDashboard() {
         refresh();
@@ -2046,8 +2077,10 @@ async fn dashboard() -> impl IntoResponse {
         refreshGeminiQuota().then(() => refreshGeminiAccounts());
         refreshQwenAccounts();
         refreshDeepSeekAccounts();
+        refreshDeepSeekQuota();
         refreshGrokAccounts();
         refreshMiniMaxAccounts();
+        refreshMiniMaxQuota();
         if (dashboardIntervalsStarted) {
           return;
         }
@@ -2056,6 +2089,8 @@ async fn dashboard() -> impl IntoResponse {
         setInterval(() => { if (adminAuthenticated) refreshQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshAgwQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshGeminiQuota(); }, 60000);
+        setInterval(() => { if (adminAuthenticated) refreshDeepSeekQuota(); }, 60000);
+        setInterval(() => { if (adminAuthenticated) refreshMiniMaxQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshAgwAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshGeminiAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshQwenAccounts(); }, 10000);
@@ -2372,6 +2407,24 @@ async fn gemini_quota_json_route(State(state): State<AppState>, headers: HeaderM
         return response;
     }
     target::gemini::admin::quota_json(State(state))
+        .await
+        .into_response()
+}
+
+async fn minimax_quota_json_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::minimax::admin::quota_json(State(state))
+        .await
+        .into_response()
+}
+
+async fn deepseek_quota_json_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::deepseek::admin::quota_json(State(state))
         .await
         .into_response()
 }
