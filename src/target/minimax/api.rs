@@ -430,6 +430,9 @@ async fn stream_chat_completions(
         let response = accumulator.to_response();
         let metrics = crate::usage_metrics_from_response_value(&response);
         crate::record_minimax_success(&usage_state, &usage_context, &metrics);
+        for delta in response_text_delta_events(&response) {
+            yield Ok(delta);
+        }
         yield Ok(response_sse_event(&json!({
             "type": "response.completed",
             "response": response
@@ -1069,6 +1072,24 @@ fn done_sse_event() -> Bytes {
     Bytes::from_static(b"data: [DONE]\n\n")
 }
 
+fn response_text_delta_events(response: &Value) -> Vec<Bytes> {
+    response
+        .get("output_text")
+        .and_then(|v| v.as_str())
+        .map(|text| {
+            text.split_inclusive('\n')
+                .filter(|delta| !delta.is_empty())
+                .map(|delta| {
+                    response_sse_event(&json!({
+                        "type": "response.output_text.delta",
+                        "delta": delta
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
     let id = chat
         .get("id")
@@ -1453,12 +1474,16 @@ mod tests {
         }));
 
         let response = accumulator.to_response();
+        let deltas = response_text_delta_events(&response);
         let completed = response_sse_event(&json!({
             "type": "response.completed",
             "response": response.clone()
         }));
+        let delta_text = String::from_utf8(deltas[0].to_vec()).unwrap();
         let completed_text = String::from_utf8(completed.to_vec()).unwrap();
 
+        assert!(delta_text.contains("response.output_text.delta"));
+        assert!(delta_text.contains("\"Hi\""));
         assert!(completed_text.contains("response.completed"));
         assert_eq!(response["id"], "resp_chatcmpl_1");
         assert_eq!(response["output_text"], "Hi");
