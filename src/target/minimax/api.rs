@@ -1184,45 +1184,7 @@ fn response_output_item_events(output_index: usize, item: &Value) -> Vec<Bytes> 
                 })));
             }
         }
-        Some("reasoning") => {
-            if let Some(summary) = reasoning_summary_text(item) {
-                let item_id = response_item_id(item);
-                events.push(response_sse_event(&json!({
-                    "type": "response.reasoning_summary_part.added",
-                    "item_id": item_id,
-                    "output_index": output_index,
-                    "summary_index": 0,
-                    "part": {
-                        "type": "summary_text",
-                        "text": ""
-                    }
-                })));
-                events.push(response_sse_event(&json!({
-                    "type": "response.reasoning_summary_text.delta",
-                    "item_id": item_id,
-                    "output_index": output_index,
-                    "summary_index": 0,
-                    "delta": summary
-                })));
-                events.push(response_sse_event(&json!({
-                    "type": "response.reasoning_summary_text.done",
-                    "item_id": item_id,
-                    "output_index": output_index,
-                    "summary_index": 0,
-                    "text": summary
-                })));
-                events.push(response_sse_event(&json!({
-                    "type": "response.reasoning_summary_part.done",
-                    "item_id": item_id,
-                    "output_index": output_index,
-                    "summary_index": 0,
-                    "part": {
-                        "type": "summary_text",
-                        "text": summary
-                    }
-                })));
-            }
-        }
+        Some("reasoning") => {}
         _ => {}
     }
 
@@ -1250,20 +1212,6 @@ fn response_item_id(item: &Value) -> String {
         .or_else(|| item.get("call_id").and_then(|v| v.as_str()))
         .map(str::to_string)
         .unwrap_or_else(|| format!("item_{}", Uuid::new_v4().simple()))
-}
-
-fn reasoning_summary_text(item: &Value) -> Option<&str> {
-    item.get("summary")
-        .and_then(|v| v.as_array())
-        .and_then(|summary| summary.first())
-        .and_then(|part| part.get("text"))
-        .and_then(|v| v.as_str())
-        .filter(|text| !text.is_empty())
-        .or_else(|| {
-            item.get("content")
-                .and_then(|v| v.as_str())
-                .filter(|text| !text.is_empty())
-        })
 }
 
 fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {

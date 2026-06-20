@@ -5377,25 +5377,81 @@ fn codex_provider_model(
         serde_json::json!([])
     };
 
-    serde_json::json!({
+    let mut model = serde_json::json!({
         "slug": slug,
+        "priority": 1,
         "display_name": display_name,
         "description": description,
         "context_window": context_window,
         "max_context_window": context_window,
         "input_modalities": ["text"],
         "supports_parallel_tool_calls": true,
+        "supports_image_detail_original": false,
+        "supports_search_tool": false,
         "support_verbosity": false,
         "default_verbosity": "low",
         "supported_in_api": true,
         "visibility": "list",
         "shell_type": "shell_command",
         "tool_mode": null,
+        "apply_patch_tool_type": "freeform",
+        "web_search_tool_type": "text_and_image",
         "default_reasoning_level": if supports_reasoning { "medium" } else { "" },
         "supported_reasoning_levels": reasoning_levels,
+        "default_reasoning_summary": if supports_reasoning { "auto" } else { "" },
+        "reasoning_summary_format": "experimental",
         "supports_reasoning_summaries": false,
+        "prefer_websockets": false,
+        "use_responses_lite": false,
         "base_instructions": "You are a coding agent. Follow the user's instructions and use tools carefully."
-    })
+    });
+
+    let object = model
+        .as_object_mut()
+        .expect("codex provider model metadata is an object");
+    object.insert(
+        "auto_compact_token_limit".to_string(),
+        serde_json::Value::Null,
+    );
+    object.insert(
+        "minimal_client_version".to_string(),
+        serde_json::Value::Null,
+    );
+    object.insert("comp_hash".to_string(), serde_json::Value::Null);
+    object.insert("availability_nux".to_string(), serde_json::Value::Null);
+    object.insert("upgrade".to_string(), serde_json::Value::Null);
+    object.insert(
+        "available_in_plans".to_string(),
+        serde_json::json!(["free", "plus", "pro", "team", "enterprise"]),
+    );
+    object.insert("additional_speed_tiers".to_string(), serde_json::json!([]));
+    object.insert("default_service_tier".to_string(), serde_json::Value::Null);
+    object.insert("service_tiers".to_string(), serde_json::json!([]));
+    object.insert(
+        "experimental_supported_tools".to_string(),
+        serde_json::json!([]),
+    );
+    object.insert("multi_agent_version".to_string(), serde_json::Value::Null);
+    object.insert(
+        "truncation_policy".to_string(),
+        serde_json::json!({
+            "mode": "tokens",
+            "limit": context_window
+        }),
+    );
+    object.insert(
+        "auto_review_model_override".to_string(),
+        serde_json::Value::Null,
+    );
+    object.insert(
+        "model_messages".to_string(),
+        serde_json::json!({
+            "instructions_template": "You are a coding agent. Follow the user's instructions and use tools carefully.\n\n{{ personality }}",
+            "instructions_variables": {}
+        }),
+    );
+
+    model
 }
 
 fn should_drop_incoming_header(name: &str) -> bool {
