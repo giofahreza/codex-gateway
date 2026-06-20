@@ -1,3 +1,4 @@
+use crate::source::v1::multimodal::{classify_content, is_data_url, split_data_url, PartKind};
 use axum::{
     body::Body,
     extract::State,
@@ -6,7 +7,6 @@ use axum::{
 };
 use base64::Engine;
 use bytes::Bytes;
-use crate::source::v1::multimodal::{classify_content, is_data_url, split_data_url, PartKind};
 use serde_json::{json, Value};
 use std::time::Duration;
 use uuid::Uuid;
@@ -375,10 +375,7 @@ fn build_google_payload(
 fn extract_prompt_parts(request_value: &Value) -> Result<Vec<Value>, String> {
     let mut out: Vec<Value> = Vec::new();
 
-    if let Some(prompt) = request_value
-        .get("input")
-        .and_then(|value| value.as_str())
-    {
+    if let Some(prompt) = request_value.get("input").and_then(|value| value.as_str()) {
         if !prompt.trim().is_empty() {
             out.push(json!({ "text": prompt.trim() }));
         }
@@ -607,31 +604,116 @@ fn render_response_sse(response: &serde_json::Value) -> Vec<u8> {
         .as_slice(),
     );
 
-    if let Some(text) = response.get("output_text").and_then(|value| value.as_str()) {
-        if !text.is_empty() {
-            for delta in text_delta_chunks(text) {
-                chunks.extend_from_slice(
-                    sse_json(&json!({
-                        "type": "response.output_text.delta",
-                        "delta": delta
-                    }))
-                    .as_slice(),
-                );
+    if let Some(output) = response.get("output").and_then(|value| value.as_array()) {
+        for (output_index, item) in output.iter().enumerate() {
+            let mut in_progress = item.clone();
+            if let Some(object) = in_progress.as_object_mut() {
+                if object.contains_key("status") {
+                    object.insert("status".to_string(), json!("in_progress"));
+                }
             }
-        }
-    }
+            chunks.extend_from_slice(
+                sse_json(&json!({
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": in_progress
+                }))
+                .as_slice(),
+            );
 
-    if let Some(images) = response.get("images").and_then(|value| value.as_array()) {
-        for image in images {
-            if let Some(data) = image.get("b64_json").and_then(|value| value.as_str()) {
-                chunks.extend_from_slice(
-                    sse_json(&json!({
-                        "type": "response.image_generation_call.partial_image",
-                        "partial_image_b64": data
-                    }))
-                    .as_slice(),
-                );
+            match item.get("type").and_then(|value| value.as_str()) {
+                Some("message") => {
+                    let item_id = item
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    if let Some(content) = item.get("content").and_then(|value| value.as_array()) {
+                        for (content_index, part) in content.iter().enumerate() {
+                            if part.get("type").and_then(|value| value.as_str())
+                                != Some("output_text")
+                            {
+                                continue;
+                            }
+                            let text = part
+                                .get("text")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("");
+                            chunks.extend_from_slice(
+                                sse_json(&json!({
+                                    "type": "response.content_part.added",
+                                    "item_id": item_id,
+                                    "output_index": output_index,
+                                    "content_index": content_index,
+                                    "part": {
+                                        "type": "output_text",
+                                        "text": "",
+                                        "annotations": part.get("annotations").cloned().unwrap_or_else(|| json!([]))
+                                    }
+                                }))
+                                .as_slice(),
+                            );
+                            for delta in text_delta_chunks(text) {
+                                chunks.extend_from_slice(
+                                    sse_json(&json!({
+                                        "type": "response.output_text.delta",
+                                        "item_id": item_id,
+                                        "output_index": output_index,
+                                        "content_index": content_index,
+                                        "delta": delta
+                                    }))
+                                    .as_slice(),
+                                );
+                            }
+                            chunks.extend_from_slice(
+                                sse_json(&json!({
+                                    "type": "response.output_text.done",
+                                    "item_id": item_id,
+                                    "output_index": output_index,
+                                    "content_index": content_index,
+                                    "text": text
+                                }))
+                                .as_slice(),
+                            );
+                            chunks.extend_from_slice(
+                                sse_json(&json!({
+                                    "type": "response.content_part.done",
+                                    "item_id": item_id,
+                                    "output_index": output_index,
+                                    "content_index": content_index,
+                                    "part": part
+                                }))
+                                .as_slice(),
+                            );
+                        }
+                    }
+                }
+                Some("image_generation_call") => {
+                    if let Some(data) = item
+                        .get("result")
+                        .and_then(|result| result.get("b64_json"))
+                        .and_then(|value| value.as_str())
+                    {
+                        chunks.extend_from_slice(
+                            sse_json(&json!({
+                                "type": "response.image_generation_call.partial_image",
+                                "output_index": output_index,
+                                "partial_image_b64": data
+                            }))
+                            .as_slice(),
+                        );
+                    }
+                }
+                _ => {}
             }
+
+            chunks.extend_from_slice(
+                sse_json(&json!({
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": item
+                }))
+                .as_slice(),
+            );
         }
     }
 
@@ -783,6 +865,13 @@ mod tests {
         serde_json::from_slice::<serde_json::Value>(&body).unwrap();
 
         let sse = String::from_utf8(render_response_sse(&response)).unwrap();
+        let item_added = sse.find("response.output_item.added").unwrap();
+        let part_added = sse.find("response.content_part.added").unwrap();
+        let text_delta = sse.find("response.output_text.delta").unwrap();
+        let item_done = sse.rfind("response.output_item.done").unwrap();
+        assert!(item_added < part_added);
+        assert!(part_added < text_delta);
+        assert!(text_delta < item_done);
         for line in sse.lines() {
             let Some(data) = line.strip_prefix("data: ") else {
                 continue;
@@ -807,7 +896,9 @@ mod tests {
             }]
         });
         let payload = build_google_payload(&request, "gemini-2.5-pro", "proj-1").unwrap();
-        let parts = payload["request"]["contents"][0]["parts"].as_array().unwrap();
+        let parts = payload["request"]["contents"][0]["parts"]
+            .as_array()
+            .unwrap();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["text"], "describe");
         assert_eq!(parts[1]["inline_data"]["mime_type"], "image/png");
@@ -827,7 +918,9 @@ mod tests {
             }]
         });
         let payload = build_google_payload(&request, "gemini-2.5-pro", "proj-1").unwrap();
-        let parts = payload["request"]["contents"][0]["parts"].as_array().unwrap();
+        let parts = payload["request"]["contents"][0]["parts"]
+            .as_array()
+            .unwrap();
         // The string `input` produces a text part, and the message contributes the image.
         assert!(parts.iter().any(|p| p.get("text").is_some()));
         assert!(parts.iter().any(|p| p.get("file_data").is_some()));
@@ -846,7 +939,9 @@ mod tests {
             }]
         });
         let payload = build_google_payload(&request, "gemini-2.5-pro", "proj-1").unwrap();
-        let parts = payload["request"]["contents"][0]["parts"].as_array().unwrap();
+        let parts = payload["request"]["contents"][0]["parts"]
+            .as_array()
+            .unwrap();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["text"], "describe");
         assert_eq!(parts[1]["inline_data"]["mime_type"], "image/png");
