@@ -3511,7 +3511,8 @@ async fn unified_v1_models_response(
     if upstream_path == "models" {
         let body = serde_json::to_vec(&serde_json::json!({
             "object": "list",
-            "data": models
+            "data": models,
+            "models": models
         }))
         .unwrap_or_default();
         return (StatusCode::OK, [("Content-Type", "application/json")], body).into_response();
@@ -3731,6 +3732,7 @@ fn model_entries_from_openai_list_bytes(body: &[u8]) -> Vec<serde_json::Value> {
     value
         .get("data")
         .and_then(|value| value.as_array())
+        .or_else(|| value.get("models").and_then(|value| value.as_array()))
         .cloned()
         .unwrap_or_default()
 }

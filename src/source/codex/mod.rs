@@ -16,6 +16,16 @@ pub fn route_to_target(
     body: Bytes,
 ) -> Result<RoutedRequest, RouteError> {
     let upstream_path = route::resolve(path, method)?;
+    if upstream_path == "models" && *method == Method::GET {
+        return Ok(RoutedRequest {
+            target: TargetModel::UnifiedV1Models,
+            upstream_path,
+            upstream_query: None,
+            upstream_body: body,
+            response_mode: crate::source::codex::response::resolve_mode("models"),
+        });
+    }
+
     if upstream_path == "responses" && *method == Method::POST {
         let target = crate::source::v1::provider::target_from_request_body(&body)
             .unwrap_or(TargetModel::Codex);
@@ -266,6 +276,22 @@ mod tests {
         assert_eq!(body["tools"][0]["function"]["description"], "run a command");
         assert_eq!(body["tools"][0]["function"]["parameters"]["type"], "object");
         assert_eq!(body["tools"][0]["function"]["strict"], true);
+    }
+
+    #[test]
+    fn codex_models_routes_to_unified_catalog() {
+        let uri: Uri = "/codex/models".parse().unwrap();
+        let routed = route_to_target(
+            "/codex/models",
+            &uri,
+            &Method::GET,
+            &HeaderMap::new(),
+            Bytes::new(),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::UnifiedV1Models);
+        assert_eq!(routed.upstream_path, "models");
     }
 }
 

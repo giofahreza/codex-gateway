@@ -136,6 +136,7 @@ pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) ->
             let body = serde_json::to_vec(&json!({
                 "object": "list",
                 "data": data,
+                "models": data,
                 "warning": err
             }))
             .unwrap_or_default();
@@ -334,7 +335,7 @@ async fn stream_chat_completions(
     base_url: &str,
     payload: &Value,
     context: &crate::UsageContext,
-    model: &str,
+    _model: &str,
     _headers: &HeaderMap,
 ) -> axum::response::Response {
     let resp = match state
@@ -459,7 +460,12 @@ fn models_to_openai_json(value: &Value) -> Result<Vec<u8>, String> {
         })
         .collect::<Vec<_>>();
 
-    serde_json::to_vec(&json!({ "object": "list", "data": data })).map_err(|e| e.to_string())
+    serde_json::to_vec(&json!({
+        "object": "list",
+        "data": data,
+        "models": data
+    }))
+    .map_err(|e| e.to_string())
 }
 
 fn build_chat_completions_payload(raw: &Value, model: &str) -> Result<Value, String> {
@@ -718,6 +724,9 @@ fn build_chat_tools(raw: &Value) -> Option<Value> {
     let mut out = Vec::new();
     for tool in tools {
         if let Some(function) = tool.get("function") {
+            if unsupported_tool_name(function.get("name").and_then(|v| v.as_str())) {
+                continue;
+            }
             let mut mapped = json!({
                 "type": "function",
                 "function": {
@@ -731,6 +740,9 @@ fn build_chat_tools(raw: &Value) -> Option<Value> {
             }
             out.push(mapped);
         } else if let Some(name) = tool.get("name").and_then(|v| v.as_str()) {
+            if unsupported_tool_name(Some(name)) {
+                continue;
+            }
             out.push(json!({
                 "type": "function",
                 "function": {
@@ -748,6 +760,10 @@ fn build_chat_tools(raw: &Value) -> Option<Value> {
     }
 }
 
+fn unsupported_tool_name(name: Option<&str>) -> bool {
+    matches!(name, Some("apply_patch"))
+}
+
 fn build_chat_tool_choice(raw: &Value) -> Option<Value> {
     let choice = raw.get("tool_choice")?;
     if let Some(value) = choice.as_str() {
@@ -755,6 +771,20 @@ fn build_chat_tool_choice(raw: &Value) -> Option<Value> {
             "auto" | "none" | "required" => Some(json!(value)),
             other => Some(json!(other)),
         };
+    }
+    if choice
+        .get("function")
+        .and_then(|function| function.get("name"))
+        .and_then(|name| name.as_str())
+        .map(|name| unsupported_tool_name(Some(name)))
+        .unwrap_or(false)
+        || choice
+            .get("name")
+            .and_then(|name| name.as_str())
+            .map(|name| unsupported_tool_name(Some(name)))
+            .unwrap_or(false)
+    {
+        return None;
     }
     Some(choice.clone())
 }
@@ -1004,6 +1034,49 @@ mod tests {
         assert_eq!(payload["messages"][0]["role"], "system");
         assert_eq!(payload["messages"][1]["content"], "hi");
         assert_eq!(payload["tools"][0]["function"]["name"], "echo");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_filters_apply_patch_tool() {
+        let raw = json!({
+            "model": "MiniMax-Text-01",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "apply_patch",
+                    "description": "patch files",
+                    "parameters": { "type": "object" }
+                },
+                {
+                    "type": "function",
+                    "name": "shell",
+                    "description": "run command",
+                    "parameters": { "type": "object" }
+                }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": { "name": "apply_patch" }
+            }
+        });
+
+        let payload = build_chat_completions_payload(&raw, "MiniMax-Text-01").unwrap();
+        assert_eq!(payload["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["tools"][0]["function"]["name"], "shell");
+        assert!(payload.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn models_to_openai_json_includes_codex_models_field() {
+        let body = models_to_openai_json(&json!({
+            "data": [{ "id": "MiniMax-M3", "owned_by": "minimax" }]
+        }))
+        .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(value["data"][0]["id"], "MiniMax-M3");
+        assert_eq!(value["models"][0]["id"], "MiniMax-M3");
     }
 
     #[test]

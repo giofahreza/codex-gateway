@@ -553,13 +553,15 @@ fn render_response_sse(response: &serde_json::Value) -> Vec<u8> {
 
     if let Some(text) = response.get("output_text").and_then(|v| v.as_str()) {
         if !text.is_empty() {
-            chunks.extend_from_slice(
-                sse_json(&json!({
-                    "type": "response.output_text.delta",
-                    "delta": text
-                }))
-                .as_slice(),
-            );
+            for delta in text_delta_chunks(text) {
+                chunks.extend_from_slice(
+                    sse_json(&json!({
+                        "type": "response.output_text.delta",
+                        "delta": delta
+                    }))
+                    .as_slice(),
+                );
+            }
         }
     }
 
@@ -596,6 +598,10 @@ fn sse_json(value: &serde_json::Value) -> Vec<u8> {
     out.push_str(&data);
     out.push_str("\n\n");
     out.into_bytes()
+}
+
+fn text_delta_chunks(text: &str) -> impl Iterator<Item = &str> {
+    text.split_inclusive('\n').filter(|chunk| !chunk.is_empty())
 }
 
 fn attach_temp_downloads(response: &mut serde_json::Value) {
@@ -692,5 +698,43 @@ fn image_extension(mime_type: &str) -> &'static str {
         "image/webp" => "webp",
         "image/gif" => "gif",
         _ => "bin",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn google_response_serializes_control_characters_as_valid_json() {
+        let upstream = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "text": "hello\nworld\t\u{0008}"
+                    }]
+                }
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 3,
+                "candidatesTokenCount": 4,
+                "totalTokenCount": 7
+            }
+        });
+
+        let response = google_to_openai_response(&upstream, "gemini-3-pro-high");
+        let body = serde_json::to_vec(&response).unwrap();
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+
+        let sse = String::from_utf8(render_response_sse(&response)).unwrap();
+        for line in sse.lines() {
+            let Some(data) = line.strip_prefix("data: ") else {
+                continue;
+            };
+            if data == "[DONE]" {
+                continue;
+            }
+            serde_json::from_str::<serde_json::Value>(data).unwrap();
+        }
     }
 }

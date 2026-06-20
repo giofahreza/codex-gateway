@@ -17,10 +17,7 @@ pub fn target_from_model(model: &str) -> TargetModel {
         TargetModel::DeepSeek
     } else if lower.starts_with("grok") {
         TargetModel::Grok
-    } else if lower.starts_with("minimax")
-        || lower.starts_with("abab")
-        || lower.starts_with("MiniMax")
-    {
+    } else if lower.starts_with("minimax") || lower.starts_with("abab") {
         TargetModel::MiniMax
     } else if lower.starts_with("claude") {
         TargetModel::Antigravity
@@ -56,6 +53,8 @@ fn is_antigravity_gemini_model(model: &str) -> bool {
         || model.ends_with("-image")
         || model.ends_with("-high")
         || model.ends_with("-low")
+        || model.ends_with("-agent")
+        || model.starts_with("gemini-3.")
 }
 
 #[cfg(test)]
@@ -84,5 +83,14 @@ mod tests {
             target_from_model("gemini-2.5-flash-thinking"),
             TargetModel::Antigravity
         );
+        assert_eq!(
+            target_from_model("gemini-3-flash-agent"),
+            TargetModel::Antigravity
+        );
+        assert_eq!(
+            target_from_model("gemini-3.1-flash-lite"),
+            TargetModel::Antigravity
+        );
+        assert_eq!(target_from_model("gemini-3-pro"), TargetModel::Gemini);
     }
 }
