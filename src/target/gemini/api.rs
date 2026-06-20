@@ -384,6 +384,28 @@ fn extract_prompt_parts(request_value: &Value) -> Result<Vec<Value>, String> {
         }
     }
 
+    if let Some(items) = request_value
+        .get("input")
+        .and_then(|value| value.as_array())
+    {
+        for item in items {
+            let role = item
+                .get("role")
+                .and_then(|value| value.as_str())
+                .unwrap_or("user");
+            // Skip non-user roles for Google's single-turn `contents` model.
+            if role != "user" {
+                continue;
+            }
+            // Responses API items have `content` (string or array of parts).
+            if let Some(content) = item.get("content") {
+                for part in classify_content(Some(content)) {
+                    push_google_part(&mut out, part);
+                }
+            }
+        }
+    }
+
     if let Some(messages) = request_value
         .get("messages")
         .and_then(|value| value.as_array())
@@ -809,5 +831,25 @@ mod tests {
         // The string `input` produces a text part, and the message contributes the image.
         assert!(parts.iter().any(|p| p.get("text").is_some()));
         assert!(parts.iter().any(|p| p.get("file_data").is_some()));
+    }
+
+    #[test]
+    fn build_google_payload_passes_through_responses_input_array() {
+        let request = json!({
+            "model": "gemini-2.5-pro",
+            "input": [{
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "describe" },
+                    { "type": "input_image", "image_url": "data:image/png;base64,AAAA" }
+                ]
+            }]
+        });
+        let payload = build_google_payload(&request, "gemini-2.5-pro", "proj-1").unwrap();
+        let parts = payload["request"]["contents"][0]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["text"], "describe");
+        assert_eq!(parts[1]["inline_data"]["mime_type"], "image/png");
+        assert_eq!(parts[1]["inline_data"]["data"], "AAAA");
     }
 }
