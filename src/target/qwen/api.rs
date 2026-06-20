@@ -1,3 +1,4 @@
+use crate::source::v1::multimodal::openai_chat_content;
 use axum::{
     body::Body,
     extract::State,
@@ -5,7 +6,6 @@ use axum::{
     response::IntoResponse,
 };
 use bytes::Bytes;
-use crate::source::v1::multimodal::openai_chat_content;
 use serde_json::json;
 use std::time::Duration;
 use uuid::Uuid;
@@ -750,61 +750,65 @@ mod tests {
         assert_eq!(usage.reasoning_tokens, 1);
         assert_eq!(usage.raw_usage, raw_usage_before);
 
-    #[test]
-    fn build_chat_payload_passes_through_image_in_responses_input() {
-        let request = json!({
-            "model": "qwen3-coder-plus",
-            "input": [{
-                "type": "message",
-                "role": "user",
-                "content": [
-                    { "type": "input_text", "text": "describe" },
-                    { "type": "input_image", "image_url": "data:image/png;base64,AAAA" }
-                ]
-            }]
-        });
-        let payload = build_chat_payload(&request, "qwen3-coder-plus").unwrap();
-        let content = payload["messages"][0]["content"].as_array().expect("multimodal must be array");
-        assert_eq!(content.len(), 2);
-        assert_eq!(content[0]["type"], "text");
-        assert_eq!(content[0]["text"], "describe");
-        assert_eq!(content[1]["type"], "image_url");
-        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
-    }
+        #[test]
+        fn build_chat_payload_passes_through_image_in_responses_input() {
+            let request = json!({
+                "model": "qwen3-coder-plus",
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        { "type": "input_text", "text": "describe" },
+                        { "type": "input_image", "image_url": "data:image/png;base64,AAAA" }
+                    ]
+                }]
+            });
+            let payload = build_chat_payload(&request, "qwen3-coder-plus").unwrap();
+            let content = payload["messages"][0]["content"]
+                .as_array()
+                .expect("multimodal must be array");
+            assert_eq!(content.len(), 2);
+            assert_eq!(content[0]["type"], "text");
+            assert_eq!(content[0]["text"], "describe");
+            assert_eq!(content[1]["type"], "image_url");
+            assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+        }
 
-    #[test]
-    fn build_chat_payload_passes_through_image_in_chat_messages() {
-        let request = json!({
-            "model": "qwen3-coder-plus",
-            "messages": [{
-                "role": "user",
-                "content": [
-                    { "type": "text", "text": "see" },
-                    { "type": "image_url", "image_url": { "url": "https://example.com/x.png" } }
-                ]
-            }]
-        });
-        let payload = build_chat_payload(&request, "qwen3-coder-plus").unwrap();
-        let content = payload["messages"][0]["content"].as_array().expect("multimodal must be array");
-        assert_eq!(content.len(), 2);
-        assert_eq!(content[1]["image_url"]["url"], "https://example.com/x.png");
-    }
+        #[test]
+        fn build_chat_payload_passes_through_image_in_chat_messages() {
+            let request = json!({
+                "model": "qwen3-coder-plus",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "see" },
+                        { "type": "image_url", "image_url": { "url": "https://example.com/x.png" } }
+                    ]
+                }]
+            });
+            let payload = build_chat_payload(&request, "qwen3-coder-plus").unwrap();
+            let content = payload["messages"][0]["content"]
+                .as_array()
+                .expect("multimodal must be array");
+            assert_eq!(content.len(), 2);
+            assert_eq!(content[1]["image_url"]["url"], "https://example.com/x.png");
+        }
 
-    #[test]
-    fn build_chat_payload_collapses_text_only_to_string() {
-        let request = json!({
-            "model": "qwen3-coder-plus",
-            "input": [{
-                "type": "message",
-                "role": "user",
-                "content": [
-                    { "type": "input_text", "text": "hello " },
-                    { "type": "input_text", "text": "world" }
-                ]
-            }]
-        });
-        let payload = build_chat_payload(&request, "qwen3-coder-plus").unwrap();
-        assert_eq!(payload["messages"][0]["content"], "hello \nworld");
-    }
+        #[test]
+        fn build_chat_payload_collapses_text_only_to_string() {
+            let request = json!({
+                "model": "qwen3-coder-plus",
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        { "type": "input_text", "text": "hello " },
+                        { "type": "input_text", "text": "world" }
+                    ]
+                }]
+            });
+            let payload = build_chat_payload(&request, "qwen3-coder-plus").unwrap();
+            assert_eq!(payload["messages"][0]["content"], "hello \nworld");
+        }
     }
 }

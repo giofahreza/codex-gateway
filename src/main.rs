@@ -3339,7 +3339,7 @@ async fn proxy(
                 .into_response();
         }
         TargetModel::MiniMax => {
-            return target::minimax::api::responses(State(state), headers, routed.upstream_body)
+            return target::minimax::responses_native::responses(State(state), headers, routed.upstream_body)
                 .await
                 .into_response();
         }

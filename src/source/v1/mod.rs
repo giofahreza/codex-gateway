@@ -4,8 +4,8 @@ use bytes::Bytes;
 use crate::source::{RouteError, RoutedRequest};
 
 pub mod codex;
-pub mod provider;
 pub mod multimodal;
+pub mod provider;
 pub mod response;
 pub mod route;
 

@@ -151,7 +151,10 @@ async fn fetch_balance(
 
     let resp = client
         .get(&url)
-        .header("Authorization", format!("Bearer {}", account.api_key.trim()))
+        .header(
+            "Authorization",
+            format!("Bearer {}", account.api_key.trim()),
+        )
         .header("Accept", "application/json")
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .send()
@@ -284,10 +287,7 @@ mod tests {
 
     #[test]
     fn normalize_uses_default_for_missing() {
-        assert_eq!(
-            normalize_base_url(None),
-            "https://api.deepseek.com"
-        );
+        assert_eq!(normalize_base_url(None), "https://api.deepseek.com");
     }
 
     #[test]

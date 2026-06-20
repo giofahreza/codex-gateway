@@ -113,14 +113,16 @@ pub async fn get_quota_summaries(state: &crate::AppState) -> Vec<Value> {
             // {used_percent, reset_label, ...} shape so renderQuotaBars
             // can consume it without special cases.
             let adapt = |w: &Option<WindowSummary>| -> Option<Value> {
-                w.as_ref().map(|s| json!({
-                    "used_percent": s.used_percent,
-                    "remaining_percent": s.remaining_percent,
-                    "reset_label": s.reset_label,
-                    "remains_time": s.remains_time,
-                    "total_count": s.total_count,
-                    "usage_count": s.usage_count,
-                }))
+                w.as_ref().map(|s| {
+                    json!({
+                        "used_percent": s.used_percent,
+                        "remaining_percent": s.remaining_percent,
+                        "reset_label": s.reset_label,
+                        "remains_time": s.remains_time,
+                        "total_count": s.total_count,
+                        "usage_count": s.usage_count,
+                    })
+                })
             };
             let adapted_models: Vec<Value> = entry
                 .summary
@@ -240,7 +242,10 @@ async fn fetch_quota_from_url(
 ) -> Result<(bool, String, Vec<ModelQuota>), String> {
     let resp = client
         .get(url)
-        .header("Authorization", format!("Bearer {}", account.api_key.trim()))
+        .header(
+            "Authorization",
+            format!("Bearer {}", account.api_key.trim()),
+        )
         .header("Accept", "application/json")
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .send()
@@ -431,7 +436,11 @@ mod tests {
             "base_resp": { "status_code": 1004, "status_msg": "invalid api key" }
         });
         let err = parse_quota_response(&raw).unwrap_err();
-        assert!(err.contains("1004"), "expected status code in error, got: {}", err);
+        assert!(
+            err.contains("1004"),
+            "expected status code in error, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -461,7 +470,10 @@ mod tests {
     #[test]
     fn quota_url_candidates_strips_chat_completions() {
         let urls = quota_url_candidates("https://api.minimaxi.chat/v1/chat/completions");
-        assert_eq!(urls[0], format!("{}/v1/api/openplatform/coding_plan/remains", PLATFORM_HOST));
+        assert_eq!(
+            urls[0],
+            format!("{}/v1/api/openplatform/coding_plan/remains", PLATFORM_HOST)
+        );
     }
 
     #[test]

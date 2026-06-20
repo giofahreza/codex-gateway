@@ -1,3 +1,4 @@
+use crate::source::v1::multimodal::openai_chat_content;
 use axum::{
     body::Body,
     extract::State,
@@ -6,7 +7,6 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
-use crate::source::v1::multimodal::openai_chat_content;
 use serde_json::{json, Value};
 use std::time::Duration;
 use uuid::Uuid;
@@ -29,7 +29,7 @@ pub fn normalize_base_url(base_url: Option<&str>) -> String {
         .to_string()
 }
 
-fn chat_completions_url(base_url: &str) -> String {
+pub(super) fn chat_completions_url(base_url: &str) -> String {
     let base = normalize_base_url(Some(base_url));
     if base.ends_with("/v1/chat/completions") {
         return base;
@@ -330,7 +330,7 @@ pub async fn responses(
     (StatusCode::OK, [("Content-Type", "application/json")], body).into_response()
 }
 
-async fn stream_chat_completions(
+pub(super) async fn stream_chat_completions(
     state: &crate::AppState,
     api_key: &str,
     base_url: &str,
@@ -508,7 +508,7 @@ fn models_to_openai_json(value: &Value) -> Result<Vec<u8>, String> {
     .map_err(|e| e.to_string())
 }
 
-fn build_chat_completions_payload(raw: &Value, model: &str) -> Result<Value, String> {
+pub(super) fn build_chat_completions_payload(raw: &Value, model: &str) -> Result<Value, String> {
     let mut out = json!({
         "model": model,
         "stream": false,
@@ -651,7 +651,8 @@ fn input_item_to_chat_message(item: &Value) -> Result<Option<Value>, String> {
                 other => other,
             };
             let content = openai_chat_content(item.get("content"));
-            let mut entry = json!({ "role": role, "content": content.unwrap_or(Value::String(String::new())) });
+            let mut entry =
+                json!({ "role": role, "content": content.unwrap_or(Value::String(String::new())) });
             if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
                 entry["name"] = json!(name);
             }
@@ -722,8 +723,6 @@ fn input_item_to_chat_message(item: &Value) -> Result<Option<Value>, String> {
         _ => Ok(None),
     }
 }
-
-
 
 fn build_chat_tools(raw: &Value) -> Option<Value> {
     let tools = raw.get("tools")?.as_array()?;
@@ -1181,7 +1180,7 @@ fn response_item_id(item: &Value) -> String {
         .unwrap_or_else(|| format!("item_{}", Uuid::new_v4().simple()))
 }
 
-fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
+pub(super) fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
     let id = chat
         .get("id")
         .and_then(|v| v.as_str())
@@ -1540,7 +1539,9 @@ mod tests {
         });
         let payload = build_chat_completions_payload(&raw, "MiniMax-Text-01").unwrap();
         let content = &payload["messages"][0]["content"];
-        let arr = content.as_array().expect("multimodal content must be an array");
+        let arr = content
+            .as_array()
+            .expect("multimodal content must be an array");
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["type"], "text");
         assert_eq!(arr[0]["text"], "describe the screenshot");
@@ -1564,7 +1565,9 @@ mod tests {
         });
         let payload = build_chat_completions_payload(&raw, "MiniMax-M3").unwrap();
         let content = &payload["messages"][0]["content"];
-        let arr = content.as_array().expect("multimodal content must be an array");
+        let arr = content
+            .as_array()
+            .expect("multimodal content must be an array");
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["text"], "what is this?");
         assert_eq!(arr[1]["image_url"]["url"], "data:image/png;base64,CCCC");

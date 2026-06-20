@@ -1,3 +1,4 @@
+use crate::source::v1::multimodal::{classify_content, is_data_url, split_data_url, PartKind};
 use axum::{
     body::Body,
     extract::State,
@@ -6,7 +7,6 @@ use axum::{
 };
 use base64::Engine;
 use bytes::Bytes;
-use crate::source::v1::multimodal::{classify_content, is_data_url, split_data_url, PartKind};
 use serde_json::{json, Value};
 use std::time::Duration;
 use uuid::Uuid;
@@ -417,24 +417,15 @@ fn build_google_payload(
 fn extract_prompt_parts(request_value: &Value) -> Result<Vec<Value>, String> {
     let mut out: Vec<Value> = Vec::new();
 
-    if let Some(prompt) = request_value
-        .get("input")
-        .and_then(|v| v.as_str())
-    {
+    if let Some(prompt) = request_value.get("input").and_then(|v| v.as_str()) {
         if !prompt.trim().is_empty() {
             out.push(json!({ "text": prompt.trim() }));
         }
     }
 
-    if let Some(items) = request_value
-        .get("input")
-        .and_then(|v| v.as_array())
-    {
+    if let Some(items) = request_value.get("input").and_then(|v| v.as_array()) {
         for item in items {
-            let role = item
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("user");
+            let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
             if role != "user" {
                 continue;
             }
@@ -446,10 +437,7 @@ fn extract_prompt_parts(request_value: &Value) -> Result<Vec<Value>, String> {
         }
     }
 
-    if let Some(messages) = request_value
-        .get("messages")
-        .and_then(|v| v.as_array())
-    {
+    if let Some(messages) = request_value.get("messages").and_then(|v| v.as_array()) {
         for message in messages {
             let content = match message.get("content") {
                 Some(c) => c,
@@ -837,7 +825,9 @@ mod tests {
             }]
         });
         let payload = build_google_payload(&request, "gemini-2.5-pro", Some("proj-1")).unwrap();
-        let parts = payload["request"]["contents"][0]["parts"].as_array().unwrap();
+        let parts = payload["request"]["contents"][0]["parts"]
+            .as_array()
+            .unwrap();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["text"], "describe");
         assert_eq!(parts[1]["inline_data"]["mime_type"], "image/png");
@@ -857,7 +847,9 @@ mod tests {
             }]
         });
         let payload = build_google_payload(&request, "gemini-2.5-pro", Some("proj-1")).unwrap();
-        let parts = payload["request"]["contents"][0]["parts"].as_array().unwrap();
+        let parts = payload["request"]["contents"][0]["parts"]
+            .as_array()
+            .unwrap();
         assert!(parts.iter().any(|p| p.get("text").is_some()));
         assert!(parts.iter().any(|p| p.get("file_data").is_some()));
     }
@@ -875,7 +867,9 @@ mod tests {
             }]
         });
         let payload = build_google_payload(&request, "gemini-2.5-pro", Some("proj-1")).unwrap();
-        let parts = payload["request"]["contents"][0]["parts"].as_array().unwrap();
+        let parts = payload["request"]["contents"][0]["parts"]
+            .as_array()
+            .unwrap();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["text"], "describe");
         assert_eq!(parts[1]["inline_data"]["mime_type"], "image/png");

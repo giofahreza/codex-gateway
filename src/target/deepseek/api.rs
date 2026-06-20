@@ -1,3 +1,4 @@
+use crate::source::v1::multimodal::{classify_content, is_data_url, split_data_url, PartKind};
 use axum::{
     body::Body,
     extract::State,
@@ -5,7 +6,6 @@ use axum::{
     response::IntoResponse,
 };
 use bytes::Bytes;
-use crate::source::v1::multimodal::{classify_content, is_data_url, split_data_url, PartKind};
 use serde_json::{json, Value};
 use std::time::Duration;
 use uuid::Uuid;
@@ -727,7 +727,10 @@ fn normalize_chat_messages(
         // downstream Anthropic-format builder can produce text + image
         // blocks. The string form is left untouched for plain-text
         // messages; the array form is forwarded as-is.
-        let original_content = message.get("content").cloned().unwrap_or(Value::String(String::new()));
+        let original_content = message
+            .get("content")
+            .cloned()
+            .unwrap_or(Value::String(String::new()));
         let mut normalized = json!({
             "role": role,
             "content": original_content

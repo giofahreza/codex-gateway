@@ -396,7 +396,7 @@ MiniMax is exposed as an OpenAI-compatible target. Add a MiniMax API key through
 
 Public routing (the gateway translates to MiniMax internally; no `/minimax/*` routes are exposed to clients):
 
-- `POST /v1/responses` and `POST /codex/responses` forward to MiniMax's `/v1/chat/completions`. The gateway owns the public surface, so provider-prefixed paths are not exposed.
+- `POST /v1/responses` and `POST /codex/responses` forward to MiniMax's native `/v1/responses` endpoint by default. The request body is passed through almost verbatim (the `reasoning` field is preserved, Codex-only fields are stripped, the `apply_patch` tool is removed). When the configured account's `base_url` explicitly points to a chat-completions endpoint, the gateway falls back to translating the request to `/v1/chat/completions` instead.
 - `GET /v1/models` and `GET /codex/models` include live MiniMax models such as `MiniMax-M3`, `MiniMax-M2.7`, and `MiniMax-M2.7-highspeed` whenever a MiniMax account is enabled.
 - Auth: `Authorization: Bearer <proxy_api_key>`.
 
@@ -409,4 +409,43 @@ curl http://127.0.0.1:8319/v1/responses \
   -d '{"model":"MiniMax-M3","input":"say hi in one word"}'
 ```
 
-MiniMax is OpenAI-compatible, so tool/function-call shapes from Codex CLI are mapped to MiniMax's `tools` / `tool_calls` format and back.
+Streaming:
+
+```bash
+curl http://127.0.0.1:8319/v1/responses \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"model":"MiniMax-M3","input":"say hi","stream":true}'
+```
+
+### Using MiniMax with the Codex CLI
+
+The gateway is a drop-in replacement for the `model_provider` in `~/.codex/config.toml` that the official MiniMax docs describe (https://platform.minimax.io/docs/token-plan/codex). Add the following to `config.toml`:
+
+```toml
+[model_providers.minimax_via_gateway]
+name = "MiniMax via codex-gateway"
+base_url = "http://DEPLOY_HOST:DEPLOY_PORT/v1"
+experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+wire_api = "responses"
+
+[profiles.minimax]
+model = "MiniMax-M3"
+model_provider = "minimax_via_gateway"
+model_context_window = 512_000
+model_reasoning_effort = "high"
+```
+
+The model catalog fields documented at the link above (`default_reasoning_level`, `input_modalities: ["text", "image"]`, `supports_parallel_tool_calls: true`, etc.) all work end-to-end through the gateway.
+
+### Why the gateway uses MiniMax's native `/v1/responses`
+
+MiniMax exposes a full OpenAI Responses-API-compatible endpoint at `POST /v1/responses` (https://platform.minimax.io/docs/api-reference/responses-create). The field names line up exactly with what the Codex SDK sends, so we forward the request almost as-is:
+
+* `reasoning: {effort: ...}` is preserved, so MiniMax-M3 enters Adaptive Thinking. Without this, the model produces very short answers and the Codex agent loop sees the model "stop before task done".
+* `tools` are forwarded with the `apply_patch` tool stripped (MiniMax does not implement it).
+* `metadata`, `prompt_cache_key`, `text`, `service_tier`, and `tool_choice` are all preserved.
+* Codex-only fields that MiniMax does not understand (`store`, `include`, `parallel_tool_calls`, `truncation`, `user`, `safety_identifier`) are dropped.
+
+For the chat-completions fallback, tool/function-call shapes from Codex CLI are still mapped to MiniMax's `tools` / `tool_calls` format and back; the native path keeps them as-is.

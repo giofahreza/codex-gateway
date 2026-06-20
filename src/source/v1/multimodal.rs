@@ -43,10 +43,7 @@ pub fn classify_part(part: &Value) -> Option<PartKind> {
         // Bare strings in the content array are treated as text.
         return Some(PartKind::Text(s.to_string()));
     }
-    let part_type = part
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
     // Text in any of the supported shapes.
     let text = part
@@ -60,7 +57,10 @@ pub fn classify_part(part: &Value) -> Option<PartKind> {
             }
         }
     }
-    if matches!(part_type, "text" | "input_text" | "output_text" | "summary_text") {
+    if matches!(
+        part_type,
+        "text" | "input_text" | "output_text" | "summary_text"
+    ) {
         // Text part with an unrecognised inner value. Skip rather than crash.
         return None;
     }
@@ -211,7 +211,10 @@ mod tests {
     #[test]
     fn classify_content_handles_string_and_array() {
         let s = json!("hello");
-        assert_eq!(classify_content(Some(&s)), vec![PartKind::Text("hello".into())]);
+        assert_eq!(
+            classify_content(Some(&s)),
+            vec![PartKind::Text("hello".into())]
+        );
         let arr = json!([
             { "type": "input_text", "text": "see " },
             { "type": "input_image", "image_url": "data:image/png;base64,ZZ" }
@@ -325,10 +328,7 @@ fn openai_image_part(part: &Value) -> Option<Value> {
         }
         return None;
     }
-    let part_type = part
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
     let is_image_type = matches!(part_type, "image_url" | "input_image" | "image");
     if !is_image_type {
         return None;
