@@ -3250,6 +3250,9 @@ async fn proxy(
         }
     };
     match routed.target {
+        TargetModel::CodexModels => {
+            return codex_models_response(state, headers).await;
+        }
         TargetModel::UnifiedV1Models => {
             return unified_v1_models_response(state, headers, &routed.upstream_path).await;
         }
@@ -3301,6 +3304,7 @@ async fn proxy(
         | TargetModel::DeepSeek
         | TargetModel::Grok
         | TargetModel::MiniMax
+        | TargetModel::CodexModels
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
     let session_id = Uuid::new_v4().to_string();
@@ -3351,6 +3355,7 @@ async fn proxy(
         | TargetModel::DeepSeek
         | TargetModel::Grok
         | TargetModel::MiniMax
+        | TargetModel::CodexModels
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
     let mut req = state
@@ -3379,6 +3384,7 @@ async fn proxy(
         | TargetModel::DeepSeek
         | TargetModel::Grok
         | TargetModel::MiniMax
+        | TargetModel::CodexModels
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
 
@@ -3598,6 +3604,51 @@ async fn proxy(
         );
     }
     (status, out_headers, body).into_response()
+}
+
+async fn codex_models_response(state: AppState, headers: HeaderMap) -> axum::response::Response {
+    let body_bytes = fetch_raw_codex_models_body(&state, &headers)
+        .await
+        .unwrap_or_else(|| Bytes::from_static(br#"{"models":[]}"#));
+    let body_bytes = augment_codex_models_json(&body_bytes, &state);
+    (
+        StatusCode::OK,
+        [("Content-Type", "application/json")],
+        body_bytes,
+    )
+        .into_response()
+}
+
+async fn fetch_raw_codex_models_body(state: &AppState, headers: &HeaderMap) -> Option<Bytes> {
+    let (_token_idx, token) = pick_token(state)?;
+    let session_id = Uuid::new_v4().to_string();
+    let mut req = state.client.request(
+        Method::GET,
+        target::codex::gateway::build_upstream_url(
+            &state.cfg.upstream_base,
+            "models",
+            Some("client_version=1.0.0"),
+        ),
+    );
+    for (key, value) in headers.iter() {
+        if should_drop_incoming_header(key.as_str()) {
+            continue;
+        }
+        req = req.header(key, value);
+    }
+    req = req.header("Authorization", format!("Bearer {}", token.token));
+    req = target::codex::gateway::apply_default_headers(
+        req,
+        headers,
+        token.account_id.as_deref(),
+        &session_id,
+    );
+
+    let resp = req.send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.bytes().await.ok()
 }
 
 async fn unified_v1_models_response(
@@ -5164,12 +5215,16 @@ fn augment_codex_models_json(body: &Bytes, state: &AppState) -> Bytes {
     let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return body.clone();
     };
-    let Some(models) = value
-        .get_mut("models")
-        .and_then(|value| value.as_array_mut())
-    else {
+    let Some(root) = value.as_object_mut() else {
         return body.clone();
     };
+    if !root.get("models").is_some_and(|value| value.is_array()) {
+        root.insert("models".to_string(), serde_json::json!([]));
+    }
+    let models = root
+        .get_mut("models")
+        .and_then(|value| value.as_array_mut())
+        .expect("models was initialized as an array");
 
     let mut existing = models
         .iter()

@@ -18,7 +18,7 @@ pub fn route_to_target(
     let upstream_path = route::resolve(path, method)?;
     if upstream_path == "models" && *method == Method::GET {
         return Ok(RoutedRequest {
-            target: TargetModel::UnifiedV1Models,
+            target: TargetModel::CodexModels,
             upstream_path,
             upstream_query: None,
             upstream_body: body,
@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_models_routes_to_unified_catalog() {
+    fn codex_models_routes_to_codex_catalog() {
         let uri: Uri = "/codex/models".parse().unwrap();
         let routed = route_to_target(
             "/codex/models",
@@ -290,7 +290,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(routed.target, TargetModel::UnifiedV1Models);
+        assert_eq!(routed.target, TargetModel::CodexModels);
         assert_eq!(routed.upstream_path, "models");
     }
 }

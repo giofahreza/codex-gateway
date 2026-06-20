@@ -430,8 +430,8 @@ async fn stream_chat_completions(
         let response = accumulator.to_response();
         let metrics = crate::usage_metrics_from_response_value(&response);
         crate::record_minimax_success(&usage_state, &usage_context, &metrics);
-        for delta in response_text_delta_events(&response) {
-            yield Ok(delta);
+        for event in response_output_events(&response) {
+            yield Ok(event);
         }
         yield Ok(response_sse_event(&json!({
             "type": "response.completed",
@@ -1072,22 +1072,198 @@ fn done_sse_event() -> Bytes {
     Bytes::from_static(b"data: [DONE]\n\n")
 }
 
-fn response_text_delta_events(response: &Value) -> Vec<Bytes> {
-    response
-        .get("output_text")
+fn response_output_events(response: &Value) -> Vec<Bytes> {
+    let mut output_items = response
+        .get("output")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if output_items.is_empty() {
+        if let Some(text) = response
+            .get("output_text")
+            .and_then(|v| v.as_str())
+            .filter(|text| !text.is_empty())
+        {
+            output_items.push(json!({
+                "type": "message",
+                "id": format!("msg_{}", Uuid::new_v4().simple()),
+                "status": "completed",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": text,
+                    "annotations": []
+                }]
+            }));
+        }
+    }
+
+    let mut events = Vec::new();
+    for (output_index, item) in output_items.iter().enumerate() {
+        events.extend(response_output_item_events(output_index, item));
+    }
+    events
+}
+
+fn response_output_item_events(output_index: usize, item: &Value) -> Vec<Bytes> {
+    let mut events = vec![response_sse_event(&json!({
+        "type": "response.output_item.added",
+        "output_index": output_index,
+        "item": response_item_with_status(item, "in_progress")
+    }))];
+
+    match item.get("type").and_then(|v| v.as_str()) {
+        Some("message") => {
+            if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
+                for (content_index, part) in content.iter().enumerate() {
+                    if part.get("type").and_then(|v| v.as_str()) != Some("output_text") {
+                        continue;
+                    }
+                    let text = part.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    let item_id = response_item_id(item);
+                    let added_part = json!({
+                        "type": "output_text",
+                        "text": "",
+                        "annotations": part
+                            .get("annotations")
+                            .cloned()
+                            .unwrap_or_else(|| json!([]))
+                    });
+                    events.push(response_sse_event(&json!({
+                        "type": "response.content_part.added",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "part": added_part
+                    })));
+                    for delta in text.split_inclusive('\n').filter(|delta| !delta.is_empty()) {
+                        events.push(response_sse_event(&json!({
+                            "type": "response.output_text.delta",
+                            "item_id": item_id,
+                            "output_index": output_index,
+                            "content_index": content_index,
+                            "delta": delta
+                        })));
+                    }
+                    events.push(response_sse_event(&json!({
+                        "type": "response.output_text.done",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "text": text
+                    })));
+                    events.push(response_sse_event(&json!({
+                        "type": "response.content_part.done",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "part": part
+                    })));
+                }
+            }
+        }
+        Some("function_call") => {
+            if let Some(arguments) = item
+                .get("arguments")
+                .and_then(|v| v.as_str())
+                .filter(|arguments| !arguments.is_empty())
+            {
+                let item_id = response_item_id(item);
+                events.push(response_sse_event(&json!({
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "delta": arguments
+                })));
+                events.push(response_sse_event(&json!({
+                    "type": "response.function_call_arguments.done",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "arguments": arguments
+                })));
+            }
+        }
+        Some("reasoning") => {
+            if let Some(summary) = reasoning_summary_text(item) {
+                let item_id = response_item_id(item);
+                events.push(response_sse_event(&json!({
+                    "type": "response.reasoning_summary_part.added",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "summary_index": 0,
+                    "part": {
+                        "type": "summary_text",
+                        "text": ""
+                    }
+                })));
+                events.push(response_sse_event(&json!({
+                    "type": "response.reasoning_summary_text.delta",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "summary_index": 0,
+                    "delta": summary
+                })));
+                events.push(response_sse_event(&json!({
+                    "type": "response.reasoning_summary_text.done",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "summary_index": 0,
+                    "text": summary
+                })));
+                events.push(response_sse_event(&json!({
+                    "type": "response.reasoning_summary_part.done",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "summary_index": 0,
+                    "part": {
+                        "type": "summary_text",
+                        "text": summary
+                    }
+                })));
+            }
+        }
+        _ => {}
+    }
+
+    events.push(response_sse_event(&json!({
+        "type": "response.output_item.done",
+        "output_index": output_index,
+        "item": item
+    })));
+    events
+}
+
+fn response_item_with_status(item: &Value, status: &str) -> Value {
+    let mut item = item.clone();
+    if let Some(object) = item.as_object_mut() {
+        if object.contains_key("status") {
+            object.insert("status".to_string(), json!(status));
+        }
+    }
+    item
+}
+
+fn response_item_id(item: &Value) -> String {
+    item.get("id")
         .and_then(|v| v.as_str())
-        .map(|text| {
-            text.split_inclusive('\n')
-                .filter(|delta| !delta.is_empty())
-                .map(|delta| {
-                    response_sse_event(&json!({
-                        "type": "response.output_text.delta",
-                        "delta": delta
-                    }))
-                })
-                .collect()
+        .or_else(|| item.get("call_id").and_then(|v| v.as_str()))
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("item_{}", Uuid::new_v4().simple()))
+}
+
+fn reasoning_summary_text(item: &Value) -> Option<&str> {
+    item.get("summary")
+        .and_then(|v| v.as_array())
+        .and_then(|summary| summary.first())
+        .and_then(|part| part.get("text"))
+        .and_then(|v| v.as_str())
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            item.get("content")
+                .and_then(|v| v.as_str())
+                .filter(|text| !text.is_empty())
         })
-        .unwrap_or_default()
 }
 
 fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
@@ -1474,16 +1650,25 @@ mod tests {
         }));
 
         let response = accumulator.to_response();
-        let deltas = response_text_delta_events(&response);
+        let stream_events = response_output_events(&response);
         let completed = response_sse_event(&json!({
             "type": "response.completed",
             "response": response.clone()
         }));
-        let delta_text = String::from_utf8(deltas[0].to_vec()).unwrap();
+        let stream_text = stream_events
+            .iter()
+            .map(|event| String::from_utf8(event.to_vec()).unwrap())
+            .collect::<Vec<_>>()
+            .join("");
         let completed_text = String::from_utf8(completed.to_vec()).unwrap();
+        let item_added = stream_text.find("response.output_item.added").unwrap();
+        let text_delta = stream_text.find("response.output_text.delta").unwrap();
+        let item_done = stream_text.rfind("response.output_item.done").unwrap();
 
-        assert!(delta_text.contains("response.output_text.delta"));
-        assert!(delta_text.contains("\"Hi\""));
+        assert!(item_added < text_delta);
+        assert!(text_delta < item_done);
+        assert!(stream_text.contains("response.content_part.added"));
+        assert!(stream_text.contains("\"Hi\""));
         assert!(completed_text.contains("response.completed"));
         assert_eq!(response["id"], "resp_chatcmpl_1");
         assert_eq!(response["output_text"], "Hi");
