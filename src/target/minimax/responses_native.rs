@@ -62,12 +62,20 @@ fn responses_url(base_url: &str) -> String {
     format!("{}{}", base, RESPONSES_PATH)
 }
 
-/// When the configured `base_url` explicitly points at the chat-completions
-/// endpoint we keep using that path. Otherwise the request goes to the
-/// native `/v1/responses`.
+/// Decide which path to use for a MiniMax account.
+///
+/// Default is chat-completions. MiniMax-M3 in chat-completions mode with
+/// `thinking: {type: "adaptive"}` is significantly more thorough on
+/// multi-step agentic tasks than the native `/v1/responses` endpoint —
+/// the latter tends to stop after a single tool call. The native
+/// `/v1/responses` path is therefore opt-in: it activates only when the
+/// account's `base_url` explicitly ends with `/v1/responses`.
+///
+/// The fallback chat-completions path also covers accounts whose
+/// `base_url` ends with `/chat/completions`.
 pub fn use_native_responses(account_base_url: Option<&str>) -> bool {
     let normalized = normalize_base_url(account_base_url);
-    !normalized.ends_with("/chat/completions")
+    normalized.ends_with("/v1/responses") || normalized.ends_with("/responses")
 }
 
 pub async fn responses(
@@ -656,12 +664,20 @@ mod tests {
     }
 
     #[test]
-    fn use_native_responses_skips_chat_completions_url() {
-        assert!(use_native_responses(None));
-        assert!(use_native_responses(Some("https://api.minimaxi.chat")));
-        assert!(use_native_responses(Some("https://api.minimaxi.chat/v1")));
+    fn use_native_responses_only_for_responses_path() {
+        // Default paths use chat-completions, which is more thorough.
+        assert!(!use_native_responses(None));
+        assert!(!use_native_responses(Some("https://api.minimaxi.chat")));
+        assert!(!use_native_responses(Some("https://api.minimaxi.chat/v1")));
         assert!(!use_native_responses(Some(
             "https://example.com/v1/chat/completions"
+        )));
+        // Opt-in: explicit /v1/responses URL routes to the native path.
+        assert!(use_native_responses(Some(
+            "https://example.com/v1/responses"
+        )));
+        assert!(use_native_responses(Some(
+            "https://api.minimaxi.chat/v1/responses"
         )));
     }
 

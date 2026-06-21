@@ -545,7 +545,55 @@ pub(super) fn build_chat_completions_payload(raw: &Value, model: &str) -> Result
     if let Some(stream) = raw.get("stream").cloned() {
         out["stream"] = stream;
     }
+    if let Some(thinking) = build_chat_thinking(raw) {
+        out["thinking"] = thinking;
+    }
     Ok(out)
+}
+
+/// Map the Codex SDK's `reasoning: {effort: ...}` field to MiniMax's
+/// `thinking: {type: ...}` field for the chat-completions endpoint.
+///
+/// * `effort: "none"` — explicit no-thinking → `thinking: {type: "disabled"}`.
+/// * Any other value — adaptive thinking → `thinking: {type: "adaptive"}`.
+/// * `reasoning_effort: "low|medium|high|minimal"` (top-level alias) — same
+///   translation as above.
+/// * Default for `MiniMax-M3` when the client did not set reasoning —
+///   adaptive thinking, so the model uses its full reasoning depth on
+///   agentic tasks. For M2.x models MiniMax always thinks, so leaving
+///   the field off is fine.
+fn build_chat_thinking(raw: &Value) -> Option<Value> {
+    if let Some(reasoning) = raw.get("reasoning") {
+        if let Some(obj) = reasoning.as_object() {
+            let effort = obj
+                .get("effort")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none");
+            return Some(match effort {
+                "none" => json!({ "type": "disabled" }),
+                _ => json!({ "type": "adaptive" }),
+            });
+        }
+    }
+
+    if let Some(effort) = raw.get("reasoning_effort").and_then(|v| v.as_str()) {
+        return Some(match effort {
+            "none" => json!({ "type": "disabled" }),
+            _ => json!({ "type": "adaptive" }),
+        });
+    }
+
+    let model = raw.get("model").and_then(|v| v.as_str()).unwrap_or("");
+    if model.eq_ignore_ascii_case("MiniMax-M3") {
+        // M3 only enters Adaptive Thinking when the `thinking` field is
+        // present. Without it the model produces very short answers and
+        // the Codex agent loop sees the model as "stopping before task
+        // done" because there is not enough content for Codex to
+        // consider the turn complete. We default to `adaptive` for M3.
+        return Some(json!({ "type": "adaptive" }));
+    }
+
+    None
 }
 
 fn build_chat_messages(raw: &Value) -> Result<Option<Value>, String> {
@@ -1434,6 +1482,53 @@ mod tests {
         assert_eq!(payload["tools"].as_array().unwrap().len(), 1);
         assert_eq!(payload["tools"][0]["function"]["name"], "shell");
         assert!(payload.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn build_chat_completions_payload_defaults_thinking_for_m3() {
+        let raw = json!({"model": "MiniMax-M3", "input": "hi"});
+        let payload = build_chat_completions_payload(&raw, "MiniMax-M3").unwrap();
+        assert_eq!(payload["thinking"]["type"], "adaptive");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_respects_explicit_none_reasoning() {
+        let raw = json!({
+            "model": "MiniMax-M3",
+            "input": "hi",
+            "reasoning": {"effort": "none"}
+        });
+        let payload = build_chat_completions_payload(&raw, "MiniMax-M3").unwrap();
+        assert_eq!(payload["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_forwards_non_none_reasoning_as_adaptive() {
+        let raw = json!({
+            "model": "MiniMax-M3",
+            "input": "hi",
+            "reasoning": {"effort": "high"}
+        });
+        let payload = build_chat_completions_payload(&raw, "MiniMax-M3").unwrap();
+        assert_eq!(payload["thinking"]["type"], "adaptive");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_handles_reasoning_effort_alias() {
+        let raw = json!({
+            "model": "MiniMax-M3",
+            "input": "hi",
+            "reasoning_effort": "medium"
+        });
+        let payload = build_chat_completions_payload(&raw, "MiniMax-M3").unwrap();
+        assert_eq!(payload["thinking"]["type"], "adaptive");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_omits_thinking_for_m2() {
+        let raw = json!({"model": "MiniMax-M2.7", "input": "hi"});
+        let payload = build_chat_completions_payload(&raw, "MiniMax-M2.7").unwrap();
+        assert!(payload.get("thinking").is_none());
     }
 
     #[test]
