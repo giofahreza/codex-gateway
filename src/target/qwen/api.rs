@@ -393,8 +393,68 @@ fn build_chat_payload(
     if let Some(stop) = request_value.get("stop") {
         payload["stop"] = stop.clone();
     }
+    // Forward tool definitions so the upstream model can invoke them.
+    // Without this, qwen has no idea what tools exist and just hallucinates
+    // that the task is done.
+    if let Some(tools) = build_chat_tools(request_value) {
+        payload["tools"] = tools;
+    }
+    if let Some(choice) = build_chat_tool_choice(request_value) {
+        payload["tool_choice"] = choice;
+    }
 
     Ok(payload)
+}
+
+fn build_chat_tools(raw: &serde_json::Value) -> Option<serde_json::Value> {
+    let tools = raw.get("tools")?.as_array()?;
+    let mut out = Vec::new();
+    for tool in tools {
+        if let Some(function) = tool.get("function") {
+            let mut mapped = json!({
+                "type": "function",
+                "function": {
+                    "name": function.get("name").cloned().unwrap_or(serde_json::Value::String(String::new())),
+                    "description": function.get("description").cloned().unwrap_or(serde_json::Value::String(String::new())),
+                    "parameters": function.get("parameters").cloned().unwrap_or(json!({ "type": "object" }))
+                }
+            });
+            if let Some(strict) = function.get("strict").and_then(|v| v.as_bool()) {
+                mapped["function"]["strict"] = json!(strict);
+            }
+            out.push(mapped);
+        } else if let Some(name) = tool.get("name").and_then(|v| v.as_str()) {
+            out.push(json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": tool.get("description").cloned().unwrap_or(serde_json::Value::String(String::new())),
+                    "parameters": tool.get("parameters").cloned().unwrap_or(json!({ "type": "object" }))
+                }
+            }));
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Array(out))
+    }
+}
+
+fn build_chat_tool_choice(raw: &serde_json::Value) -> Option<serde_json::Value> {
+    let choice = raw.get("tool_choice")?;
+    if let Some(value) = choice.as_str() {
+        return match value {
+            "auto" | "none" | "required" => Some(json!(value)),
+            other => Some(json!(other)),
+        };
+    }
+    if let Some(function) = choice.get("function") {
+        if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
+            return Some(json!({ "type": "function", "function": { "name": name } }));
+        }
+    }
+    Some(choice.clone())
 }
 
 fn build_messages_from_input(
@@ -495,15 +555,65 @@ fn extract_text_from_input_item(item: &serde_json::Value) -> Option<String> {
 }
 
 fn chat_to_openai_response(value: &serde_json::Value, model: &str) -> serde_json::Value {
-    let content = value
+    let first_choice = value
         .get("choices")
         .and_then(|v| v.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
+        .and_then(|choices| choices.first());
+
+    let message = first_choice.and_then(|choice| choice.get("message"));
+
+    let content = message
         .and_then(|message| message.get("content"))
         .map(extract_content_text)
         .map(strip_proxy_footer)
         .unwrap_or_default();
+
+    let mut output: Vec<serde_json::Value> = Vec::new();
+    if !content.is_empty() {
+        output.push(json!({
+            "type": "message",
+            "id": format!("msg_{}", Uuid::new_v4().simple()),
+            "status": "completed",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": content,
+                "annotations": []
+            }]
+        }));
+    }
+
+    if let Some(message) = message {
+        if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+            for call in tool_calls {
+                let call_id = call
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("call_{}", Uuid::new_v4().simple()));
+                let name = call
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("tool")
+                    .to_string();
+                let arguments = call
+                    .get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}")
+                    .to_string();
+                output.push(json!({
+                    "id": call_id,
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": arguments,
+                    "status": "completed"
+                }));
+            }
+        }
+    }
 
     let usage = value.get("usage").cloned().unwrap_or_default();
 
@@ -519,17 +629,7 @@ fn chat_to_openai_response(value: &serde_json::Value, model: &str) -> serde_json
         "created_at": chrono::Utc::now().timestamp(),
         "status": "completed",
         "model": model,
-        "output": [{
-            "type": "message",
-            "id": format!("msg_{}", Uuid::new_v4().simple()),
-            "status": "completed",
-            "role": "assistant",
-            "content": [{
-                "type": "output_text",
-                "text": content,
-                "annotations": []
-            }]
-        }],
+        "output": output,
         "output_text": content,
         "usage": {
             "input_tokens": usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -606,6 +706,73 @@ fn render_response_sse(response: &serde_json::Value) -> Vec<u8> {
                 }))
                 .as_slice(),
             );
+        }
+    }
+
+    if let Some(output) = response.get("output").and_then(|v| v.as_array()) {
+        for item in output {
+            if item.get("type").and_then(|v| v.as_str()) == Some("function_call") {
+                let call_id = item
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let arguments = item
+                    .get("arguments")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}");
+                if !call_id.is_empty() {
+                    chunks.extend_from_slice(
+                        sse_json(&json!({
+                            "type": "response.output_item.added",
+                            "output_index": 0,
+                            "item": {
+                                "id": call_id,
+                                "type": "function_call",
+                                "call_id": call_id,
+                                "name": name,
+                                "arguments": "",
+                                "status": "in_progress"
+                            }
+                        }))
+                        .as_slice(),
+                    );
+                    chunks.extend_from_slice(
+                        sse_json(&json!({
+                            "type": "response.function_call_arguments.delta",
+                            "output_index": 0,
+                            "delta": arguments
+                        }))
+                        .as_slice(),
+                    );
+                    chunks.extend_from_slice(
+                        sse_json(&json!({
+                            "type": "response.function_call_arguments.done",
+                            "output_index": 0,
+                            "arguments": arguments
+                        }))
+                        .as_slice(),
+                    );
+                    chunks.extend_from_slice(
+                        sse_json(&json!({
+                            "type": "response.output_item.done",
+                            "output_index": 0,
+                            "item": {
+                                "id": call_id,
+                                "type": "function_call",
+                                "call_id": call_id,
+                                "name": name,
+                                "arguments": arguments,
+                                "status": "completed"
+                            }
+                        }))
+                        .as_slice(),
+                    );
+                }
+            }
         }
     }
 
@@ -749,66 +916,150 @@ mod tests {
         assert_eq!(usage.cache_tokens, 2);
         assert_eq!(usage.reasoning_tokens, 1);
         assert_eq!(usage.raw_usage, raw_usage_before);
+    }
 
-        #[test]
-        fn build_chat_payload_passes_through_image_in_responses_input() {
-            let request = json!({
-                "model": "qwen3-coder-plus",
-                "input": [{
-                    "type": "message",
-                    "role": "user",
-                    "content": [
-                        { "type": "input_text", "text": "describe" },
-                        { "type": "input_image", "image_url": "data:image/png;base64,AAAA" }
-                    ]
-                }]
-            });
-            let payload = build_chat_payload(&request, "qwen3-coder-plus").unwrap();
-            let content = payload["messages"][0]["content"]
-                .as_array()
-                .expect("multimodal must be array");
-            assert_eq!(content.len(), 2);
-            assert_eq!(content[0]["type"], "text");
-            assert_eq!(content[0]["text"], "describe");
-            assert_eq!(content[1]["type"], "image_url");
-            assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
-        }
+    #[test]
+    fn build_chat_payload_passes_through_image_in_responses_input() {
+        let request = json!({
+            "model": "qwen3-coder-plus",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "describe" },
+                    { "type": "input_image", "image_url": "data:image/png;base64,AAAA" }
+                ]
+            }]
+        });
+        let payload = build_chat_payload(&request, "qwen3-coder-plus").unwrap();
+        let content = payload["messages"][0]["content"]
+            .as_array()
+            .expect("multimodal must be array");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "describe");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
 
-        #[test]
-        fn build_chat_payload_passes_through_image_in_chat_messages() {
-            let request = json!({
-                "model": "qwen3-coder-plus",
-                "messages": [{
-                    "role": "user",
-                    "content": [
-                        { "type": "text", "text": "see" },
-                        { "type": "image_url", "image_url": { "url": "https://example.com/x.png" } }
-                    ]
-                }]
-            });
-            let payload = build_chat_payload(&request, "qwen3-coder-plus").unwrap();
-            let content = payload["messages"][0]["content"]
-                .as_array()
-                .expect("multimodal must be array");
-            assert_eq!(content.len(), 2);
-            assert_eq!(content[1]["image_url"]["url"], "https://example.com/x.png");
-        }
+    #[test]
+    fn build_chat_payload_passes_through_image_in_chat_messages() {
+        let request = json!({
+            "model": "qwen3-coder-plus",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "see" },
+                    { "type": "image_url", "image_url": { "url": "https://example.com/x.png" } }
+                ]
+            }]
+        });
+        let payload = build_chat_payload(&request, "qwen3-coder-plus").unwrap();
+        let content = payload["messages"][0]["content"]
+            .as_array()
+            .expect("multimodal must be array");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1]["image_url"]["url"], "https://example.com/x.png");
+    }
 
-        #[test]
-        fn build_chat_payload_collapses_text_only_to_string() {
-            let request = json!({
-                "model": "qwen3-coder-plus",
-                "input": [{
-                    "type": "message",
-                    "role": "user",
-                    "content": [
-                        { "type": "input_text", "text": "hello " },
-                        { "type": "input_text", "text": "world" }
-                    ]
-                }]
-            });
-            let payload = build_chat_payload(&request, "qwen3-coder-plus").unwrap();
-            assert_eq!(payload["messages"][0]["content"], "hello \nworld");
-        }
+    #[test]
+    fn build_chat_payload_collapses_text_only_to_string() {
+        let request = json!({
+            "model": "qwen3-coder-plus",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "hello " },
+                    { "type": "input_text", "text": "world" }
+                ]
+            }]
+        });
+        let payload = build_chat_payload(&request, "qwen3-coder-plus").unwrap();
+        assert_eq!(payload["messages"][0]["content"], "hello \nworld");
+    }
+
+    #[test]
+    fn build_chat_payload_forwards_tools_and_tool_choice() {
+        let request = json!({
+            "model": "qwen3-coder-plus",
+            "input": "what is the weather",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "shell",
+                    "description": "Run a shell command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": { "type": "string" }
+                        }
+                    }
+                }
+            }],
+            "tool_choice": "auto"
+        });
+        let payload = build_chat_payload(&request, "qwen3-coder-plus").unwrap();
+        let tools = payload["tools"].as_array().expect("tools forwarded");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "shell");
+        assert_eq!(tools[0]["function"]["description"], "Run a shell command");
+        assert_eq!(tools[0]["function"]["parameters"]["properties"]["command"]["type"], "string");
+        assert_eq!(payload["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn build_chat_payload_forwards_response_style_tool_definitions() {
+        let request = json!({
+            "model": "qwen3-coder-plus",
+            "input": "do it",
+            "tools": [{
+                "type": "function",
+                "name": "shell",
+                "description": "shell",
+                "parameters": { "type": "object" }
+            }]
+        });
+        let payload = build_chat_payload(&request, "qwen3-coder-plus").unwrap();
+        let tools = payload["tools"].as_array().expect("tools forwarded");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "shell");
+    }
+
+    #[test]
+    fn chat_to_openai_response_emits_function_call_items() {
+        let upstream = json!({
+            "id": "chatcmpl_abc",
+            "choices": [{
+                "message": {
+                    "content": "I'll run the shell now.",
+                    "tool_calls": [{
+                        "id": "call_42",
+                        "type": "function",
+                        "function": {
+                            "name": "shell",
+                            "arguments": "{\"command\":\"ls\"}"
+                        }
+                    }]
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 7,
+                "total_tokens": 12
+            }
+        });
+        let response = chat_to_openai_response(&upstream, "qwen3-coder-plus");
+        let output = response["output"].as_array().expect("output array");
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0]["type"], "message");
+        assert_eq!(output[0]["content"][0]["text"], "I'll run the shell now.");
+        assert_eq!(output[1]["type"], "function_call");
+        assert_eq!(output[1]["call_id"], "call_42");
+        assert_eq!(output[1]["name"], "shell");
+        assert_eq!(output[1]["arguments"], "{\"command\":\"ls\"}");
+        assert_eq!(response["output_text"], "I'll run the shell now.");
     }
 }
