@@ -344,7 +344,25 @@ Ranked by quality of the answer in the smoke test against the same screenshot:
 6. `qwen3.7-plus`
 7. `MiniMax-M3`
 
-```
+#### Agentic loop status per provider (does Codex CLI get to drive it to completion?)
+
+The "agentic loop" check is the same one `codex` does on the desktop: send a
+multi-step task ("create file, cat it, delete it"), and let the model keep
+calling the `shell` tool turn after turn until it claims the work is done.
+A provider passes when the model actually invokes the tool (and re-invokes it
+after a synthetic tool result) instead of hallucinating completion.
+
+| Provider | Agentic loop | Notes |
+|---|---|---|
+| `codex` (gpt-5.5, gpt-5.4, gpt-5.4-mini, codex-auto-review) | ✅ | Native Codex backend, the reference behaviour. |
+| `MiniMax-M3` | ✅ | Routed through chat-completions with `thinking: {type: "adaptive"}`; produces a reasoning summary plus a tool call. |
+| `MiniMax-M2.7` and the other M2.x line | ⚠️ | Text-only — returns "Cannot see image" but does iterate tool calls. |
+| `deepseek-v4-pro` / `deepseek-v4-flash` | ✅ | Goes through Anthropic messages; tool calls and reasoning are translated. |
+| `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-3-pro` | ✅ | After the gateway forwards `functionDeclarations` and translates `functionCall` parts. |
+| `antigravity` (`claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gemini-*-thinking`, `gemini-*-image`, …) | ✅ | Same fix as Gemini — tools forwarded, function_call items emitted. |
+| `qwen3-coder-plus`, `qwen3.5-plus`, `qwen3.6-plus`, `qwen3.7-plus`, `qwen3.7-max` | ✅ | Previously the gateway was dropping the `tools` array so qwen hallucinated completion; now it forwards them to `qwen.aikit.club/v1/chat/completions` and renders the `tool_calls` back into Responses-API function_call items. |
+| `qwen3-vl-plus` and other dedicated VL qwen models | ✅ | Image input + tool use both work. |
+| `grok-4.3`, `grok-4.20-...` | 🔑 | Gateway forwards tools correctly but the OAuth token expired on `2026-06-19T14:16:17+00:00`; re-auth on the dashboard to restore. |
 
 ## DeepSeek
 
@@ -384,6 +402,10 @@ Notes:
 - The gateway validates the key against DeepSeek `GET /models` before saving it.
 - Tool-call turns and reasoning summaries are translated into DeepSeek’s chat-completions format so Codex CLI can keep using the Responses API against the gateway instead of talking to DeepSeek directly.
 
+### DeepSeek balance on the dashboard
+
+Each DeepSeek account card on the dashboard shows the current balance pulled from `GET /user/balance` (cached for 60 seconds per account). The bar shows `Balance USD` with the `total_balance` (and the `topped_up_balance` / `granted_balance` breakdown if one of them is non-zero). If the upstream is unreachable the card shows the upstream error text instead.
+
 ## Troubleshooting
 
 - `403 cloudflare`: usually missing headers or wrong upstream. Use the provided gateway build.
@@ -400,6 +422,16 @@ Public routing (the gateway translates to MiniMax internally; no `/minimax/*` ro
 - If the account's `base_url` is configured to end with `/v1/responses` the gateway uses MiniMax's native `/v1/responses` endpoint instead. The native path is a closer passthrough, but `MiniMax-M3` tends to stop after a single tool call on it, so the chat-completions path is the default.
 - `GET /v1/models` and `GET /codex/models` include live MiniMax models such as `MiniMax-M3`, `MiniMax-M2.7`, and `MiniMax-M2.7-highspeed` whenever a MiniMax account is enabled.
 - Auth: `Authorization: Bearer <proxy_api_key>`.
+
+### MiniMax usage and quota on the dashboard
+
+The dashboard pulls the same numbers shown on <https://platform.minimax.io/console/usage> for each MiniMax account:
+
+* `GET /v1/api/openplatform/coding_plan/remains` is called on every account refresh; the response is cached for 60 seconds.
+* The two large progress bars on the MiniMax card are the **5-hour rolling window** and the **weekly window** that the platform console highlights. The bar fill is `used_percent = 100 − remaining_percent`; the label is `used_percent% used · resets in <reset_label>` (e.g. `12.3% used · resets in 4h 38m`).
+* Below the headline bars, a per-model breakdown is shown for the same windows so you can see which model in the M-series is driving the usage.
+* If the upstream returns `base_resp.status_msg` (e.g. `account is not subscribed`) the message is shown beneath the bars.
+* If the account key is invalid the card shows the upstream error text instead of a bar.
 
 Examples:
 

@@ -1107,6 +1107,41 @@ async fn dashboard() -> impl IntoResponse {
             bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>' + label + '</span><span>' + hint + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (pct > 80 ? 'high' : pct > 50 ? 'mid' : 'low') + '" style="width:' + pct + '%;"></div></div></div>';
           });
         }
+        // MiniMax top-level current_window / weekly (matches the
+        // platform.minimax.io/console/usage layout: two big bars per
+        // account: "5h" and "Weekly" with a "resets in" countdown).
+        if (quota.current_window) {
+          var cw = quota.current_window;
+          var cwPct = cw.used_percent != null ? cw.used_percent : 0;
+          var cwHint = (cw.used_percent != null ? cw.used_percent.toFixed(1) + '%' : '\u2014')
+            + ' used \u00b7 resets in ' + (cw.reset_label || '\u2014');
+          bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>5h window</span><span>' + cwHint + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (cwPct > 80 ? 'high' : cwPct > 50 ? 'mid' : 'low') + '" style="width:' + cwPct + '%;"></div></div></div>';
+        }
+        if (quota.weekly) {
+          var wk = quota.weekly;
+          var wkPct = wk.used_percent != null ? wk.used_percent : 0;
+          var wkHint = (wk.used_percent != null ? wk.used_percent.toFixed(1) + '%' : '\u2014')
+            + ' used \u00b7 resets in ' + (wk.reset_label || '\u2014');
+          bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>Weekly window</span><span>' + wkHint + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (wkPct > 80 ? 'high' : wkPct > 50 ? 'mid' : 'low') + '" style="width:' + wkPct + '%;"></div></div></div>';
+        }
+        // DeepSeek balances: show total + topped-up in USD. The
+        // gateway pulls this from /user/balance.
+        if (quota.balances && quota.balances.length) {
+          quota.balances.forEach(function(b) {
+            if (b.total_balance == null) return;
+            var label = 'Balance ' + (b.currency || 'USD');
+            var detail = b.total_balance + ' ' + (b.currency || 'USD');
+            if (b.topped_up_balance && b.topped_up_balance !== '0.00' && b.topped_up_balance !== '0') {
+              detail += ' (topped up ' + b.topped_up_balance + ')';
+            } else if (b.granted_balance && b.granted_balance !== '0.00' && b.granted_balance !== '0') {
+              detail += ' (granted ' + b.granted_balance + ')';
+            }
+            bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>' + label + '</span><span>' + detail + '</span></div><div class="quota-bar"><div class="quota-bar-fill low" style="width:100%;"></div></div></div>';
+          });
+        }
+        if (quota.status_msg) {
+          bars += '<div class="muted" style="margin-top:4px;">' + quota.status_msg + '</div>';
+        }
         return bars ? '<div class="card-quota">' + bars + '</div>' : '';
       }
       function buildCard(a, quota) {
