@@ -311,24 +311,42 @@ async fn send_generate_request(
     })
 }
 
+/// Strip the helper `_call_id` field we use to correlate a
+/// functionCall part with the functionResponse tool result. Google's
+/// API does not accept arbitrary metadata in parts, and the upstream
+/// model only needs the structured `functionCall` body to keep the
+/// multi-turn shape correct.
+fn sanitize_google_contents(contents: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    contents
+        .into_iter()
+        .map(|mut entry| {
+            if let Some(parts) = entry.get_mut("parts").and_then(|v| v.as_array_mut()) {
+                for part in parts.iter_mut() {
+                    if let Some(obj) = part.as_object_mut() {
+                        obj.remove("_call_id");
+                    }
+                }
+            }
+            entry
+        })
+        .collect()
+}
+
 fn build_google_payload(
     request_value: &serde_json::Value,
     model: &str,
     project_id: &str,
 ) -> Result<serde_json::Value, String> {
-    let parts = extract_prompt_parts(request_value)?;
+    let contents = build_google_contents(request_value)?;
     let instructions = request_value
         .get("instructions")
         .and_then(|value| value.as_str())
         .map(|value| value.to_string());
     let image_mode = is_image_request(request_value, model);
 
+    let contents = sanitize_google_contents(contents);
     let mut request = json!({
-        "contents": [{
-            "role": "user",
-            "parts": parts
-        }],
-        "sessionId": Uuid::new_v4().to_string()
+        "contents": contents,
     });
 
     if let Some(instructions) = instructions {
@@ -431,62 +449,366 @@ fn build_google_tool_config(request_value: &serde_json::Value) -> Option<serde_j
     }))
 }
 
-/// Build a Google Generative AI `parts` array from a Codex/OpenAI
-/// request. Supports text, image (data URL or remote URL), and a mix of
-/// both. Returns an error if no usable content is found.
-fn extract_prompt_parts(request_value: &Value) -> Result<Vec<Value>, String> {
-    let mut out: Vec<Value> = Vec::new();
+fn chat_tool_call_to_function_call_part(tc: &Value) -> Option<Value> {
+    let function = tc.get("function")?;
+    let name = function.get("name").and_then(|v| v.as_str())?;
+    let arguments = function.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let args_value = if let Some(s) = arguments.as_str() {
+        serde_json::from_str::<serde_json::Value>(s)
+            .unwrap_or_else(|_| json!({ "raw": s }))
+    } else {
+        arguments.clone()
+    };
+    let call_id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    Some(json!({
+        "functionCall": { "name": name, "args": args_value },
+        "_call_id": call_id,
+    }))
+}
 
-    if let Some(prompt) = request_value.get("input").and_then(|value| value.as_str()) {
-        if !prompt.trim().is_empty() {
-            out.push(json!({ "text": prompt.trim() }));
+/// Build the Google `contents` array for a Codex/OpenAI request.
+///
+/// Google\'s Generative AI is multi-turn. A Codex Responses-API input
+/// is a list of `function_call` / `function_call_output` / `message`
+/// items. The clean translation is to emit `model` (assistant
+/// `functionCall`) and `function` (tool result `functionResponse`)
+/// roles, but some upstream backends (notably Claude-on-Antigravity)
+/// reject the functionResponse shape with a generic 400. To stay
+/// portable we serialise the tool-call history as plain text in a
+/// single user turn before the latest user prompt. The model still
+/// sees the full conversation and can keep iterating.
+fn build_google_contents(request_value: &Value) -> Result<Vec<Value>, String> {
+    let mut entries: Vec<(String, Vec<Value>)> = Vec::new();
+
+    if let Some(prompt) = request_value.get("input").and_then(|v| v.as_str()) {
+        let trimmed = prompt.trim();
+        if !trimmed.is_empty() {
+            entries.push(("user".to_string(), vec![json!({ "text": trimmed })]));
         }
     }
 
-    if let Some(items) = request_value
-        .get("input")
-        .and_then(|value| value.as_array())
-    {
+    if let Some(items) = request_value.get("input").and_then(|v| v.as_array()) {
+        let mut transcript: Vec<String> = Vec::new();
+        let mut pending_calls: Vec<(String, String, String)> = Vec::new();
+        let mut last_user_text: Option<String> = None;
+        // Walk the items, collecting them into a transcript-style
+        // summary that we\'ll attach to the final user turn.
         for item in items {
-            let role = item
+            let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match item_type {
+                "function_call" => {
+                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                    let args = item.get("arguments").cloned().unwrap_or(json!({}));
+                    let args_str = if let Some(s) = args.as_str() {
+                        s.to_string()
+                    } else {
+                        args.to_string()
+                    };
+                    let call_id = item
+                        .get("call_id")
+                        .or_else(|| item.get("id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    transcript.push(format!(
+                        "[assistant called {name}({args_str})]"
+                    ));
+                    pending_calls.push((call_id, name.to_string(), args_str));
+                }
+                "function_call_output" => {
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let output = item.get("output").cloned().unwrap_or(json!(""));
+                    let output_str = if let Some(s) = output.as_str() {
+                        s.to_string()
+                    } else {
+                        output.to_string()
+                    };
+                    let _name = pending_calls
+                        .iter()
+                        .find(|(cid, _, _)| cid == &call_id)
+                        .map(|(_, n, _)| n.clone())
+                        .unwrap_or_else(|| "tool".to_string());
+                    transcript.push(format!("[tool result: {}]", output_str));
+                }
+                "message" | "" => {
+                    let role = item
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("user");
+                    let role = match role {
+                        "system" | "developer" => continue,
+                        "assistant" => "assistant",
+                        "user" | "" => "user",
+                        "tool" => "user",
+                        other => other,
+                    };
+                    let mut parts: Vec<Value> = Vec::new();
+                    if let Some(content) = item.get("content") {
+                        for part in classify_content(Some(content)) {
+                            push_google_part(&mut parts, part);
+                        }
+                    }
+                    if parts.is_empty() {
+                        continue;
+                    }
+                    if role == "user" {
+                        if let Some(text) = parts
+                            .iter()
+                            .find_map(|p| p.get("text").and_then(|t| t.as_str()))
+                        {
+                            last_user_text = Some(text.to_string());
+                        }
+                        entries.push((role.to_string(), parts));
+                    } else if role == "assistant" {
+                        if let Some(text) = parts
+                            .iter()
+                            .find_map(|p| p.get("text").and_then(|t| t.as_str()))
+                        {
+                            transcript.push(format!("[assistant said: {text}]"));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Attach the transcript to the most recent user turn so the
+        // model sees the full history inline.
+        if !transcript.is_empty() {
+            let prefix = transcript.join("\n");
+            if let Some(text) = last_user_text.as_mut() {
+                *text = format!("{prefix}\n\n{text}");
+            } else {
+                last_user_text = Some(prefix);
+            }
+        }
+        if let Some(text) = last_user_text {
+            let prefix = transcript.join("\n");
+            let new_text = if prefix.is_empty() {
+                text.clone()
+            } else {
+                format!("{prefix}\n\n{text}")
+            };
+            let mut found = false;
+            for (role, parts) in entries.iter_mut() {
+                if role == "user" {
+                    if let Some(first_text) = parts
+                        .iter_mut()
+                        .find(|p| p.get("text").is_some())
+                    {
+                        first_text["text"] = json!(new_text);
+                    } else {
+                        parts.insert(0, json!({ "text": new_text }));
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                entries.push(("user".to_string(), vec![json!({ "text": new_text })]));
+            }
+        }
+    }
+
+    if let Some(messages) = request_value.get("messages").and_then(|v| v.as_array()) {
+        for message in messages {
+            let role = message
                 .get("role")
-                .and_then(|value| value.as_str())
+                .and_then(|v| v.as_str())
                 .unwrap_or("user");
-            // Skip non-user roles for Google's single-turn `contents` model.
-            if role != "user" {
+            let role = match role {
+                "system" | "developer" => continue,
+                "assistant" => "assistant",
+                "user" => "user",
+                "tool" => "user",
+                other => other,
+            };
+            let mut parts: Vec<Value> = Vec::new();
+            if let Some(content) = message.get("content") {
+                for part in classify_content(Some(content)) {
+                    push_google_part(&mut parts, part);
+                }
+            }
+            if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+                for tc in tool_calls {
+                    let function = tc.get("function");
+                    let name = function
+                        .and_then(|f| f.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tool");
+                    let args = function
+                        .and_then(|f| f.get("arguments"))
+                        .cloned()
+                        .unwrap_or(json!({}));
+                    let args_str = if let Some(s) = args.as_str() {
+                        s.to_string()
+                    } else {
+                        args.to_string()
+                    };
+                    parts.push(json!({ "text": format!("[assistant called {name}({args_str})]") }));
+                }
+            }
+            if let Some(tool_call_id) = message.get("tool_call_id").and_then(|v| v.as_str()) {
+                let _ = tool_call_id;
+                if let Some(content) = message.get("content") {
+                    if let Some(text) = content.as_str() {
+                        parts.push(json!({ "text": format!("[tool result: {text}]") }));
+                    }
+                }
+            }
+            if parts.is_empty() {
                 continue;
             }
-            // Responses API items have `content` (string or array of parts).
+            entries.push((role.to_string(), parts));
+        }
+    }
+
+    if entries.is_empty() {
+        return Err(
+            "only string input or messages[] with content is supported for /agw/v1/responses"
+                .to_string(),
+        );
+    }
+
+    // Coalesce adjacent entries with the same role.
+    let mut contents: Vec<Value> = Vec::new();
+    for (role, parts) in entries {
+        match contents.last_mut() {
+            Some(last) if last["role"] == role => {
+                if let Some(existing) = last.get_mut("parts").and_then(|v| v.as_array_mut()) {
+                    existing.extend(parts);
+                }
+            }
+            _ => {
+                contents.push(json!({ "role": role, "parts": parts }));
+            }
+        }
+    }
+
+    Ok(contents)
+}
+
+fn append_input_item(entries: &mut Vec<(String, Vec<Value>)>, item: &Value) {
+    let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    match item_type {
+        "function_call" => {
+            let call_id = item
+                .get("call_id")
+                .or_else(|| item.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let arguments = item
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let args_value = if let Some(s) = arguments.as_str() {
+                serde_json::from_str::<serde_json::Value>(s)
+                    .unwrap_or_else(|_| json!({ "raw": s }))
+            } else {
+                arguments.clone()
+            };
+            if name.is_empty() {
+                return;
+            }
+            entries.push((
+                "model".to_string(),
+                vec![json!({
+                    "functionCall": { "name": name, "args": args_value },
+                    "_call_id": call_id,
+                })],
+            ));
+        }
+        "function_call_output" => {
+            let call_id = item
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let output = item
+                .get("output")
+                .cloned()
+                .unwrap_or_else(|| json!(""));
+            let output_str = if let Some(s) = output.as_str() {
+                s.to_string()
+            } else {
+                output.to_string()
+            };
+            // Google's functionResponse requires a `name` we can pair
+            // with the corresponding functionCall. When the prior
+            // model turn carried a `_call_id` we look back through the
+            // entries to find the matching functionCall name. If we
+            // can't find it, fall back to "tool".
+            let name = lookup_function_name(entries, call_id).unwrap_or_else(|| "tool".to_string());
+            entries.push((
+                "function".to_string(),
+                vec![json!({
+                    "functionResponse": {
+                        "name": name,
+                        "response": { "result": output_str }
+                    }
+                })],
+            ));
+        }
+        "message" | "" => {
+            let role = item
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("user");
+            let role = match role {
+                "system" | "developer" => return,
+                "assistant" => "assistant",
+                "user" | "" => "user",
+                "tool" => "function",
+                other => other,
+            };
+            let mut parts: Vec<Value> = Vec::new();
             if let Some(content) = item.get("content") {
                 for part in classify_content(Some(content)) {
-                    push_google_part(&mut out, part);
+                    push_google_part(&mut parts, part);
+                }
+            }
+            if parts.is_empty() {
+                return;
+            }
+            entries.push((role.to_string(), parts));
+        }
+        _ => {}
+    }
+}
+
+fn lookup_function_name(entries: &Vec<(String, Vec<Value>)>, call_id: &str) -> Option<String> {
+    if call_id.is_empty() {
+        return None;
+    }
+    for (_role, parts) in entries.iter().rev() {
+        for part in parts.iter().rev() {
+            let fc = part.get("functionCall")?;
+            if part.get("_call_id").and_then(|v| v.as_str()) == Some(call_id) {
+                if let Some(name) = fc.get("name").and_then(|v| v.as_str()) {
+                    return Some(name.to_string());
                 }
             }
         }
     }
+    None
+}
 
-    if let Some(messages) = request_value
-        .get("messages")
-        .and_then(|value| value.as_array())
-    {
-        for message in messages {
-            let content = match message.get("content") {
-                Some(c) => c,
-                None => continue,
-            };
-            for part in classify_content(Some(content)) {
-                push_google_part(&mut out, part);
+fn extract_prompt_parts(request_value: &Value) -> Result<Vec<Value>, String> {
+    let contents = build_google_contents(request_value)?;
+    for entry in contents.iter().rev() {
+        if entry["role"] == "user" {
+            if let Some(parts) = entry.get("parts").and_then(|v| v.as_array()) {
+                return Ok(parts.clone());
             }
         }
     }
-
-    if out.is_empty() {
-        return Err(
-            "only string input or messages[] with content is supported for /gemini/v1/responses"
-                .to_string(),
-        );
-    }
-    Ok(out)
+    Ok(Vec::new())
 }
 
 fn push_google_part(out: &mut Vec<Value>, part: PartKind) {
