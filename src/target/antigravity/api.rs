@@ -401,6 +401,12 @@ fn build_google_payload(
     if !generation_config.is_empty() {
         request["generationConfig"] = serde_json::Value::Object(generation_config);
     }
+    if let Some(google_tools) = build_google_tools(request_value) {
+        request["tools"] = google_tools;
+        if let Some(tool_config) = build_google_tool_config(request_value) {
+            request["toolConfig"] = tool_config;
+        }
+    }
 
     Ok(json!({
         "project": project_id.unwrap_or("rising-fact-p41fc"),
@@ -408,6 +414,71 @@ fn build_google_payload(
         "request": request,
         "userAgent": "antigravity",
         "requestId": format!("agent-{}", Uuid::new_v4())
+    }))
+}
+
+/// Convert the Codex/OpenAI `tools` array into Google's
+/// `functionDeclarations` shape. Each tool is expected to have either a
+/// `function` wrapper (OpenAI chat-completions style) or a flat
+/// `{name, description, parameters}` (Responses style). The returned
+/// value is the inner `tools` array (the gateway wraps it in
+/// `request.tools` before posting upstream).
+fn build_google_tools(request_value: &serde_json::Value) -> Option<serde_json::Value> {
+    let tools = request_value.get("tools")?.as_array()?;
+    let mut declarations: Vec<serde_json::Value> = Vec::new();
+    for tool in tools {
+        // Skip image-generation tools — those are handled separately via
+        // responseModalities in build_google_payload.
+        if tool
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|kind| kind == "image_generation")
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let function = tool.get("function").unwrap_or(tool);
+        let name = function.get("name").and_then(|v| v.as_str())?;
+        let description = function
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let parameters = function
+            .get("parameters")
+            .cloned()
+            .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
+        declarations.push(json!({
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+        }));
+    }
+    if declarations.is_empty() {
+        return None;
+    }
+    Some(json!([{ "functionDeclarations": declarations }]))
+}
+
+fn build_google_tool_config(request_value: &serde_json::Value) -> Option<serde_json::Value> {
+    let mode = match request_value.get("tool_choice") {
+        Some(serde_json::Value::String(s)) => match s.as_str() {
+            "auto" => "AUTO",
+            "none" => "NONE",
+            "required" => "ANY",
+            other => other,
+        },
+        Some(serde_json::Value::Object(obj)) => {
+            // {"type": "function", "function": {"name": "shell"}} → ANY with allowed
+            if obj.get("type").and_then(|v| v.as_str()) == Some("function") {
+                "ANY"
+            } else {
+                "AUTO"
+            }
+        }
+        _ => "AUTO",
+    };
+    Some(json!({
+        "functionCallingConfig": { "mode": mode }
     }))
 }
 
@@ -533,7 +604,8 @@ fn google_to_openai_response(value: &serde_json::Value, model: &str) -> serde_js
 
     let usage = response.get("usageMetadata").cloned().unwrap_or_default();
     let mut output_text = String::new();
-    let mut images = Vec::new();
+    let mut images: Vec<serde_json::Value> = Vec::new();
+    let mut function_calls: Vec<serde_json::Value> = Vec::new();
 
     for part in parts {
         if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
@@ -558,10 +630,33 @@ fn google_to_openai_response(value: &serde_json::Value, model: &str) -> serde_js
                 }));
             }
         }
+
+        if let Some(fc) = part.get("functionCall").and_then(|v| v.as_object()) {
+            let name = fc
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("tool")
+                .to_string();
+            let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
+            let args_str = if let Some(s) = args.as_str() {
+                s.to_string()
+            } else {
+                args.to_string()
+            };
+            let call_id = format!("call_{}", Uuid::new_v4().simple());
+            function_calls.push(json!({
+                "id": call_id,
+                "type": "function_call",
+                "call_id": call_id,
+                "name": name,
+                "arguments": args_str,
+                "status": "completed",
+            }));
+        }
     }
 
     let mut output = Vec::new();
-    if !output_text.is_empty() || images.is_empty() {
+    if !output_text.is_empty() || (images.is_empty() && function_calls.is_empty()) {
         output.push(json!({
             "type": "message",
             "id": format!("msg_{}", Uuid::new_v4().simple()),
@@ -573,6 +668,9 @@ fn google_to_openai_response(value: &serde_json::Value, model: &str) -> serde_js
                 "annotations": []
             }]
         }));
+    }
+    for call in function_calls {
+        output.push(call);
     }
 
     for image in &images {
@@ -649,6 +747,73 @@ fn render_response_sse(response: &serde_json::Value) -> Vec<u8> {
                     }))
                     .as_slice(),
                 );
+            }
+        }
+    }
+
+    if let Some(output) = response.get("output").and_then(|v| v.as_array()) {
+        for (idx, item) in output.iter().enumerate() {
+            if item.get("type").and_then(|v| v.as_str()) == Some("function_call") {
+                let call_id = item
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let arguments = item
+                    .get("arguments")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}");
+                if !call_id.is_empty() {
+                    chunks.extend_from_slice(
+                        sse_json(&json!({
+                            "type": "response.output_item.added",
+                            "output_index": idx,
+                            "item": {
+                                "id": call_id,
+                                "type": "function_call",
+                                "call_id": call_id,
+                                "name": name,
+                                "arguments": "",
+                                "status": "in_progress"
+                            }
+                        }))
+                        .as_slice(),
+                    );
+                    chunks.extend_from_slice(
+                        sse_json(&json!({
+                            "type": "response.function_call_arguments.delta",
+                            "output_index": idx,
+                            "delta": arguments
+                        }))
+                        .as_slice(),
+                    );
+                    chunks.extend_from_slice(
+                        sse_json(&json!({
+                            "type": "response.function_call_arguments.done",
+                            "output_index": idx,
+                            "arguments": arguments
+                        }))
+                        .as_slice(),
+                    );
+                    chunks.extend_from_slice(
+                        sse_json(&json!({
+                            "type": "response.output_item.done",
+                            "output_index": idx,
+                            "item": {
+                                "id": call_id,
+                                "type": "function_call",
+                                "call_id": call_id,
+                                "name": name,
+                                "arguments": arguments,
+                                "status": "completed"
+                            }
+                        }))
+                        .as_slice(),
+                    );
+                }
             }
         }
     }
@@ -874,5 +1039,90 @@ mod tests {
         assert_eq!(parts[0]["text"], "describe");
         assert_eq!(parts[1]["inline_data"]["mime_type"], "image/png");
         assert_eq!(parts[1]["inline_data"]["data"], "AAAA");
+    }
+
+    #[test]
+    fn build_google_payload_forwards_function_declarations() {
+        let request = json!({
+            "model": "claude-sonnet-4-6",
+            "input": "what is the weather",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "shell",
+                    "description": "Run a shell command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "command": { "type": "string" } }
+                    }
+                }
+            }],
+            "tool_choice": "auto"
+        });
+        let payload = build_google_payload(&request, "claude-sonnet-4-6", Some("proj-1")).unwrap();
+        let tools = payload["request"]["tools"]
+            .as_array()
+            .expect("tools forwarded");
+        assert_eq!(tools.len(), 1);
+        let decls = tools[0]["functionDeclarations"]
+            .as_array()
+            .expect("functionDeclarations");
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0]["name"], "shell");
+        assert_eq!(decls[0]["description"], "Run a shell command");
+        assert_eq!(
+            decls[0]["parameters"]["properties"]["command"]["type"],
+            "string"
+        );
+        assert_eq!(
+            payload["request"]["toolConfig"]["functionCallingConfig"]["mode"],
+            "AUTO"
+        );
+    }
+
+    #[test]
+    fn build_google_payload_skips_image_generation_tools() {
+        let request = json!({
+            "model": "gemini-3-pro-image",
+            "input": "draw a cat",
+            "tools": [{
+                "type": "image_generation",
+                "function": { "name": "draw", "parameters": {} }
+            }]
+        });
+        let payload = build_google_payload(&request, "gemini-3-pro-image", Some("proj-1")).unwrap();
+        // image_generation is handled via responseModalities, so the
+        // google functionDeclarations list should be empty (no tools key).
+        assert!(payload["request"].get("tools").is_none());
+    }
+
+    #[test]
+    fn google_to_openai_response_emits_function_call_items() {
+        let upstream = json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "parts": [
+                            { "text": "I will run shell" },
+                            { "functionCall": { "name": "shell", "args": "{\"command\":\"ls\"}" } }
+                        ]
+                    }
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 10,
+                    "candidatesTokenCount": 8,
+                    "totalTokenCount": 18
+                }
+            }
+        });
+        let response = google_to_openai_response(&upstream, "claude-sonnet-4-6");
+        let output = response["output"].as_array().expect("output");
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0]["type"], "message");
+        assert_eq!(output[0]["content"][0]["text"], "I will run shell");
+        assert_eq!(output[1]["type"], "function_call");
+        assert_eq!(output[1]["name"], "shell");
+        assert_eq!(output[1]["arguments"], "{\"command\":\"ls\"}");
+        assert!(output[1]["call_id"].as_str().unwrap().starts_with("call_"));
     }
 }

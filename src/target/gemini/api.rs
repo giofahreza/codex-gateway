@@ -361,11 +361,73 @@ fn build_google_payload(
     if !generation_config.is_empty() {
         request["generationConfig"] = serde_json::Value::Object(generation_config);
     }
+    if let Some(google_tools) = build_google_tools(request_value) {
+        request["tools"] = google_tools;
+        if let Some(tool_config) = build_google_tool_config(request_value) {
+            request["toolConfig"] = tool_config;
+        }
+    }
 
     Ok(json!({
         "project": project_id,
         "model": model,
         "request": request
+    }))
+}
+
+fn build_google_tools(request_value: &serde_json::Value) -> Option<serde_json::Value> {
+    let tools = request_value.get("tools")?.as_array()?;
+    let mut declarations: Vec<serde_json::Value> = Vec::new();
+    for tool in tools {
+        if tool
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|kind| kind == "image_generation")
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let function = tool.get("function").unwrap_or(tool);
+        let name = function.get("name").and_then(|v| v.as_str())?;
+        let description = function
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let parameters = function
+            .get("parameters")
+            .cloned()
+            .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
+        declarations.push(json!({
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+        }));
+    }
+    if declarations.is_empty() {
+        return None;
+    }
+    Some(json!([{ "functionDeclarations": declarations }]))
+}
+
+fn build_google_tool_config(request_value: &serde_json::Value) -> Option<serde_json::Value> {
+    let mode = match request_value.get("tool_choice") {
+        Some(serde_json::Value::String(s)) => match s.as_str() {
+            "auto" => "AUTO",
+            "none" => "NONE",
+            "required" => "ANY",
+            other => other,
+        },
+        Some(serde_json::Value::Object(obj)) => {
+            if obj.get("type").and_then(|v| v.as_str()) == Some("function") {
+                "ANY"
+            } else {
+                "AUTO"
+            }
+        }
+        _ => "AUTO",
+    };
+    Some(json!({
+        "functionCallingConfig": { "mode": mode }
     }))
 }
 
@@ -512,7 +574,8 @@ fn google_to_openai_response(value: &serde_json::Value, model: &str) -> serde_js
 
     let usage = response.get("usageMetadata").cloned().unwrap_or_default();
     let mut output_text = String::new();
-    let mut images = Vec::new();
+    let mut images: Vec<serde_json::Value> = Vec::new();
+    let mut function_calls: Vec<serde_json::Value> = Vec::new();
 
     for part in parts {
         if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
@@ -537,10 +600,33 @@ fn google_to_openai_response(value: &serde_json::Value, model: &str) -> serde_js
                 }));
             }
         }
+
+        if let Some(fc) = part.get("functionCall").and_then(|value| value.as_object()) {
+            let name = fc
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("tool")
+                .to_string();
+            let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
+            let args_str = if let Some(s) = args.as_str() {
+                s.to_string()
+            } else {
+                args.to_string()
+            };
+            let call_id = format!("call_{}", Uuid::new_v4().simple());
+            function_calls.push(json!({
+                "id": call_id,
+                "type": "function_call",
+                "call_id": call_id,
+                "name": name,
+                "arguments": args_str,
+                "status": "completed",
+            }));
+        }
     }
 
     let mut output = Vec::new();
-    if !output_text.is_empty() || images.is_empty() {
+    if !output_text.is_empty() || (images.is_empty() && function_calls.is_empty()) {
         output.push(json!({
             "type": "message",
             "id": format!("msg_{}", Uuid::new_v4().simple()),
@@ -552,6 +638,9 @@ fn google_to_openai_response(value: &serde_json::Value, model: &str) -> serde_js
                 "annotations": []
             }]
         }));
+    }
+    for call in function_calls {
+        output.push(call);
     }
 
     for image in &images {
