@@ -1,12 +1,29 @@
-use axum::http::Uri;
+use axum::http::{StatusCode, Uri};
 use bytes::Bytes;
 
-use crate::source::{ResponseMode, RoutedRequest, TargetModel};
+use crate::source::{ResponseMode, RouteError, RoutedRequest, TargetModel};
 
 pub fn target_from_request_body(body: &Bytes) -> Option<TargetModel> {
     let value: serde_json::Value = serde_json::from_slice(body).ok()?;
     let model = value.get("model").and_then(|value| value.as_str())?;
     Some(target_from_model(model))
+}
+
+pub fn validate_provider_prefix_in_body(body: &Bytes) -> Result<(), RouteError> {
+    let value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(_) => return Ok(()),
+    };
+    let Some(model) = value.get("model").and_then(|value| value.as_str()) else {
+        return Ok(());
+    };
+    if model.contains(':') && parse_provider_prefixed_model(model).is_none() {
+        return Err(RouteError {
+            status: StatusCode::BAD_REQUEST,
+            message: "invalid provider prefix; use three-letter prefix:model with no whitespace after colon",
+        });
+    }
+    Ok(())
 }
 
 pub fn target_from_model(model: &str) -> TargetModel {

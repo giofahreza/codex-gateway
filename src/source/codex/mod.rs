@@ -27,6 +27,7 @@ pub fn route_to_target(
     }
 
     if upstream_path == "responses" && *method == Method::POST {
+        crate::source::v1::provider::validate_provider_prefix_in_body(&body)?;
         let target = crate::source::v1::provider::target_from_request_body(&body)
             .unwrap_or(TargetModel::Codex);
         if target != TargetModel::Codex {
@@ -291,6 +292,21 @@ mod tests {
         let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
         assert_eq!(body["model"], "gpt-5.4");
         assert_eq!(body["input"], "hello");
+    }
+
+    #[test]
+    fn codex_responses_rejects_invalid_provider_prefix_syntax() {
+        let uri: Uri = "/codex/responses".parse().unwrap();
+        let err = route_to_target(
+            "/codex/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"agw: gemini-2.5-pro","input":"hello"}"#),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[test]
