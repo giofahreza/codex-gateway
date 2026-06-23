@@ -565,10 +565,7 @@ pub(super) fn build_chat_completions_payload(raw: &Value, model: &str) -> Result
 fn build_chat_thinking(raw: &Value) -> Option<Value> {
     if let Some(reasoning) = raw.get("reasoning") {
         if let Some(obj) = reasoning.as_object() {
-            let effort = obj
-                .get("effort")
-                .and_then(|v| v.as_str())
-                .unwrap_or("none");
+            let effort = obj.get("effort").and_then(|v| v.as_str()).unwrap_or("none");
             return Some(match effort {
                 "none" => json!({ "type": "disabled" }),
                 _ => json!({ "type": "adaptive" }),
@@ -629,7 +626,7 @@ fn build_chat_messages(raw: &Value) -> Result<Option<Value>, String> {
             }
             out.push(entry);
         }
-        return Ok(Some(Value::Array(out)));
+        return Ok(Some(Value::Array(sanitize_chat_messages(out))));
     }
 
     if let Some(prompt) = raw.get("prompt") {
@@ -673,11 +670,85 @@ fn build_chat_messages(raw: &Value) -> Result<Option<Value>, String> {
             if out.is_empty() {
                 return Ok(None);
             }
-            return Ok(Some(Value::Array(out)));
+            return Ok(Some(Value::Array(sanitize_chat_messages(out))));
         }
     }
 
     Ok(None)
+}
+
+fn sanitize_chat_messages(messages: Vec<Value>) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut index = 0;
+
+    while index < messages.len() {
+        let message = &messages[index];
+        let role = chat_message_role(message);
+        if role == Some("tool") {
+            index += 1;
+            continue;
+        }
+
+        let has_tool_calls = message
+            .get("tool_calls")
+            .and_then(|v| v.as_array())
+            .map(|calls| !calls.is_empty())
+            .unwrap_or(false);
+        if role == Some("assistant") && has_tool_calls {
+            let mut pending_ids = chat_message_tool_call_ids(message);
+            if pending_ids.is_empty() {
+                index += 1;
+                continue;
+            }
+
+            let mut tool_messages = Vec::new();
+            let mut next = index + 1;
+            while next < messages.len() && chat_message_role(&messages[next]) == Some("tool") {
+                if let Some(tool_call_id) = chat_message_tool_call_id(&messages[next]) {
+                    if let Some(pos) = pending_ids.iter().position(|id| id == tool_call_id) {
+                        pending_ids.remove(pos);
+                        tool_messages.push(messages[next].clone());
+                    }
+                }
+                next += 1;
+            }
+
+            if !tool_messages.is_empty() {
+                out.push(message.clone());
+                out.extend(tool_messages);
+            }
+            index = next;
+            continue;
+        }
+
+        out.push(message.clone());
+        index += 1;
+    }
+
+    out
+}
+
+fn chat_message_role(message: &Value) -> Option<&str> {
+    message.get("role").and_then(|v| v.as_str())
+}
+
+fn chat_message_tool_call_ids(message: &Value) -> Vec<String> {
+    message
+        .get("tool_calls")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|call| call.get("id").and_then(|v| v.as_str()))
+        .filter(|id| !id.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn chat_message_tool_call_id(message: &Value) -> Option<&str> {
+    message
+        .get("tool_call_id")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.is_empty())
 }
 
 fn input_item_to_chat_message(item: &Value) -> Result<Option<Value>, String> {
@@ -1562,6 +1633,53 @@ mod tests {
         assert_eq!(payload["messages"][3]["role"], "tool");
         assert_eq!(payload["messages"][3]["tool_call_id"], "call_1");
         assert_eq!(payload["messages"][3]["content"], "ok");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_drops_orphan_tool_outputs() {
+        let raw = json!({
+            "model": "MiniMax-M3",
+            "input": [
+                { "type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}] },
+                { "type": "function_call_output", "call_id": "call_missing", "output": "ok" }
+            ],
+            "tools": [
+                { "type": "function", "name": "shell", "description": "Run a shell command", "parameters": { "type": "object" } }
+            ]
+        });
+
+        let payload = build_chat_completions_payload(&raw, "MiniMax-M3").unwrap();
+        let messages = payload["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_drops_interrupted_tool_outputs() {
+        let raw = json!({
+            "model": "MiniMax-M3",
+            "input": [
+                { "type": "message", "role": "user", "content": [{"type": "input_text", "text": "run"}] },
+                { "type": "function_call", "call_id": "call_1", "name": "shell", "arguments": "{\"command\":\"echo ok\"}" },
+                { "type": "message", "role": "user", "content": [{"type": "input_text", "text": "next"}] },
+                { "type": "function_call_output", "call_id": "call_1", "output": "ok" }
+            ],
+            "tools": [
+                { "type": "function", "name": "shell", "description": "Run a shell command", "parameters": { "type": "object" } }
+            ]
+        });
+
+        let payload = build_chat_completions_payload(&raw, "MiniMax-M3").unwrap();
+        let messages = payload["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "user");
+        assert!(messages.iter().all(|message| message["role"] != "tool"));
+        assert!(messages
+            .iter()
+            .all(|message| message.get("tool_calls").is_none()));
     }
 
     #[test]
