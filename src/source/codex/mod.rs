@@ -264,7 +264,7 @@ mod tests {
             &Method::POST,
             &HeaderMap::new(),
             Bytes::from_static(
-                br#"{"model":"agw: gemini-2.5-pro","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}]}"#,
+                br#"{"model":"agw:gemini-2.5-pro","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}]}"#,
             ),
         )
         .unwrap();
@@ -283,7 +283,7 @@ mod tests {
             &uri,
             &Method::POST,
             &HeaderMap::new(),
-            Bytes::from_static(br#"{"model":"openai: gpt-5.4","input":"hello"}"#),
+            Bytes::from_static(br#"{"model":"cod:gpt-5.4","input":"hello"}"#),
         )
         .unwrap();
 

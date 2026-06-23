@@ -41,24 +41,35 @@ fn target_from_unprefixed_model(model: &str) -> TargetModel {
 }
 
 fn parse_provider_prefixed_model(model: &str) -> Option<(TargetModel, String)> {
-    let (provider, model) = model.split_once(':')?;
-    let target = target_from_provider_prefix(provider.trim())?;
-    let model = model.trim();
-    if model.is_empty() {
+    let (provider, upstream_model) = model.split_once(':')?;
+    if provider.len() != 3 || !provider.chars().all(|ch| ch.is_ascii_alphabetic()) {
         return None;
     }
-    Some((target, model.to_string()))
+    let target = target_from_provider_prefix(provider)?;
+    if upstream_model
+        .chars()
+        .next()
+        .is_none_or(|ch| ch.is_whitespace())
+    {
+        return None;
+    }
+
+    let upstream_model = upstream_model.trim_end();
+    if upstream_model.is_empty() {
+        return None;
+    }
+    Some((target, upstream_model.to_string()))
 }
 
 fn target_from_provider_prefix(provider: &str) -> Option<TargetModel> {
     match provider.to_ascii_lowercase().as_str() {
-        "agw" | "antigravity" => Some(TargetModel::Antigravity),
-        "gemini" | "google" => Some(TargetModel::Gemini),
-        "qwen" => Some(TargetModel::Qwen),
-        "deepseek" => Some(TargetModel::DeepSeek),
-        "grok" | "xai" => Some(TargetModel::Grok),
-        "minimax" => Some(TargetModel::MiniMax),
-        "codex" | "openai" => Some(TargetModel::Codex),
+        "agw" => Some(TargetModel::Antigravity),
+        "gem" => Some(TargetModel::Gemini),
+        "qwn" => Some(TargetModel::Qwen),
+        "dsk" => Some(TargetModel::DeepSeek),
+        "grk" => Some(TargetModel::Grok),
+        "min" => Some(TargetModel::MiniMax),
+        "cod" => Some(TargetModel::Codex),
         _ => None,
     }
 }
@@ -130,18 +141,18 @@ mod tests {
         );
         assert_eq!(target_from_model("gemini-2.5-pro"), TargetModel::Gemini);
         assert_eq!(
-            target_from_model("agw: gemini-2.5-pro"),
+            target_from_model("agw:gemini-2.5-pro"),
             TargetModel::Antigravity
         );
+        assert_eq!(target_from_model("gem:gemini-2.5-pro"), TargetModel::Gemini);
+        assert_eq!(target_from_model("qwn:qwen3.7-plus"), TargetModel::Qwen);
         assert_eq!(
-            target_from_model("antigravity: gemini-2.5-pro"),
-            TargetModel::Antigravity
+            target_from_model("dsk:deepseek-v4-pro"),
+            TargetModel::DeepSeek
         );
-        assert_eq!(
-            target_from_model("gemini: gemini-2.5-pro"),
-            TargetModel::Gemini
-        );
-        assert_eq!(target_from_model("openai: gpt-5.4"), TargetModel::Codex);
+        assert_eq!(target_from_model("grk:grok-4.3"), TargetModel::Grok);
+        assert_eq!(target_from_model("min:MiniMax-M3"), TargetModel::MiniMax);
+        assert_eq!(target_from_model("cod:gpt-5.4"), TargetModel::Codex);
         assert_eq!(
             target_from_model("gemini-3-pro-image"),
             TargetModel::Antigravity
@@ -162,13 +173,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_provider_prefixed_model_requires_three_letter_prefix_without_space() {
+        assert!(parse_provider_prefixed_model("agw:gemini-2.5-pro").is_some());
+        assert!(parse_provider_prefixed_model("agw: gemini-2.5-pro").is_none());
+        assert!(parse_provider_prefixed_model("gemini:gemini-2.5-pro").is_none());
+        assert!(parse_provider_prefixed_model("openai:gpt-5.4").is_none());
+        assert!(parse_provider_prefixed_model("agw:").is_none());
+    }
+
+    #[test]
     fn convert_strips_provider_prefix_from_upstream_model() {
         let uri: Uri = "/v1/responses".parse().unwrap();
         let routed = convert(
             TargetModel::Antigravity,
             "responses".to_string(),
             &uri,
-            Bytes::from_static(br#"{"model":"agw: gemini-2.5-pro","input":"hi"}"#),
+            Bytes::from_static(br#"{"model":"agw:gemini-2.5-pro","input":"hi"}"#),
         );
 
         let body: serde_json::Value = serde_json::from_slice(&routed.upstream_body).unwrap();
