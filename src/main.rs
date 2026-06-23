@@ -699,6 +699,7 @@ async fn dashboard() -> impl IntoResponse {
         gap: 16px;
         flex-wrap: wrap;
         font-size: 13px;
+        margin-bottom: 10px;
       }
       .quota-bar-wrap {
         flex: 1;
@@ -724,6 +725,20 @@ async fn dashboard() -> impl IntoResponse {
       .quota-bar-fill.low { background: #22c55e; }
       .quota-bar-fill.mid { background: #f59e0b; }
       .quota-bar-fill.high { background: #ef4444; }
+      .account-models {
+        clear: both;
+        margin-top: 10px;
+        line-height: 1.45;
+      }
+      .account-models code {
+        display: block;
+        box-sizing: border-box;
+        margin-top: 4px;
+        max-width: 100%;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
       .provider-section {
         margin-top: 28px;
       }
@@ -1173,7 +1188,7 @@ async fn dashboard() -> impl IntoResponse {
         appendModelLabels(labels, seen, quota && quota.models);
         appendModelLabels(labels, seen, quota && quota.data);
         return labels.length
-          ? '<div class="muted">models: <code>' + labels.map(escapeHtml).join(' | ') + '</code></div>'
+          ? '<div class="muted account-models">models:<code>' + labels.map(escapeHtml).join(' | ') + '</code></div>'
           : '';
       }
       function buildCard(a, quota) {
