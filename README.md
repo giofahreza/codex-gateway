@@ -237,6 +237,13 @@ Current routing rules:
 
 This means clients should stay on `/v1/*` and switch providers by changing only the `model` field.
 
+Provider prefixes can force a specific target while keeping the upstream model id unchanged. The gateway strips the prefix before forwarding to the provider:
+
+- `agw: gemini-2.5-pro` or `antigravity: gemini-2.5-pro` routes to Antigravity with upstream model `gemini-2.5-pro`.
+- `gemini: gemini-2.5-pro` routes to the native Gemini target with upstream model `gemini-2.5-pro`.
+- Supported prefixes: `agw`, `antigravity`, `gemini`, `google`, `qwen`, `deepseek`, `grok`, `xai`, `minimax`, `codex`, `openai`.
+- Old unprefixed model names still work exactly as before.
+
 Generate an image through Antigravity using the unified `/v1/responses` endpoint:
 
 ```bash

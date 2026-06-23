@@ -211,6 +211,50 @@ mod tests {
     }
 
     #[test]
+    fn route_to_target_uses_provider_prefix_and_strips_it_for_upstream() {
+        let uri: Uri = "/v1/responses".parse().unwrap();
+        let routed = route_to_target(
+            "/v1/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"agw: gemini-2.5-pro","input":"hi"}"#),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, crate::source::TargetModel::Antigravity);
+        let body: serde_json::Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "gemini-2.5-pro");
+        assert_eq!(body["input"], "hi");
+
+        let direct = route_to_target(
+            "/v1/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"gemini: gemini-2.5-pro","input":"hi"}"#),
+        )
+        .unwrap();
+
+        assert_eq!(direct.target, crate::source::TargetModel::Gemini);
+        let body: serde_json::Value = serde_json::from_slice(&direct.upstream_body).unwrap();
+        assert_eq!(body["model"], "gemini-2.5-pro");
+
+        let codex = route_to_target(
+            "/v1/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"openai: gpt-5.4","input":"hi"}"#),
+        )
+        .unwrap();
+
+        assert_eq!(codex.target, crate::source::TargetModel::Codex);
+        let body: serde_json::Value = serde_json::from_slice(&codex.upstream_body).unwrap();
+        assert_eq!(body["model"], "gpt-5.4");
+    }
+
+    #[test]
     fn route_to_target_uses_antigravity_for_claude_and_special_gemini_models() {
         let uri: Uri = "/v1/responses".parse().unwrap();
 

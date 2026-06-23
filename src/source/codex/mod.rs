@@ -256,6 +256,44 @@ mod tests {
     }
 
     #[test]
+    fn codex_responses_uses_provider_prefix_and_strips_it_for_upstream() {
+        let uri: Uri = "/codex/responses".parse().unwrap();
+        let routed = route_to_target(
+            "/codex/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(
+                br#"{"model":"agw: gemini-2.5-pro","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}]}"#,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::Antigravity);
+        let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "gemini-2.5-pro");
+        assert_eq!(body["messages"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn codex_responses_strips_codex_provider_prefix_for_upstream() {
+        let uri: Uri = "/codex/responses".parse().unwrap();
+        let routed = route_to_target(
+            "/codex/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"openai: gpt-5.4","input":"hello"}"#),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::Codex);
+        let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "gpt-5.4");
+        assert_eq!(body["input"], "hello");
+    }
+
+    #[test]
     fn codex_responses_converts_responses_tools_for_deepseek() {
         let uri: Uri = "/codex/responses".parse().unwrap();
         let routed = route_to_target(

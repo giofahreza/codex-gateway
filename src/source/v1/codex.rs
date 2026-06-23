@@ -22,6 +22,7 @@ pub fn convert(
     let response_mode = resolve_mode(&upstream_path, method, headers, &body);
 
     let upstream_body = if is_responses_post {
+        let body = crate::source::v1::provider::strip_provider_prefix_from_body(body);
         convert_openai_compat_body_to_codex(headers, body)
     } else {
         body
