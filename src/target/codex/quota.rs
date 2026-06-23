@@ -15,6 +15,7 @@ pub struct QuotaSummary {
     pub plan_type: String,
     pub code_generation: QuotaRateSummary,
     pub code_review: QuotaRateSummary,
+    pub models: Vec<ModelSummary>,
 }
 
 #[derive(Default, Clone, Serialize)]
@@ -27,6 +28,12 @@ pub struct QuotaRateSummary {
 pub struct QuotaWindowSummary {
     pub used_percent: Option<f64>,
     pub reset_label: String,
+}
+
+#[derive(Default, Clone, Serialize)]
+pub struct ModelSummary {
+    pub model_id: String,
+    pub display_name: String,
 }
 
 pub async fn get_quota_summaries(state: &crate::AppState) -> Vec<serde_json::Value> {
@@ -79,7 +86,8 @@ pub async fn get_quota_summaries(state: &crate::AppState) -> Vec<serde_json::Val
                 "file_name": token.file_name.clone().unwrap_or_default(),
                 "plan_type": entry.summary.plan_type,
                 "code_generation": entry.summary.code_generation,
-                "code_review": entry.summary.code_review
+                "code_review": entry.summary.code_review,
+                "models": entry.summary.models
             }));
         }
     }
@@ -168,12 +176,81 @@ async fn fetch_codex_quota(
         plan_type,
         code_generation: code_gen,
         code_review,
+        models: fetch_codex_models(state, token).await.unwrap_or_default(),
     };
     QuotaCacheEntry {
         fetched_at: std::time::Instant::now(),
         summary,
         error: None,
     }
+}
+
+async fn fetch_codex_models(
+    state: &crate::AppState,
+    token: &super::tokens::UpstreamToken,
+) -> Result<Vec<ModelSummary>, String> {
+    let mut req = state
+        .client
+        .get(super::gateway::build_upstream_url(
+            &state.cfg.upstream_base,
+            "models",
+            Some("client_version=1.0.0"),
+        ))
+        .header("Authorization", format!("Bearer {}", token.token))
+        .header("Content-Type", "application/json")
+        .header(
+            "User-Agent",
+            "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
+        );
+    if let Some(account_id) = token.account_id.as_ref() {
+        if !account_id.trim().is_empty() {
+            req = req.header("Chatgpt-Account-Id", account_id);
+        }
+    }
+
+    let resp = req
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    let status = resp.status();
+    let body = resp.text().await.map_err(|err| err.to_string())?;
+    if !status.is_success() {
+        return Err(format!("status {}: {}", status.as_u16(), body));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&body).map_err(|_| "failed to parse models response".to_string())?;
+    Ok(parse_models_response(&value))
+}
+
+fn parse_models_response(value: &serde_json::Value) -> Vec<ModelSummary> {
+    value
+        .get("models")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|model| {
+            let model_id = model
+                .get("slug")
+                .or_else(|| model.get("id"))
+                .or_else(|| model.get("model_id"))
+                .and_then(|value| value.as_str())?
+                .trim();
+            if model_id.is_empty() {
+                return None;
+            }
+            let display_name = model
+                .get("display_name")
+                .or_else(|| model.get("name"))
+                .and_then(|value| value.as_str())
+                .unwrap_or(model_id)
+                .to_string();
+            Some(ModelSummary {
+                model_id: model_id.to_string(),
+                display_name,
+            })
+        })
+        .collect()
 }
 
 fn extract_rate_summary(rate_limit: Option<&serde_json::Value>) -> QuotaRateSummary {

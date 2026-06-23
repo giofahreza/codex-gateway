@@ -45,6 +45,7 @@ pub struct QuotaSummary {
     /// could parse.
     pub has_balance: bool,
     pub balances: Vec<BalanceEntry>,
+    pub models: Vec<ModelSummary>,
     /// Raw response, useful for debugging.
     pub raw: Value,
 }
@@ -55,6 +56,13 @@ pub struct BalanceEntry {
     pub total_balance: String,
     pub granted_balance: String,
     pub topped_up_balance: String,
+}
+
+#[derive(Default, Clone, Debug, Serialize)]
+pub struct ModelSummary {
+    pub model_id: String,
+    pub display_name: String,
+    pub owned_by: String,
 }
 
 pub async fn get_quota_summaries(state: &crate::AppState) -> Vec<Value> {
@@ -98,6 +106,7 @@ pub async fn get_quota_summaries(state: &crate::AppState) -> Vec<Value> {
                 "is_available": entry.summary.is_available,
                 "has_balance": entry.summary.has_balance,
                 "balances": entry.summary.balances,
+                "models": entry.summary.models,
                 "raw": entry.summary.raw,
             }));
         }
@@ -127,6 +136,7 @@ async fn fetch_account_quota(
             summary.is_available = is_available;
             summary.has_balance = !balances.is_empty();
             summary.balances = balances;
+            summary.models = fetch_models(client, account).await.unwrap_or_default();
             summary.raw = raw;
             QuotaCacheEntry {
                 fetched_at: std::time::Instant::now(),
@@ -140,6 +150,69 @@ async fn fetch_account_quota(
             error: Some(err),
         },
     }
+}
+
+async fn fetch_models(
+    client: &reqwest::Client,
+    account: &super::accounts::DeepSeekAccount,
+) -> Result<Vec<ModelSummary>, String> {
+    let base = normalize_base_url(account.base_url.as_deref());
+    let url = format!("{}/models", base.trim_end_matches('/'));
+
+    let resp = client
+        .get(&url)
+        .header(
+            "Authorization",
+            format!("Bearer {}", account.api_key.trim()),
+        )
+        .header("Accept", "application/json")
+        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .send()
+        .await
+        .map_err(|e| format!("DeepSeek models request to {} failed: {}", url, e))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("DeepSeek models body read failed: {}", e))?;
+    if !status.is_success() {
+        return Err(format!(
+            "DeepSeek models at {} returned {}: {}",
+            url, status, text
+        ));
+    }
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|e| format!("DeepSeek models JSON parse failed: {}", e))?;
+    Ok(parse_models_response(&value))
+}
+
+fn parse_models_response(value: &Value) -> Vec<ModelSummary> {
+    value
+        .get("data")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let model_id = item.get("id").and_then(|v| v.as_str())?.trim();
+            if model_id.is_empty() {
+                return None;
+            }
+            let display_name = item
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(model_id)
+                .to_string();
+            Some(ModelSummary {
+                model_id: model_id.to_string(),
+                display_name,
+                owned_by: item
+                    .get("owned_by")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("deepseek")
+                    .to_string(),
+            })
+        })
+        .collect()
 }
 
 async fn fetch_balance(

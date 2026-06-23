@@ -910,6 +910,7 @@ async fn dashboard() -> impl IntoResponse {
       let lastQuota = new Map();
       let lastAgwQuota = new Map();
       let lastGeminiQuota = new Map();
+      let lastQwenQuota = new Map();
       let openAgwRows = new Set();
       let openGeminiRows = new Set();
       let openQwenRows = new Set();
@@ -1144,6 +1145,37 @@ async fn dashboard() -> impl IntoResponse {
         }
         return bars ? '<div class="card-quota">' + bars + '</div>' : '';
       }
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, function(ch) {
+          return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch];
+        });
+      }
+      function modelLabel(model) {
+        if (!model) return '';
+        if (typeof model === 'string') return model.trim();
+        var id = model.model_id || model.id || model.slug || model.model || model.model_name || model.name || '';
+        return String(id).trim();
+      }
+      function appendModelLabels(out, seen, models) {
+        if (!models || !models.length) return;
+        models.forEach(function(model) {
+          var label = modelLabel(model);
+          if (!label || seen.has(label)) return;
+          seen.add(label);
+          out.push(label);
+        });
+      }
+      function renderAccountModels(a, quota) {
+        var labels = [];
+        var seen = new Set();
+        appendModelLabels(labels, seen, a && a.models);
+        appendModelLabels(labels, seen, quota && quota.available_models);
+        appendModelLabels(labels, seen, quota && quota.models);
+        appendModelLabels(labels, seen, quota && quota.data);
+        return labels.length
+          ? '<div class="muted">models: <code>' + labels.map(escapeHtml).join(' | ') + '</code></div>'
+          : '';
+      }
       function buildCard(a, quota) {
         var dot = a.enabled ? '#2ecc71' : '#e74c3c';
         var toggleLabel = a.enabled ? 'Disable' : 'Enable';
@@ -1161,6 +1193,7 @@ async fn dashboard() -> impl IntoResponse {
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
           + '</div>'
           + renderQuotaBars(quota)
+          + renderAccountModels(a, quota)
           + '</div>';
       }
       async function refresh() {
@@ -1205,9 +1238,10 @@ async fn dashboard() -> impl IntoResponse {
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
           + extra + '</div>'
           + renderQuotaBars(quota)
+          + renderAccountModels(a, quota)
           + '</div>';
       }
-      function buildQwenCard(a) {
+      function buildQwenCard(a, quota) {
         var dot = a.enabled ? '#2ecc71' : '#e74c3c';
         var toggleLabel = a.enabled ? 'Disable' : 'Enable';
         var actions = '';
@@ -1248,6 +1282,8 @@ async fn dashboard() -> impl IntoResponse {
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + (a.label || a.email || a.account_id || 'N/A') + '</span><span class="card-actions">' + actions + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
+          + renderQuotaBars(quota)
+          + renderAccountModels(a, quota)
           + meta
           + '</div>';
       }
@@ -1296,11 +1332,7 @@ async fn dashboard() -> impl IntoResponse {
         if (a.last_error_at) {
           meta += '<div class="muted">last error: ' + a.last_error_at + '</div>';
         }
-        if (a.models && a.models.length) {
-          var preview = a.models.slice(0, 8).map(function(model) { return model.model_id; }).join(', ');
-          var suffix = a.models.length > 8 ? ' +' + (a.models.length - 8) + ' more' : '';
-          meta += '<div class="muted">models: <code>' + preview + suffix + '</code></div>';
-        }
+        meta += renderAccountModels(a, null);
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + (a.name || a.label || a.email || a.account_id || 'N/A') + '</span><span class="card-actions">' + actions + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
@@ -1349,9 +1381,18 @@ async fn dashboard() -> impl IntoResponse {
         if (!res) return;
         var data = await res.json();
         var accounts = data.accounts || [];
-        var cards = accounts.map(function(a) { return buildQwenCard(a); }).join('');
+        var cards = accounts.map(function(a) { return buildQwenCard(a, lastQwenQuota.get(a.file_name || a.label)); }).join('');
         document.getElementById('qwenCards').innerHTML = cards || '<div class="empty-state">No Qwen accounts</div>';
         document.getElementById('qwenBadgeCount').textContent = accounts.length + ' accounts';
+      }
+      async function refreshQwenQuota() {
+        const res = await adminFetch('/qwen/quota.json');
+        if (!res) return;
+        const quota = await res.json();
+        const quotaMap = new Map();
+        (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
+        lastQwenQuota = quotaMap;
+        refreshQwenAccounts();
       }
       async function refreshDeepSeekAccounts() {
         var res = await adminFetch('/deepseek/accounts.json');
@@ -1402,6 +1443,7 @@ async fn dashboard() -> impl IntoResponse {
           + '<div class="card-header"><span class="card-email">' + (a.label || a.account_id || 'MiniMax') + '</span><span class="card-actions">' + actions + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quota)
+          + renderAccountModels(a, quota)
           + meta
           + '</div>';
       }
@@ -2073,6 +2115,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshAgwAccounts();
         refreshGeminiQuota();
         refreshGeminiAccounts();
+        refreshQwenQuota();
         refreshQwenAccounts();
         refreshDeepSeekAccounts();
         refreshDeepSeekQuota();
@@ -2097,6 +2140,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshAgwAccounts();
         refreshGeminiQuota();
         refreshGeminiAccounts();
+        refreshQwenQuota();
         refreshQwenAccounts();
         refreshDeepSeekAccounts();
         refreshDeepSeekQuota();
@@ -2110,7 +2154,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshQuota();
         refreshAgwQuota().then(() => refreshAgwAccounts());
         refreshGeminiQuota().then(() => refreshGeminiAccounts());
-        refreshQwenAccounts();
+        refreshQwenQuota().then(() => refreshQwenAccounts());
         refreshDeepSeekAccounts();
         refreshDeepSeekQuota();
         refreshGrokAccounts();
@@ -2124,6 +2168,7 @@ async fn dashboard() -> impl IntoResponse {
         setInterval(() => { if (adminAuthenticated) refreshQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshAgwQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshGeminiQuota(); }, 60000);
+        setInterval(() => { if (adminAuthenticated) refreshQwenQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshDeepSeekQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshMiniMaxQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshAgwAccounts(); }, 10000);

@@ -46,6 +46,8 @@ pub struct QuotaSummary {
     pub weekly: Option<WindowSummary>,
     /// Per-model breakdown as MiniMax reports it.
     pub models: Vec<ModelQuota>,
+    /// Live model catalog from /v1/models.
+    pub available_models: Vec<ModelInfo>,
     /// The raw response, useful for debugging.
     pub raw: Value,
 }
@@ -72,6 +74,13 @@ pub struct ModelQuota {
     pub model_name: String,
     pub current_window: Option<WindowSummary>,
     pub weekly: Option<WindowSummary>,
+}
+
+#[derive(Default, Clone, Debug, Serialize)]
+pub struct ModelInfo {
+    pub model_id: String,
+    pub display_name: String,
+    pub owned_by: String,
 }
 
 pub async fn get_quota_summaries(state: &crate::AppState) -> Vec<Value> {
@@ -144,6 +153,7 @@ pub async fn get_quota_summaries(state: &crate::AppState) -> Vec<Value> {
                 "status_msg": entry.summary.status_msg,
                 "current_window": adapt(&entry.summary.current_window),
                 "weekly": adapt(&entry.summary.weekly),
+                "available_models": entry.summary.available_models,
                 "models": adapted_models,
             }));
         }
@@ -183,6 +193,9 @@ async fn fetch_account_quota(
                 summary.weekly = first.weekly.clone();
             }
             summary.models = models;
+            summary.available_models = fetch_available_models(client, account)
+                .await
+                .unwrap_or_default();
             QuotaCacheEntry {
                 fetched_at: std::time::Instant::now(),
                 summary,
@@ -195,6 +208,78 @@ async fn fetch_account_quota(
             error: Some(err),
         },
     }
+}
+
+async fn fetch_available_models(
+    client: &reqwest::Client,
+    account: &super::accounts::MiniMaxAccount,
+) -> Result<Vec<ModelInfo>, String> {
+    let base = super::api::normalize_base_url(account.base_url.as_deref());
+    let url = if base.ends_with("/models") {
+        base
+    } else if base.ends_with("/v1") {
+        format!("{}/models", base)
+    } else {
+        format!("{}/v1/models", base)
+    };
+    let resp = client
+        .get(&url)
+        .header(
+            "Authorization",
+            format!("Bearer {}", account.api_key.trim()),
+        )
+        .header("Accept", "application/json")
+        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .send()
+        .await
+        .map_err(|e| format!("MiniMax models request to {} failed: {}", url, e))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("MiniMax models body read failed: {}", e))?;
+    if !status.is_success() {
+        return Err(format!(
+            "MiniMax models at {} returned {}: {}",
+            url, status, text
+        ));
+    }
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|e| format!("MiniMax models JSON parse failed: {}", e))?;
+    Ok(parse_models_response(&value))
+}
+
+fn parse_models_response(value: &Value) -> Vec<ModelInfo> {
+    value
+        .get("data")
+        .and_then(|v| v.as_array())
+        .or_else(|| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let model_id = item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .or_else(|| item.get("model").and_then(|v| v.as_str()))?
+                .trim();
+            if model_id.is_empty() {
+                return None;
+            }
+            Some(ModelInfo {
+                model_id: model_id.to_string(),
+                display_name: item
+                    .get("display_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(model_id)
+                    .to_string(),
+                owned_by: item
+                    .get("owned_by")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("minimax")
+                    .to_string(),
+            })
+        })
+        .collect()
 }
 
 async fn fetch_quota(
