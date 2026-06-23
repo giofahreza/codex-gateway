@@ -23,9 +23,7 @@ pub fn resolve(path: &str, method: &Method) -> Result<String, RouteError> {
     }
     if upstream_path.starts_with("models/") {
         return if *method == Method::GET || *method == Method::HEAD {
-            // Codex upstream does not expose OpenAI-style model retrieve;
-            // fetch list and adapt downstream into /v1/models/{id}.
-            Ok("models".to_string())
+            Ok(upstream_path)
         } else {
             Err(RouteError {
                 status: StatusCode::METHOD_NOT_ALLOWED,

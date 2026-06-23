@@ -179,6 +179,22 @@ mod tests {
     }
 
     #[test]
+    fn route_to_target_preserves_v1_model_retrieve_id() {
+        let uri: Uri = "/v1/models/grok-4.3".parse().unwrap();
+        let routed = route_to_target(
+            "/v1/models/grok-4.3",
+            &uri,
+            &Method::GET,
+            &HeaderMap::new(),
+            Bytes::new(),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, crate::source::TargetModel::UnifiedV1Models);
+        assert_eq!(routed.upstream_path, "models/grok-4.3");
+    }
+
+    #[test]
     fn route_to_target_uses_qwen_for_qwen_models() {
         let uri: Uri = "/v1/responses".parse().unwrap();
         let body = Bytes::from_static(br#"{"model":"qwen3.7-plus","input":"hi"}"#);

@@ -3566,9 +3566,13 @@ async fn proxy(
                 .into_response();
         }
         TargetModel::MiniMax => {
-            return target::minimax::responses_native::responses(State(state), headers, routed.upstream_body)
-                .await
-                .into_response();
+            return target::minimax::responses_native::responses(
+                State(state),
+                headers,
+                routed.upstream_body,
+            )
+            .await
+            .into_response();
         }
         TargetModel::Codex => {}
     }
@@ -5541,6 +5545,7 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             "DeepSeek model routed through the configured DeepSeek account.",
             64_000,
             true,
+            true,
         ));
         models.push(codex_provider_model(
             "deepseek-v4-flash",
@@ -5548,6 +5553,7 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             "Fast DeepSeek model routed through the configured DeepSeek account.",
             64_000,
             false,
+            true,
         ));
     }
     if state
@@ -5563,6 +5569,7 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             "Gemini model routed through the configured Gemini account.",
             1_048_576,
             true,
+            true,
         ));
         models.push(codex_provider_model(
             "gemini-2.5-flash",
@@ -5570,12 +5577,14 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             "Fast Gemini model routed through the configured Gemini account.",
             1_048_576,
             true,
+            true,
         ));
         models.push(codex_provider_model(
             "gemini-3-pro",
             "Gemini 3 Pro",
             "Gemini model routed through the configured Gemini account.",
             1_048_576,
+            true,
             true,
         ));
     }
@@ -5592,6 +5601,7 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             "Grok model routed through the configured xAI account.",
             256_000,
             true,
+            true,
         ));
         models.push(codex_provider_model(
             "grok-4.1",
@@ -5599,12 +5609,14 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             "Grok model routed through the configured xAI account.",
             256_000,
             true,
+            true,
         ));
         models.push(codex_provider_model(
             "grok-3",
             "Grok 3",
             "Grok model routed through the configured xAI account.",
             131_072,
+            false,
             false,
         ));
     }
@@ -5621,12 +5633,14 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             "MiniMax model routed through the configured MiniMax account.",
             512_000,
             true,
+            true,
         ));
         models.push(codex_provider_model(
             "MiniMax-M2.7",
             "MiniMax M2.7",
             "MiniMax model routed through the configured MiniMax account.",
             512_000,
+            false,
             false,
         ));
         models.push(codex_provider_model(
@@ -5635,6 +5649,7 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             "Fast MiniMax model routed through the configured MiniMax account.",
             512_000,
             true,
+            false,
         ));
     }
     models
@@ -5646,6 +5661,7 @@ fn codex_provider_model(
     description: &str,
     context_window: u64,
     supports_reasoning: bool,
+    supports_images: bool,
 ) -> serde_json::Value {
     let reasoning_levels = if supports_reasoning {
         serde_json::json!([
@@ -5656,6 +5672,11 @@ fn codex_provider_model(
     } else {
         serde_json::json!([])
     };
+    let input_modalities = if supports_images {
+        serde_json::json!(["text", "image"])
+    } else {
+        serde_json::json!(["text"])
+    };
 
     let mut model = serde_json::json!({
         "slug": slug,
@@ -5664,7 +5685,7 @@ fn codex_provider_model(
         "description": description,
         "context_window": context_window,
         "max_context_window": context_window,
-        "input_modalities": ["text"],
+        "input_modalities": input_modalities,
         "supports_parallel_tool_calls": true,
         "supports_image_detail_original": false,
         "supports_search_tool": false,
@@ -5732,6 +5753,42 @@ fn codex_provider_model(
     );
 
     model
+}
+
+#[cfg(test)]
+mod codex_provider_model_tests {
+    use super::codex_provider_model;
+
+    #[test]
+    fn provider_model_advertises_image_input_when_supported() {
+        let model = codex_provider_model(
+            "grok-4.3",
+            "Grok 4.3",
+            "Grok model routed through the configured xAI account.",
+            256_000,
+            true,
+            true,
+        );
+
+        assert_eq!(
+            model["input_modalities"],
+            serde_json::json!(["text", "image"])
+        );
+    }
+
+    #[test]
+    fn provider_model_keeps_text_only_when_images_are_not_supported() {
+        let model = codex_provider_model(
+            "MiniMax-M2.7",
+            "MiniMax M2.7",
+            "MiniMax model routed through the configured MiniMax account.",
+            512_000,
+            false,
+            false,
+        );
+
+        assert_eq!(model["input_modalities"], serde_json::json!(["text"]));
+    }
 }
 
 fn should_drop_incoming_header(name: &str) -> bool {
