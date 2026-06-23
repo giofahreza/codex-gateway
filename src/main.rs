@@ -1177,6 +1177,7 @@ async fn dashboard() -> impl IntoResponse {
             + '</div></div>';
         }
         function renderProgressPair(label, fiveHour, weekly) {
+          if (!fiveHour && !weekly) return '';
           return '<div class="quota-pair-wrap">'
             + renderProgressBar((label || 'Usage') + ' 5h', fmtQ(fiveHour, 'N/A'), bucketPct(fiveHour), 'five-hour')
             + renderProgressBar((label || 'Usage') + ' Weekly', fmtQ(weekly, 'N/A'), bucketPct(weekly), 'weekly')
@@ -1215,6 +1216,11 @@ async fn dashboard() -> impl IntoResponse {
           var cr5 = quota.code_review?.five_hour, crw = quota.code_review?.weekly;
           bars += renderProgressPair('Code Gen', cg5, cgw);
           bars += renderProgressPair('Code Review', cr5, crw);
+        }
+        if (quota.additional_rate_limits) {
+          quota.additional_rate_limits.forEach(function(limit) {
+            bars += renderProgressPair(limit.display_name || limit.limit_name || 'Model limit', limit.five_hour, limit.weekly);
+          });
         }
         // Provider model limits. For Antigravity/Gemini these are hidden
         // by default and can be expanded per account.

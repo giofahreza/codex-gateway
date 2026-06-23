@@ -15,6 +15,7 @@ pub struct QuotaSummary {
     pub plan_type: String,
     pub code_generation: QuotaRateSummary,
     pub code_review: QuotaRateSummary,
+    pub additional_rate_limits: Vec<AdditionalRateLimitSummary>,
     pub models: Vec<ModelSummary>,
 }
 
@@ -28,6 +29,13 @@ pub struct QuotaRateSummary {
 pub struct QuotaWindowSummary {
     pub used_percent: Option<f64>,
     pub reset_label: String,
+}
+
+#[derive(Default, Clone, Serialize)]
+pub struct AdditionalRateLimitSummary {
+    pub display_name: String,
+    pub five_hour: Option<QuotaWindowSummary>,
+    pub weekly: Option<QuotaWindowSummary>,
 }
 
 #[derive(Default, Clone, Serialize)]
@@ -87,6 +95,7 @@ pub async fn get_quota_summaries(state: &crate::AppState) -> Vec<serde_json::Val
                 "plan_type": entry.summary.plan_type,
                 "code_generation": entry.summary.code_generation,
                 "code_review": entry.summary.code_review,
+                "additional_rate_limits": entry.summary.additional_rate_limits,
                 "models": entry.summary.models
             }));
         }
@@ -153,6 +162,7 @@ async fn fetch_codex_quota(
 
     let mut code_gen = extract_rate_summary(v.get("rate_limit"));
     let mut code_review = extract_rate_summary(v.get("code_review_rate_limit"));
+    let additional_rate_limits = extract_additional_rate_limits(v.get("additional_rate_limits"));
 
     // Fallback for alternate response shape that sends usage nodes as arrays.
     if code_gen.five_hour.is_none()
@@ -176,6 +186,7 @@ async fn fetch_codex_quota(
         plan_type,
         code_generation: code_gen,
         code_review,
+        additional_rate_limits,
         models: fetch_codex_models(state, token).await.unwrap_or_default(),
     };
     QuotaCacheEntry {
@@ -264,6 +275,37 @@ fn extract_rate_summary(rate_limit: Option<&serde_json::Value>) -> QuotaRateSumm
         .get("secondary_window")
         .and_then(|w| extract_window_summary(w, Some("weekly")));
     QuotaRateSummary { five_hour, weekly }
+}
+
+fn extract_additional_rate_limits(
+    value: Option<&serde_json::Value>,
+) -> Vec<AdditionalRateLimitSummary> {
+    let Some(items) = value.and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+
+    items
+        .iter()
+        .filter_map(|item| {
+            let display_name = item
+                .get("display_name")
+                .or_else(|| item.get("displayName"))
+                .or_else(|| item.get("limit_name"))
+                .or_else(|| item.get("limitName"))
+                .or_else(|| item.get("name"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?
+                .to_string();
+            let rate_limit = item.get("rate_limit").or_else(|| item.get("rateLimit"))?;
+            let summary = extract_rate_summary(Some(rate_limit));
+            Some(AdditionalRateLimitSummary {
+                display_name,
+                five_hour: summary.five_hour,
+                weekly: summary.weekly,
+            })
+        })
+        .collect()
 }
 
 fn extract_window_summary(
@@ -370,4 +412,46 @@ fn extract_from_usage_nodes(nodes: &[serde_json::Value]) -> (QuotaRateSummary, Q
         }
     }
     (code_gen, code_review)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extracts_additional_codex_spark_rate_limit() {
+        let limits = extract_additional_rate_limits(Some(&json!([
+            {
+                "limit_name": "GPT-5.3-Codex-Spark",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 12.5,
+                        "reset_after_seconds": 1800
+                    },
+                    "secondary_window": {
+                        "used_percent": 34.0,
+                        "reset_after_seconds": 86400
+                    }
+                }
+            }
+        ])));
+
+        assert_eq!(limits.len(), 1);
+        assert_eq!(limits[0].display_name, "GPT-5.3-Codex-Spark");
+        assert_eq!(
+            limits[0]
+                .five_hour
+                .as_ref()
+                .and_then(|window| window.used_percent),
+            Some(12.5)
+        );
+        assert_eq!(
+            limits[0]
+                .weekly
+                .as_ref()
+                .and_then(|window| window.used_percent),
+            Some(34.0)
+        );
+    }
 }
