@@ -705,36 +705,68 @@ async fn dashboard() -> impl IntoResponse {
         flex: 1;
         min-width: 180px;
       }
-      .quota-bar-label {
-        display: flex;
-        justify-content: space-between;
-        margin-bottom: 3px;
-      }
-      .quota-bar-label span:last-child { color: var(--muted); }
       .quota-bar {
-        height: 8px;
+        position: relative;
+        height: 26px;
         background: var(--surface-alt);
-        border-radius: 4px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
         overflow: hidden;
       }
       .quota-bar-fill {
+        position: absolute;
+        inset: 0 auto 0 0;
         height: 100%;
-        border-radius: 4px;
+        border-radius: 7px;
         transition: width 0.4s;
       }
       .quota-bar-fill.low { background: #22c55e; }
       .quota-bar-fill.mid { background: #f59e0b; }
       .quota-bar-fill.high { background: #ef4444; }
+      .quota-bar-text {
+        position: absolute;
+        inset: 0;
+        z-index: 1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 0 9px;
+        color: var(--text);
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 1;
+      }
+      .quota-bar-text span {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .quota-bar-text span:last-child {
+        flex-shrink: 0;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .quota-status {
+        flex-basis: 100%;
+        margin-top: -2px;
+      }
       .account-models {
         clear: both;
         margin-top: 10px;
         line-height: 1.45;
       }
-      .account-models code {
+      .account-models .model-list {
         display: block;
         box-sizing: border-box;
         margin-top: 4px;
         max-width: 100%;
+        padding: 6px 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-alt);
+        color: var(--text);
         white-space: normal;
         overflow-wrap: anywhere;
         word-break: break-word;
@@ -1087,16 +1119,39 @@ async fn dashboard() -> impl IntoResponse {
       }
       function renderQuotaBars(quota) {
         if (!quota) return '';
-        var fmtQ = function(b, fallback) { return b && b.used_percent != null ? b.used_percent.toFixed(1) + '% ' + (b.reset_label || '') : (fallback || '...'); };
+        function fmtQ(b, fallback) {
+          return b && b.used_percent != null ? b.used_percent.toFixed(1) + '% ' + (b.reset_label || '') : (fallback || '...');
+        }
+        function pctValue(value) {
+          var pct = Number(value);
+          if (!Number.isFinite(pct)) return 0;
+          return Math.max(0, Math.min(100, pct));
+        }
+        function pctClass(pct) {
+          return pct > 80 ? 'high' : pct > 50 ? 'mid' : 'low';
+        }
+        function renderProgressBar(label, hint, pct, forceClass) {
+          var safeLabel = escapeHtml(label || 'Usage');
+          var safeHint = escapeHtml(hint || '...');
+          var width = pctValue(pct);
+          var cls = forceClass || pctClass(width);
+          return '<div class="quota-bar-wrap"><div class="quota-bar" title="' + safeLabel + ' ' + safeHint + '">'
+            + '<div class="quota-bar-fill ' + cls + '" style="width:' + width + '%;"></div>'
+            + '<div class="quota-bar-text"><span>' + safeLabel + '</span><span>' + safeHint + '</span></div>'
+            + '</div></div>';
+        }
+        function bucketPct(bucket) {
+          return bucket && bucket.used_percent != null ? bucket.used_percent : 0;
+        }
         var bars = '';
         // Codex-style quota
         if (quota.code_generation) {
           var cg5 = quota.code_generation.five_hour, cgw = quota.code_generation.weekly;
           var cr5 = quota.code_review?.five_hour, crw = quota.code_review?.weekly;
-          bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>Code Gen 5h</span><span>' + fmtQ(cg5) + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (cg5 && cg5.used_percent > 80 ? 'high' : cg5 && cg5.used_percent > 50 ? 'mid' : 'low') + '" style="width:' + (cg5 ? cg5.used_percent || 0 : 0) + '%;"></div></div></div>';
-          bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>Code Gen Weekly</span><span>' + fmtQ(cgw) + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (cgw && cgw.used_percent > 80 ? 'high' : cgw && cgw.used_percent > 50 ? 'mid' : 'low') + '" style="width:' + (cgw ? cgw.used_percent || 0 : 0) + '%;"></div></div></div>';
-          bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>Code Review 5h</span><span>' + fmtQ(cr5) + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (cr5 && cr5.used_percent > 80 ? 'high' : cr5 && cr5.used_percent > 50 ? 'mid' : 'low') + '" style="width:' + (cr5 ? cr5.used_percent || 0 : 0) + '%;"></div></div></div>';
-          bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>Code Review Weekly</span><span>' + fmtQ(crw) + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (crw && crw.used_percent > 80 ? 'high' : crw && crw.used_percent > 50 ? 'mid' : 'low') + '" style="width:' + (crw ? crw.used_percent || 0 : 0) + '%;"></div></div></div>';
+          bars += renderProgressBar('Code Gen 5h', fmtQ(cg5), bucketPct(cg5));
+          bars += renderProgressBar('Code Gen Weekly', fmtQ(cgw), bucketPct(cgw));
+          bars += renderProgressBar('Code Review 5h', fmtQ(cr5), bucketPct(cr5));
+          bars += renderProgressBar('Code Review Weekly', fmtQ(crw), bucketPct(crw));
         }
         // Provider-style quota (groups + models from AGW/Gemini/Qwen)
         if (quota.models) {
@@ -1105,13 +1160,14 @@ async fn dashboard() -> impl IntoResponse {
             if (!b || (b.used_percent == null && b.limit == null && b.remaining == null && !b.limit_text && !b.remaining_text && !b.used_text)) {
               return;
             }
-            bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>' + (m.display_name || m.model_id || 'Model') + '</span><span>' + fmtQ(b, 'N/A') + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (b && b.used_percent > 80 ? 'high' : b && b.used_percent > 50 ? 'mid' : 'low') + '" style="width:' + (b ? b.used_percent || 0 : 0) + '%;"></div></div></div>';
+            bars += renderProgressBar(m.display_name || m.model_id || 'Model', fmtQ(b, 'N/A'), bucketPct(b));
           });
         }
         if (quota.groups) {
           quota.groups.forEach(function(g) {
-            bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>' + (g.display_name || 'Group') + ' 5h</span><span>' + fmtQ(g.five_hour, 'N/A') + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (g.five_hour && g.five_hour.used_percent > 80 ? 'high' : g.five_hour && g.five_hour.used_percent > 50 ? 'mid' : 'low') + '" style="width:' + (g.five_hour ? g.five_hour.used_percent || 0 : 0) + '%;"></div></div></div>';
-            bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>' + (g.display_name || 'Group') + ' Weekly</span><span>' + fmtQ(g.weekly, 'N/A') + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (g.weekly && g.weekly.used_percent > 80 ? 'high' : g.weekly && g.weekly.used_percent > 50 ? 'mid' : 'low') + '" style="width:' + (g.weekly ? g.weekly.used_percent || 0 : 0) + '%;"></div></div></div>';
+            var label = g.display_name || 'Group';
+            bars += renderProgressBar(label + ' 5h', fmtQ(g.five_hour, 'N/A'), bucketPct(g.five_hour));
+            bars += renderProgressBar(label + ' Weekly', fmtQ(g.weekly, 'N/A'), bucketPct(g.weekly));
           });
         }
         // Qwen-style rate limits
@@ -1120,7 +1176,7 @@ async fn dashboard() -> impl IntoResponse {
             var label = l.label || l.scope || 'Limit';
             var pct = l.used_percent != null ? l.used_percent : 0;
             var hint = (l.used_text || l.used || '') + '/' + (l.limit_text || l.limit || '') + ' ' + (l.reset_label || '');
-            bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>' + label + '</span><span>' + hint + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (pct > 80 ? 'high' : pct > 50 ? 'mid' : 'low') + '" style="width:' + pct + '%;"></div></div></div>';
+            bars += renderProgressBar(label, hint, pct);
           });
         }
         // MiniMax top-level current_window / weekly (matches the
@@ -1131,14 +1187,14 @@ async fn dashboard() -> impl IntoResponse {
           var cwPct = cw.used_percent != null ? cw.used_percent : 0;
           var cwHint = (cw.used_percent != null ? cw.used_percent.toFixed(1) + '%' : '\u2014')
             + ' used \u00b7 resets in ' + (cw.reset_label || '\u2014');
-          bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>5h window</span><span>' + cwHint + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (cwPct > 80 ? 'high' : cwPct > 50 ? 'mid' : 'low') + '" style="width:' + cwPct + '%;"></div></div></div>';
+          bars += renderProgressBar('5h window', cwHint, cwPct);
         }
         if (quota.weekly) {
           var wk = quota.weekly;
           var wkPct = wk.used_percent != null ? wk.used_percent : 0;
           var wkHint = (wk.used_percent != null ? wk.used_percent.toFixed(1) + '%' : '\u2014')
             + ' used \u00b7 resets in ' + (wk.reset_label || '\u2014');
-          bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>Weekly window</span><span>' + wkHint + '</span></div><div class="quota-bar"><div class="quota-bar-fill ' + (wkPct > 80 ? 'high' : wkPct > 50 ? 'mid' : 'low') + '" style="width:' + wkPct + '%;"></div></div></div>';
+          bars += renderProgressBar('Weekly window', wkHint, wkPct);
         }
         // DeepSeek balances: show total + topped-up in USD. The
         // gateway pulls this from /user/balance.
@@ -1152,11 +1208,11 @@ async fn dashboard() -> impl IntoResponse {
             } else if (b.granted_balance && b.granted_balance !== '0.00' && b.granted_balance !== '0') {
               detail += ' (granted ' + b.granted_balance + ')';
             }
-            bars += '<div class="quota-bar-wrap"><div class="quota-bar-label"><span>' + label + '</span><span>' + detail + '</span></div><div class="quota-bar"><div class="quota-bar-fill low" style="width:100%;"></div></div></div>';
+            bars += renderProgressBar(label, detail, 100, 'low');
           });
         }
         if (quota.status_msg) {
-          bars += '<div class="muted" style="margin-top:4px;">' + quota.status_msg + '</div>';
+          bars += '<div class="muted quota-status">' + escapeHtml(quota.status_msg) + '</div>';
         }
         return bars ? '<div class="card-quota">' + bars + '</div>' : '';
       }
@@ -1188,7 +1244,7 @@ async fn dashboard() -> impl IntoResponse {
         appendModelLabels(labels, seen, quota && quota.models);
         appendModelLabels(labels, seen, quota && quota.data);
         return labels.length
-          ? '<div class="muted account-models">models:<code>' + labels.map(escapeHtml).join(' | ') + '</code></div>'
+          ? '<div class="muted account-models">models:<span class="model-list">' + labels.map(escapeHtml).join(' | ') + '</span></div>'
           : '';
       }
       function buildCard(a, quota) {
