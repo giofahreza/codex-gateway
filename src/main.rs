@@ -1725,24 +1725,53 @@ async fn dashboard() -> impl IntoResponse {
         refreshMiniMaxAccounts();
       }
       let lastGrokQuota = new Map();
+      // Pick a stable key that matches whatever the accounts card uses first.
+      function grokQuotaKey(a) {
+        return a && (a.email || a.label || a.file_name) || '__grok__';
+      }
+      function findGrokQuota(accounts) {
+        // Try the email/label/file_name of any account. The quota endpoint
+        // returns a single snapshot (one xAI account), so we pick whichever
+        // account's key matches the snapshot's account.
+        for (var i = 0; i < accounts.length; i++) {
+          var k = grokQuotaKey(accounts[i]);
+          if (lastGrokQuota.has(k)) return lastGrokQuota.get(k);
+        }
+        // Fallback: any entry in the map (only one, when there's one account).
+        var first = null;
+        lastGrokQuota.forEach(function(v) { if (first === null) first = v; });
+        return first;
+      }
       async function refreshGrokAccounts() {
-        var res = await adminFetch('/grok/accounts.json');
+        var res;
+        try { res = await adminFetch('/grok/accounts.json'); }
+        catch (e) { console.error('refreshGrokAccounts fetch failed', e); return; }
         if (!res) return;
-        var data = await res.json();
-        var accounts = data.accounts || [];
-        var cards = accounts.map(function(a) { return buildGrokCard(a, lastGrokQuota.get(a.file_name || a.label || a.email)); }).join('');
+        var data;
+        try { data = await res.json(); } catch (e) { console.error('refreshGrokAccounts parse failed', e); return; }
+        var accounts = (data && data.accounts) || [];
+        var quotaSnap = findGrokQuota(accounts);
+        var cards = accounts.map(function(a) {
+          // Per-card quota lookup: prefer the per-account key, but fall back
+          // to any snapshot we have so the live overlay still shows up.
+          var q = lastGrokQuota.get(grokQuotaKey(a)) || quotaSnap;
+          return buildGrokCard(a, q);
+        }).join('');
         document.getElementById('grokCards').innerHTML = cards || '<div class="empty-state">No Grok accounts</div>';
         document.getElementById('grokBadgeCount').textContent = accounts.length + ' accounts';
       }
       async function refreshGrokQuota() {
-        const res = await adminFetch('/grok/quota.json');
+        let res;
+        try { res = await adminFetch('/grok/quota.json'); }
+        catch (e) { console.error('refreshGrokQuota fetch failed', e); return; }
         if (!res) return;
-        const data = await res.json();
-        // Single-account snapshot. Key it by the same file_name/label/email
-        // the accounts card uses so the per-card live overlay lines up.
-        const acc = data && data.account ? data.account : null;
-        const key = acc ? (acc.email || acc.label || '__grok__') : '__grok__';
+        let data;
+        try { data = await res.json(); } catch (e) { console.error('refreshGrokQuota parse failed', e); return; }
+        if (!data || !data.account) return;
+        // Single-account snapshot. Key by the same priority the lookup uses.
+        const key = data.account.email || data.account.label || data.account.file_name || '__grok__';
         lastGrokQuota = new Map([[key, data]]);
+        // Re-render the cards so the live overlay shows up immediately.
         refreshGrokAccounts();
       }
       let contextChart = null;
