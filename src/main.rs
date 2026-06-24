@@ -1301,13 +1301,13 @@ async fn dashboard() -> impl IntoResponse {
             if (opts && opts.showRequests !== false) {
               var rq = rl.requests;
               if (rq && rq.limit != null) {
-                pieces.push({ label: 'requests', hint: (rq.remaining != null ? rq.remaining : '?') + '/' + rq.limit, pct: rq.limit > 0 ? (100 * (rq.limit - (rq.remaining != null ? rq.remaining : rq.limit)) / rq.limit) : 0 });
+                pieces.push({ label: 'requests', hint: (rq.remaining != null ? rq.remaining : '?') + '/' + rq.limit + ' (no reset info)', pct: rq.limit > 0 ? (100 * (rq.limit - (rq.remaining != null ? rq.remaining : rq.limit)) / rq.limit) : 0 });
               }
             }
             if (opts && opts.showTokens) {
               var tk = rl.tokens;
               if (tk && tk.limit != null) {
-                pieces.push({ label: 'tokens', hint: (tk.remaining != null ? Math.round(tk.remaining) : '?') + '/' + tk.limit, pct: tk.limit > 0 ? (100 * (tk.limit - (tk.remaining != null ? tk.remaining : tk.limit)) / tk.limit) : 0 });
+                pieces.push({ label: 'tokens', hint: (tk.remaining != null ? Math.round(tk.remaining) : '?') + '/' + tk.limit + ' (no reset info)', pct: tk.limit > 0 ? (100 * (tk.limit - (tk.remaining != null ? tk.remaining : tk.limit)) / tk.limit) : 0 });
               }
             }
             var parts = pieces.map(function(p) {
@@ -1327,6 +1327,11 @@ async fn dashboard() -> impl IntoResponse {
           if (costPieces.length) {
             bars += '<div class="muted quota-cost-line">probe cost: ' + costPieces.join(' · ') + '</div>';
           }
+          // xAI's consumer OAuth does not send x-ratelimit-reset-* headers, so
+          // we can't show a "resets in" countdown the way the Codex / MiniMax
+          // cards do. Surface that limitation once at the bottom of the
+          // per-kind block instead of leaving the user wondering.
+          bars += '<div class="muted quota-cost-line">xAI OAuth does not expose reset time — quota resets on an opaque schedule.</div>';
         }
         // MiniMax top-level current_window / weekly (matches the
         // platform.minimax.io/console/usage layout: two big bars per
