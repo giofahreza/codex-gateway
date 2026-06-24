@@ -1588,7 +1588,7 @@ async fn dashboard() -> impl IntoResponse {
         <h2 id="confirmActionTitle" style="margin-top:0;">Confirm action</h2>
         <p id="confirmActionMessage" class="confirm-modal-message"></p>
         <div class="confirm-actions">
-          <button type="button" id="confirmActionRejectBtn" class="secondary-button">Reject</button>
+          <button type="button" id="confirmActionRejectBtn" class="secondary-button">Cancel</button>
           <button type="button" id="confirmActionApproveBtn">Approve</button>
         </div>
       </div>
@@ -2345,7 +2345,7 @@ async fn dashboard() -> impl IntoResponse {
         const fileArg = escapeHtml(jsString(a.file_name));
         const labelArg = escapeHtml(jsString(label));
         return '<span class="account-menu-wrap">'
-          + '<button type="button" class="mini-btn account-menu-button" aria-label="' + escapeHtml('Open actions for ' + label) + '" aria-haspopup="menu" aria-expanded="false" aria-controls="' + escapeHtml(menuId) + '" onclick="toggleAccountActionMenu(event, ' + menuArg + ')">...</button>'
+          + '<button type="button" class="mini-btn account-menu-button" aria-label="' + escapeHtml('Open actions for ' + label) + '" aria-haspopup="menu" aria-expanded="false" aria-controls="' + escapeHtml(menuId) + '" onclick="toggleAccountActionMenu(event, ' + menuArg + ')">&#8942;</button>'
           + '<span id="' + escapeHtml(menuId) + '" class="account-action-menu" role="menu" hidden onclick="event.stopPropagation()">'
           + '<button type="button" role="menuitem" aria-label="' + escapeHtml(toggleLabel + ' ' + label) + '" onclick="toggleCred(' + fileArg + ', ' + (isEnabled ? 'false' : 'true') + ', ' + labelArg + ')" class="mini-btn action-btn ' + toggleClass + '">' + toggleLabel + '</button>'
           + '<button type="button" role="menuitem" aria-label="' + escapeHtml('Delete ' + label) + '" onclick="deleteCred(' + fileArg + ', ' + labelArg + ')" class="mini-btn action-btn danger">Delete</button>'
