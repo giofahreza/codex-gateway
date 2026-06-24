@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -202,6 +203,7 @@ async fn main() {
     let grok_accounts = target::grok::accounts::load_accounts(&cfg, &disabled);
     let minimax_accounts = target::minimax::accounts::load_accounts(&cfg, &disabled);
     let persisted_stats = stats_store::load(&cfg);
+    let admin_sessions = admin_auth::load_sessions(&admin_session_path(&cfg));
     let stats = build_usage_stats(
         &tokens,
         &agw_accounts,
@@ -255,7 +257,7 @@ async fn main() {
         gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),
         qwen_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         grok_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
-        admin_sessions: Arc::new(Mutex::new(HashMap::new())),
+        admin_sessions: Arc::new(Mutex::new(admin_sessions)),
         disabled: Arc::new(Mutex::new(disabled)),
         usage_history_lock: Arc::new(Mutex::new(())),
     };
@@ -374,6 +376,10 @@ async fn dashboard() -> impl IntoResponse {
         --tip-bg: #e2e8f0;
         --tip-text: #0f172a;
         --shadow: 0 18px 40px rgba(2, 6, 23, 0.34);
+        --success: #22c55e;
+        --warning: #f59e0b;
+        --danger: #ef4444;
+        --info: #3b82f6;
       }
       :root[data-theme="light"] {
         color-scheme: light;
@@ -398,16 +404,28 @@ async fn dashboard() -> impl IntoResponse {
         --shadow: 0 18px 40px rgba(15, 23, 42, 0.12);
       }
       * { box-sizing: border-box; }
+      [hidden] { display: none !important; }
       body {
-        font-family: Arial, sans-serif;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         margin: 0;
-        font-size: 16px;
+        font-size: 14px;
         min-height: 100vh;
         background: var(--bg);
         color: var(--text);
       }
       .page-shell { padding: 24px; }
-      h1 { margin: 0 0 12px 0; }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      h1 { margin: 0; font-size: 28px; line-height: 1.15; letter-spacing: 0; }
       h2 { margin: 0; }
       table { border-collapse: collapse; width: 100%; background: var(--surface); }
       th, td { border: 1px solid var(--border); padding: 8px; text-align: left; }
@@ -425,7 +443,7 @@ async fn dashboard() -> impl IntoResponse {
         border-radius: 10px;
         border: 1px solid var(--border);
       }
-      button, input {
+      button, input, textarea, select {
         font-size: 14px;
         font-family: inherit;
       }
@@ -434,26 +452,45 @@ async fn dashboard() -> impl IntoResponse {
         background: var(--button-bg);
         color: var(--button-text);
         padding: 9px 14px;
-        border-radius: 10px;
+        min-height: 38px;
+        border-radius: 8px;
         cursor: pointer;
       }
       button:hover {
         background: var(--button-hover);
       }
-      input {
+      input, textarea, select {
         width: min(100%, 560px);
         padding: 10px 12px;
-        border-radius: 10px;
+        border-radius: 8px;
         border: 1px solid var(--border);
         background: var(--surface);
         color: var(--text);
       }
-      input::placeholder { color: var(--muted); }
+      textarea {
+        resize: vertical;
+        line-height: 1.45;
+        min-height: 108px;
+      }
+      input::placeholder,
+      textarea::placeholder { color: var(--muted); }
       label {
         display: block;
         font-weight: 600;
       }
-      .page-header,
+      .page-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 14px;
+      }
+      .page-title-block {
+        min-width: 0;
+      }
+      .page-subtitle {
+        margin-top: 8px;
+      }
       .section-header {
         display: flex;
         align-items: center;
@@ -468,6 +505,60 @@ async fn dashboard() -> impl IntoResponse {
         gap: 8px;
         flex-wrap: wrap;
       }
+      .mobile-menu-button {
+        display: none;
+      }
+      .hamburger-icon {
+        display: inline-flex;
+        width: 22px;
+        flex-direction: column;
+        gap: 5px;
+      }
+      .hamburger-icon span {
+        display: block;
+        height: 2px;
+        border-radius: 999px;
+        background: currentColor;
+      }
+      .page-header.mobile-nav-open .hamburger-icon span:nth-child(1) {
+        transform: translateY(7px) rotate(45deg);
+      }
+      .page-header.mobile-nav-open .hamburger-icon span:nth-child(2) {
+        opacity: 0;
+      }
+      .page-header.mobile-nav-open .hamburger-icon span:nth-child(3) {
+        transform: translateY(-7px) rotate(-45deg);
+      }
+      .provider-menu-wrap {
+        position: relative;
+      }
+      .provider-menu {
+        position: absolute;
+        right: 0;
+        top: calc(100% + 4px);
+        z-index: 100;
+        min-width: 220px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+      .provider-menu-item {
+        display: block;
+        width: 100%;
+        min-height: 40px;
+        padding: 10px 14px;
+        border: 0;
+        border-bottom: 1px solid var(--border);
+        border-radius: 0;
+        background: transparent;
+        color: var(--text);
+        text-align: left;
+      }
+      .provider-menu-item:last-child { border-bottom: 0; }
+      .provider-menu-item:hover,
+      .provider-menu-item:focus { background: var(--row-hover); }
       .section { margin-top: 28px; }
       .table-wrap {
         overflow-x: auto;
@@ -559,7 +650,7 @@ async fn dashboard() -> impl IntoResponse {
         max-width: 720px;
         margin: 8% auto;
         padding: 16px;
-        border-radius: 16px;
+        border-radius: 8px;
         max-height: 80vh;
         overflow: auto;
         border: 1px solid var(--border);
@@ -583,46 +674,142 @@ async fn dashboard() -> impl IntoResponse {
         z-index: 9999;
         box-shadow: 0 4px 12px rgba(0,0,0,0.25);
       }
-      @media (max-width: 768px) {
-        body { font-size: 17px; }
-        .page-shell { padding: 12px; }
-        h1 { font-size: 22px; }
-        th, td { padding: 10px; font-size: 15px; }
-        .muted { font-size: 13px; }
-        input, button { font-size: 16px; }
-        .page-header,
-        .section-header {
-          align-items: flex-start;
-          flex-direction: column;
-        }
-        .modal {
-          padding: 12px;
-        }
-        .modal-card {
-          margin: 0 auto;
-          max-height: calc(100vh - 24px);
-        }
+      .overview-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        margin: 14px 0;
+      }
+      .overview-card {
+        min-width: 0;
+        padding: 14px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+      .overview-label {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.2;
+      }
+      .overview-value {
+        margin-top: 6px;
+        font-size: 24px;
+        font-weight: 800;
+        line-height: 1;
+      }
+      .overview-note {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .attention-panel {
+        margin: 0 0 14px 0;
+        padding: 12px 14px;
+        border: 1px solid rgba(245, 158, 11, 0.42);
+        border-radius: 8px;
+        background: rgba(245, 158, 11, 0.08);
+      }
+      .attention-title {
+        margin-bottom: 6px;
+        font-weight: 800;
+      }
+      .attention-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .attention-chip {
+        display: inline-flex;
+        align-items: center;
+        min-height: 28px;
+        padding: 4px 8px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        background: var(--surface);
+        color: var(--text);
+        font-size: 12px;
       }
       .chart-section {
-        margin: 20px 0 28px 0;
+        margin: 14px 0 18px 0;
         background: var(--surface);
         border: 1px solid var(--border);
-        border-radius: 14px;
-        padding: 16px;
+        border-radius: 8px;
+        padding: 14px;
         box-shadow: var(--shadow);
+      }
+      .chart-section:not([open]) {
+        padding-bottom: 14px;
+      }
+      .chart-section summary {
+        list-style: none;
+      }
+      .chart-section summary::-webkit-details-marker {
+        display: none;
       }
       .chart-header {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 12px;
-        margin-bottom: 8px;
+        cursor: pointer;
+      }
+      .chart-section[open] .chart-header { margin-bottom: 8px; }
+      .chart-title-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        min-width: 0;
+      }
+      .chart-title-row h2 {
+        font-size: 17px;
+        line-height: 1.2;
+      }
+      .chart-toggle-hint {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .chart-summary {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.35;
+      }
+      .chart-controls {
+        display: flex;
+        align-items: flex-end;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin: 6px 0 10px 0;
+      }
+      .chart-field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .chart-field select,
+      .chart-field input {
+        width: auto;
+        min-width: 110px;
+      }
+      .chart-custom-controls {
+        display: flex;
+        align-items: flex-end;
+        gap: 8px;
+        flex-wrap: wrap;
       }
       .chart-legend {
         display: flex;
-        gap: 16px;
+        gap: 10px;
         flex-wrap: wrap;
-        font-size: 13px;
+        justify-content: flex-end;
+        font-size: 12px;
       }
       .chart-legend-item {
         display: flex;
@@ -637,15 +824,20 @@ async fn dashboard() -> impl IntoResponse {
         height: 10px;
         border-radius: 2px;
       }
-      .chart-wrap { position: relative; height: 300px; }
-      .provider-menu-item:hover { background: var(--row-hover); }
+      .chart-wrap { position: relative; height: 220px; }
+      .providers-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(390px, 1fr));
+        gap: 16px;
+        align-items: start;
+      }
       .card {
         background: var(--surface);
         border: 1px solid var(--border);
-        border-radius: 14px;
+        border-radius: 8px;
         box-shadow: var(--shadow);
-        padding: 20px;
-        margin-bottom: 16px;
+        padding: 14px;
+        margin-bottom: 12px;
         transition: border-color 0.2s;
       }
       .card:hover { border-color: var(--muted); }
@@ -653,16 +845,82 @@ async fn dashboard() -> impl IntoResponse {
         display: flex;
         align-items: center;
         gap: 10px;
-        margin-bottom: 12px;
+        margin-bottom: 10px;
         flex-wrap: wrap;
       }
-      .card-email { font-weight: 700; font-size: 15px; }
-      .card-actions { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+      .card-email {
+        min-width: 0;
+        overflow-wrap: anywhere;
+        font-weight: 800;
+        font-size: 14px;
+      }
+      .card-actions {
+        margin-left: auto;
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex: 0 0 auto;
+        flex-wrap: nowrap;
+        position: relative;
+        align-self: flex-start;
+      }
+      .account-state {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        min-height: 24px;
+        padding: 3px 8px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--surface-alt);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .account-state::before {
+        content: "";
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--muted);
+      }
+      .account-state.enabled {
+        color: var(--success);
+        border-color: rgba(34, 197, 94, 0.35);
+      }
+      .account-state.enabled::before { background: var(--success); }
+      .account-state.disabled {
+        color: var(--danger);
+        border-color: rgba(239, 68, 68, 0.42);
+      }
+      .account-state.disabled::before { background: var(--danger); }
+      .attention-account-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        min-height: 24px;
+        padding: 3px 8px;
+        border-radius: 999px;
+        border: 1px solid rgba(245, 158, 11, 0.5);
+        background: rgba(245, 158, 11, 0.1);
+        color: var(--warning);
+        font-size: 12px;
+        font-weight: 800;
+      }
+      .attention-account-badge::before {
+        content: "";
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--warning);
+      }
       .stat-pills {
         display: flex;
-        gap: 10px;
+        gap: 6px;
         flex-wrap: wrap;
-        margin-bottom: 14px;
+        margin-bottom: 10px;
       }
       .stat-pill {
         display: flex;
@@ -670,9 +928,9 @@ async fn dashboard() -> impl IntoResponse {
         gap: 5px;
         background: var(--surface-alt);
         border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 6px 12px;
-        font-size: 13px;
+        border-radius: 8px;
+        padding: 5px 8px;
+        font-size: 12px;
         white-space: nowrap;
       }
       .stat-pill-icon { font-size: 16px; }
@@ -692,7 +950,7 @@ async fn dashboard() -> impl IntoResponse {
         gap: 4px;
         background: var(--surface-alt);
         border: 1px solid var(--border);
-        border-radius: 10px;
+        border-radius: 8px;
         padding: 6px 10px;
         font-size: 12px;
         white-space: nowrap;
@@ -703,7 +961,7 @@ async fn dashboard() -> impl IntoResponse {
       .quota-mini-pill.mid  { border-color: rgba(245,158,11,0.35); }
       .quota-mini-pill.high { border-color: rgba(239,68,68,0.45); background: rgba(239,68,68,0.08); }
       .quota-cost-line {
-        font-size: 11px;
+        font-size: 12px;
         margin-top: 4px;
         width: 100%;
       }
@@ -719,7 +977,7 @@ async fn dashboard() -> impl IntoResponse {
         height: 180px;
         margin-bottom: 14px;
         background: var(--surface-raised);
-        border-radius: 10px;
+        border-radius: 8px;
         padding: 8px;
         border: 1px solid var(--border);
       }
@@ -759,7 +1017,7 @@ async fn dashboard() -> impl IntoResponse {
         height: 26px;
         background: var(--surface-alt);
         border: 1px solid var(--border);
-        border-radius: 8px;
+        border-radius: 7px;
         overflow: hidden;
       }
       .quota-bar-fill {
@@ -814,7 +1072,7 @@ async fn dashboard() -> impl IntoResponse {
         gap: 8px;
         padding: 8px;
         border: 1px solid var(--border);
-        border-radius: 10px;
+        border-radius: 8px;
         background: var(--surface-raised);
       }
       .model-quota-details .quota-bar-wrap {
@@ -825,6 +1083,13 @@ async fn dashboard() -> impl IntoResponse {
         clear: both;
         margin-top: 10px;
         line-height: 1.45;
+      }
+      .account-models summary,
+      .account-meta summary,
+      .quota-notes summary {
+        cursor: pointer;
+        color: var(--secondary-text);
+        font-weight: 700;
       }
       .account-models .model-list {
         display: block;
@@ -840,17 +1105,31 @@ async fn dashboard() -> impl IntoResponse {
         overflow-wrap: anywhere;
         word-break: break-word;
       }
+      .model-count {
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .account-meta,
+      .quota-notes {
+        margin-top: 8px;
+      }
+      .meta-list {
+        display: grid;
+        gap: 4px;
+        margin-top: 6px;
+      }
       .provider-section {
-        margin-top: 28px;
+        min-width: 0;
       }
       .provider-badge {
         display: inline-flex;
         align-items: center;
         gap: 6px;
+        width: 100%;
         background: var(--surface-raised);
         border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 10px 16px;
+        border-radius: 8px;
+        padding: 9px 12px;
         margin-bottom: 12px;
         font-weight: 700;
         font-size: 14px;
@@ -870,8 +1149,9 @@ async fn dashboard() -> impl IntoResponse {
       }
       .mini-btn {
         font-size: 12px;
-        padding: 4px 8px;
-        border-radius: 6px;
+        min-height: 32px;
+        padding: 5px 9px;
+        border-radius: 7px;
         background: var(--secondary-bg);
         color: var(--secondary-text);
         border-color: var(--border);
@@ -879,6 +1159,61 @@ async fn dashboard() -> impl IntoResponse {
       .mini-btn:hover { background: var(--secondary-hover); }
       .mini-btn.danger { color: #ef4444; }
       .mini-btn.danger:hover { background: #ef4444; color: #fff; }
+      .account-menu-wrap {
+        position: relative;
+        display: inline-flex;
+      }
+      .account-menu-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 34px;
+        min-width: 34px;
+        height: 34px;
+        min-height: 34px;
+        padding: 0;
+        font-size: 16px;
+        font-weight: 800;
+        line-height: 1;
+      }
+      .account-action-menu {
+        position: absolute;
+        top: calc(100% + 6px);
+        right: 0;
+        z-index: 180;
+        min-width: 160px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+      .account-action-menu .mini-btn {
+        display: block;
+        width: 100%;
+        min-height: 38px;
+        padding: 9px 12px;
+        border: 0;
+        border-bottom: 1px solid var(--border);
+        border-radius: 0;
+        background: transparent;
+        text-align: left;
+      }
+      .account-action-menu .mini-btn:last-child {
+        border-bottom: 0;
+      }
+      .account-action-menu .mini-btn:hover,
+      .account-action-menu .mini-btn:focus {
+        background: var(--row-hover);
+      }
+      .action-btn.is-enabled {
+        color: var(--success);
+        border-color: rgba(34, 197, 94, 0.35);
+      }
+      .action-btn.is-disabled {
+        color: var(--danger);
+        border-color: rgba(239, 68, 68, 0.42);
+      }
       .card-model-legend {
         display: flex;
         gap: 10px;
@@ -908,6 +1243,169 @@ async fn dashboard() -> impl IntoResponse {
         flex-direction: column;
         gap: 12px;
       }
+      .toast {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 1200;
+        display: none;
+        max-width: min(420px, calc(100vw - 24px));
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+        color: var(--text);
+        box-shadow: var(--shadow);
+      }
+      .toast.show { display: block; }
+      .toast.error {
+        border-color: rgba(239, 68, 68, 0.42);
+      }
+      .confirm-modal-card {
+        max-width: 460px;
+      }
+      .confirm-modal-message {
+        margin: 10px 0 0 0;
+        line-height: 1.5;
+      }
+      .confirm-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 18px;
+      }
+      .confirm-actions button {
+        min-width: 96px;
+      }
+      .confirm-actions button.danger {
+        background: var(--danger);
+        border-color: var(--danger);
+        color: #fff;
+      }
+      .confirm-actions button.danger:hover {
+        background: #dc2626;
+        border-color: #dc2626;
+      }
+      @media (max-width: 900px) {
+        .overview-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .providers-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+      @media (max-width: 768px) {
+        body { font-size: 15px; }
+        .page-shell { padding: 12px; }
+        h1 { font-size: 22px; }
+        th, td { padding: 10px; font-size: 15px; }
+        .muted { font-size: 12px; }
+        input, textarea, select, button { font-size: 16px; }
+        button { min-height: 44px; }
+        .section-header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .page-header {
+          align-items: flex-start;
+          flex-wrap: wrap;
+        }
+        .page-title-block {
+          flex: 1 1 min(260px, calc(100% - 64px));
+        }
+        .mobile-menu-button {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-width: 48px;
+          width: 48px;
+          padding: 0;
+        }
+        .header-actions {
+          display: none;
+          flex-basis: 100%;
+          width: 100%;
+          align-items: stretch;
+        }
+        .page-header.mobile-nav-open .header-actions {
+          display: flex;
+        }
+        .header-actions > button,
+        .header-actions .provider-menu-wrap,
+        .header-actions .provider-menu-wrap > button {
+          width: 100%;
+        }
+        .provider-menu-wrap {
+          width: 100%;
+        }
+        .provider-menu {
+          left: 0;
+          right: auto;
+          width: min(100%, 260px);
+        }
+        .overview-grid {
+          gap: 8px;
+        }
+        .overview-card {
+          padding: 10px;
+        }
+        .overview-value {
+          font-size: 20px;
+        }
+        .overview-note {
+          white-space: normal;
+        }
+        .chart-section {
+          padding: 12px;
+        }
+        .chart-header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .chart-controls,
+        .chart-custom-controls,
+        .chart-field,
+        .chart-field select,
+        .chart-field input,
+        .chart-controls button {
+          width: 100%;
+        }
+        .chart-title-row h2 {
+          font-size: 16px;
+        }
+        .chart-legend {
+          justify-content: flex-start;
+          gap: 8px 10px;
+        }
+        .chart-wrap { height: 210px; }
+        .card {
+          padding: 12px;
+        }
+        .card-actions {
+          width: auto;
+          margin-left: auto;
+        }
+        .mini-btn {
+          min-height: 44px;
+          padding: 8px 12px;
+        }
+        .quota-pair-wrap,
+        .quota-bar-wrap,
+        .model-quota-details .quota-bar-wrap {
+          min-width: 100%;
+        }
+        .modal {
+          padding: 12px;
+        }
+        .modal-card {
+          margin: 0 auto;
+          max-height: calc(100vh - 24px);
+        }
+        .toast {
+          right: 12px;
+          bottom: 12px;
+        }
+      }
     </style>
     <script>
       (() => {
@@ -922,17 +1420,18 @@ async fn dashboard() -> impl IntoResponse {
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   </head>
   <body>
-    <div id="adminLoginGate" class="modal" style="display:none;">
+    <div id="adminLoginGate" class="modal" role="dialog" aria-modal="true" aria-labelledby="adminLoginTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card admin-login-card">
-        <h2 style="margin-top:0;">Admin Login</h2>
+        <h2 id="adminLoginTitle" style="margin-top:0;">Admin Login</h2>
         <p class="admin-login-copy">Enter the management API key and the 6-digit OTP from Google Authenticator to manage accounts.</p>
         <form id="adminLoginForm" class="admin-login-form">
+          <input class="sr-only" type="text" name="username" autocomplete="username" value="admin" tabindex="-1" aria-hidden="true">
           <div>
-            <label>API Key</label>
+            <label for="adminApiKeyInput">API Key</label>
             <input id="adminApiKeyInput" name="api_key" type="password" autocomplete="current-password" placeholder="Enter management API key">
           </div>
           <div>
-            <label>Google Authenticator OTP</label>
+            <label for="adminOtpInput">Google Authenticator OTP</label>
             <input id="adminOtpInput" name="otp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" placeholder="123456">
           </div>
           <button type="submit">Log in</button>
@@ -940,82 +1439,158 @@ async fn dashboard() -> impl IntoResponse {
         </form>
       </div>
     </div>
-    <div class="page-shell">
-      <h1 class="page-header">
-        <span>Codex Gateway Usage</span>
-        <span class="header-actions">
+    <main id="dashboardContent" class="page-shell">
+      <header class="page-header">
+        <div class="page-title-block">
+          <h1>Codex Gateway Usage</h1>
+          <div id="pageSubtitle" class="page-subtitle muted">Loading accounts...</div>
+        </div>
+        <button type="button" id="mobileMenuBtn" class="mobile-menu-button secondary-button" aria-label="Open navigation menu" aria-controls="headerActions" aria-expanded="false">
+          <span class="hamburger-icon" aria-hidden="true"><span></span><span></span><span></span></span>
+        </button>
+        <div id="headerActions" class="header-actions">
           <button type="button" id="themeToggleBtn" class="secondary-button">Theme: Dark</button>
           <button type="button" id="logoutBtn" class="secondary-button" style="display:none;">Log out</button>
-          <div style="position:relative;">
-            <button id="addProviderBtn">+ Add account</button>
-            <div id="providerMenu" style="display:none;position:absolute;right:0;top:100%;z-index:100;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);min-width:200px;margin-top:4px;overflow:hidden;">
-              <div class="provider-menu-item" data-provider="codex" style="padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);">Codex (ChatGPT)</div>
-              <div class="provider-menu-item" data-provider="antigravity" style="padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);">Antigravity (Google)</div>
-              <div class="provider-menu-item" data-provider="gemini" style="padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);">Gemini (Google)</div>
-              <div class="provider-menu-item" data-provider="qwen" style="padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);">Qwen</div>
-              <div class="provider-menu-item" data-provider="deepseek" style="padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);">DeepSeek</div>
-              <div class="provider-menu-item" data-provider="minimax" style="padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--border);">MiniMax</div>
-              <div class="provider-menu-item" data-provider="grok" style="padding:10px 16px;cursor:pointer;">Grok (xAI)</div>
+          <div class="provider-menu-wrap">
+            <button type="button" id="addProviderBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="providerMenu">+ Add account</button>
+            <div id="providerMenu" class="provider-menu" role="menu" hidden>
+              <button type="button" class="provider-menu-item" role="menuitem" data-provider="codex">Codex (ChatGPT)</button>
+              <button type="button" class="provider-menu-item" role="menuitem" data-provider="antigravity">Antigravity (Google)</button>
+              <button type="button" class="provider-menu-item" role="menuitem" data-provider="gemini">Gemini (Google)</button>
+              <button type="button" class="provider-menu-item" role="menuitem" data-provider="qwen">Qwen</button>
+              <button type="button" class="provider-menu-item" role="menuitem" data-provider="deepseek">DeepSeek</button>
+              <button type="button" class="provider-menu-item" role="menuitem" data-provider="minimax">MiniMax</button>
+              <button type="button" class="provider-menu-item" role="menuitem" data-provider="grok">Grok (xAI)</button>
             </div>
           </div>
-        </span>
-      </h1>
-      <div id="totals" class="muted"></div>
-      <div class="chart-section">
-        <div class="chart-header">
-          <h2 style="margin:0;">Context Usage (24h)</h2>
+        </div>
+      </header>
+      <section class="overview-grid" aria-label="Gateway overview">
+        <div class="overview-card">
+          <div class="overview-label">Requests</div>
+          <div id="overviewRequests" class="overview-value">...</div>
+          <div class="overview-note">Last recorded total</div>
+        </div>
+        <div class="overview-card">
+          <div class="overview-label">Errors</div>
+          <div id="overviewErrors" class="overview-value">...</div>
+          <div id="overviewErrorNote" class="overview-note">Waiting for data</div>
+        </div>
+        <div class="overview-card">
+          <div class="overview-label">Accounts</div>
+          <div id="overviewAccounts" class="overview-value">...</div>
+          <div id="overviewProviderNote" class="overview-note">Across providers</div>
+        </div>
+        <div class="overview-card">
+          <div class="overview-label">Attention</div>
+          <div id="overviewAttention" class="overview-value">...</div>
+          <div id="overviewAttentionNote" class="overview-note">Loading status</div>
+        </div>
+      </section>
+      <section id="attentionPanel" class="attention-panel" aria-live="polite" hidden>
+        <div class="attention-title">Attention needed</div>
+        <div id="attentionList" class="attention-list"></div>
+      </section>
+      <details id="chartDetails" class="chart-section" open>
+        <summary class="chart-header">
+          <span class="chart-title-row">
+            <h2 id="contextChartTitle">Context Usage (24h)</h2>
+            <span id="contextUsageSummary" class="chart-summary">Loading usage...</span>
+            <span class="chart-toggle-hint">toggle</span>
+          </span>
           <div class="chart-legend" id="chartLegend"></div>
+        </summary>
+        <div id="contextRangeControls" class="chart-controls">
+          <label class="chart-field" for="contextRangeSelect">
+            <span>Range</span>
+            <select id="contextRangeSelect">
+              <option value="hour">1 hour</option>
+              <option value="day">1 day</option>
+              <option value="week">1 week</option>
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+          <div id="contextCustomControls" class="chart-custom-controls" hidden>
+            <label class="chart-field" for="contextCustomHours">
+              <span>Hours</span>
+              <input id="contextCustomHours" type="number" min="1" max="720" step="1" value="24">
+            </label>
+            <label class="chart-field" for="contextBucketMinutes">
+              <span>Bucket</span>
+              <select id="contextBucketMinutes">
+                <option value="1">1 min</option>
+                <option value="5">5 min</option>
+                <option value="15">15 min</option>
+                <option value="30">30 min</option>
+                <option value="60">60 min</option>
+              </select>
+            </label>
+            <button type="button" id="contextApplyRangeBtn" class="secondary-button">Apply</button>
+          </div>
         </div>
         <div class="chart-wrap"><canvas id="contextChart"></canvas></div>
-      </div>
-      <div class="provider-section">
+      </details>
+      <div class="providers-grid">
+      <section class="provider-section" aria-labelledby="codexProviderTitle">
         <div class="provider-badge">
-          <span>Codex</span>
+          <span id="codexProviderTitle">Codex</span>
           <span class="provider-badge-count" id="codexBadgeCount">0 accounts</span>
         </div>
         <div id="codexCards"></div>
-      </div>
-      <div class="provider-section">
+      </section>
+      <section class="provider-section" aria-labelledby="agwProviderTitle">
         <div class="provider-badge">
-          <span>Antigravity</span>
+          <span id="agwProviderTitle">Antigravity</span>
           <span class="provider-badge-count" id="agwBadgeCount">0 accounts</span>
         </div>
         <div id="agwCards"></div>
-      </div>
-      <div class="provider-section">
+      </section>
+      <section class="provider-section" aria-labelledby="geminiProviderTitle">
         <div class="provider-badge">
-          <span>Gemini</span>
+          <span id="geminiProviderTitle">Gemini</span>
           <span class="provider-badge-count" id="geminiBadgeCount">0 accounts</span>
         </div>
         <div id="geminiCards"></div>
-      </div>
-      <div class="provider-section">
+      </section>
+      <section class="provider-section" aria-labelledby="qwenProviderTitle">
         <div class="provider-badge">
-          <span>Qwen</span>
+          <span id="qwenProviderTitle">Qwen</span>
           <span class="provider-badge-count" id="qwenBadgeCount">0 accounts</span>
         </div>
         <div id="qwenCards"></div>
-      </div>
-      <div class="provider-section">
+      </section>
+      <section class="provider-section" aria-labelledby="deepseekProviderTitle">
         <div class="provider-badge">
-          <span>DeepSeek</span>
+          <span id="deepseekProviderTitle">DeepSeek</span>
           <span class="provider-badge-count" id="deepseekBadgeCount">0 accounts</span>
         </div>
         <div id="deepseekCards"></div>
-      </div>
-      <div class="provider-section">
+      </section>
+      <section class="provider-section" aria-labelledby="minimaxProviderTitle">
         <div class="provider-badge">
-          <span>MiniMax</span>
+          <span id="minimaxProviderTitle">MiniMax</span>
           <span class="provider-badge-count" id="minimaxBadgeCount">0 accounts</span>
         </div>
         <div id="minimaxCards"></div>
-      </div>
-      <div class="provider-section">
+      </section>
+      <section class="provider-section" aria-labelledby="grokProviderTitle">
         <div class="provider-badge">
-          <span>Grok (xAI)</span>
+          <span id="grokProviderTitle">Grok (xAI)</span>
           <span class="provider-badge-count" id="grokBadgeCount">— accounts</span>
         </div>
         <div id="grokCards"></div>
+      </section>
+      </div>
+    </main>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <div id="confirmActionModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="confirmActionTitle" aria-describedby="confirmActionMessage" aria-hidden="true" style="display:none;">
+      <div class="modal-card confirm-modal-card">
+        <h2 id="confirmActionTitle" style="margin-top:0;">Confirm action</h2>
+        <p id="confirmActionMessage" class="confirm-modal-message"></p>
+        <div class="confirm-actions">
+          <button type="button" id="confirmActionRejectBtn" class="secondary-button">Reject</button>
+          <button type="button" id="confirmActionApproveBtn">Approve</button>
+        </div>
       </div>
     </div>
     <script>
@@ -1030,9 +1605,293 @@ async fn dashboard() -> impl IntoResponse {
       let openAgwRows = new Set();
       let openGeminiRows = new Set();
       let openQwenRows = new Set();
+      const openAccountDetails = {
+        models: new Set(),
+        connection: new Set()
+      };
       let activeTipEl = null;
       let activeTipTimer = null;
       const THEME_KEY = 'gpt-gateway-theme';
+      const CONTEXT_RANGE_KEY = 'gpt-gateway-context-range';
+      let pendingCredentialAction = null;
+      const modalIds = [
+        'addModal',
+        'addAgwModal',
+        'addGeminiModal',
+        'addQwenModal',
+        'addDeepSeekModal',
+        'addMiniMaxModal',
+        'addGrokModal',
+        'confirmActionModal'
+      ];
+      const dashboardState = {
+        totalRequests: 0,
+        totalErrors: 0,
+        providers: {
+          codex: [],
+          agw: [],
+          gemini: [],
+          qwen: [],
+          deepseek: [],
+          minimax: [],
+          grok: []
+        },
+        quotas: {
+          codex: new Map(),
+          agw: new Map(),
+          gemini: new Map(),
+          qwen: new Map(),
+          deepseek: new Map(),
+          minimax: new Map(),
+          grok: new Map()
+        }
+      };
+      const providerLabels = {
+        codex: 'Codex',
+        agw: 'Antigravity',
+        gemini: 'Gemini',
+        qwen: 'Qwen',
+        deepseek: 'DeepSeek',
+        minimax: 'MiniMax',
+        grok: 'Grok'
+      };
+      function formatNumber(value) {
+        return Number(value || 0).toLocaleString();
+      }
+      function jsString(value) {
+        return JSON.stringify(String(value || ''));
+      }
+      function setText(id, value) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = value;
+      }
+      function accountLabel(a) {
+        return (a && (a.name || a.label || a.email || a.account_id)) || 'Account';
+      }
+      function accountKey(a) {
+        return (a && (a.file_name || a.label || a.email || a.account_id || a.name)) || '';
+      }
+      function isExpired(value) {
+        if (!value) return false;
+        const ts = Date.parse(value);
+        return Number.isFinite(ts) && ts < Date.now();
+      }
+      function parseTimestamp(value) {
+        if (!value) return NaN;
+        const ts = Date.parse(value);
+        return Number.isFinite(ts) ? ts : NaN;
+      }
+      function hasCurrentError(account) {
+        if (Number(account && account.errors || 0) <= 0) return false;
+        const lastError = parseTimestamp(account && account.last_error_at);
+        const lastSuccess = parseTimestamp(account && account.last_success_at);
+        if (Number.isFinite(lastError) && Number.isFinite(lastSuccess) && lastSuccess > lastError) {
+          return false;
+        }
+        return true;
+      }
+      function quotaForAccount(provider, a) {
+        const map = dashboardState.quotas[provider];
+        if (!map) return null;
+        return map.get(accountKey(a)) || map.get(a && a.label) || map.get(a && a.file_name) || map.get(a && a.email) || null;
+      }
+      function pushQuotaPercent(values, bucket) {
+        if (bucket && bucket.used_percent != null) {
+          values.push(Number(bucket.used_percent));
+        }
+      }
+      function accountQuotaPercents(provider, quota) {
+        const values = [];
+        if (!quota) return values;
+        if (quota.code_generation) {
+          pushQuotaPercent(values, quota.code_generation.five_hour);
+          pushQuotaPercent(values, quota.code_generation.weekly);
+        }
+        if (quota.code_review) {
+          pushQuotaPercent(values, quota.code_review.five_hour);
+          pushQuotaPercent(values, quota.code_review.weekly);
+        }
+        if (quota.current_window) pushQuotaPercent(values, quota.current_window);
+        if (quota.weekly) pushQuotaPercent(values, quota.weekly);
+        if (quota.groups && Array.isArray(quota.groups)) {
+          quota.groups.forEach(function(group) {
+            pushQuotaPercent(values, group.five_hour);
+            pushQuotaPercent(values, group.weekly);
+          });
+        }
+        if (provider === 'qwen' && quota.limits && Array.isArray(quota.limits)) {
+          quota.limits.forEach(function(limit) {
+            if (limit && limit.used_percent != null) values.push(Number(limit.used_percent));
+          });
+        }
+        if (provider === 'grok' && quota.kinds) {
+          Object.keys(quota.kinds).forEach(function(kindName) {
+            const kind = quota.kinds[kindName];
+            const limits = kind && kind.rate_limits;
+            if (!limits) return;
+            Object.keys(limits).forEach(function(limitName) {
+              const limit = limits[limitName];
+              if (!limit || limit.limit == null || Number(limit.limit) <= 0) return;
+              const remaining = limit.remaining != null ? Number(limit.remaining) : Number(limit.limit);
+              values.push(100 * (Number(limit.limit) - remaining) / Number(limit.limit));
+            });
+          });
+        }
+        return values.filter(Number.isFinite);
+      }
+      function maxAccountQuotaPercent(provider, a) {
+        const quota = quotaForAccount(provider, a);
+        const values = accountQuotaPercents(provider, quota);
+        return values.length ? Math.max.apply(Math, values) : 0;
+      }
+      function accountAttentionReasons(item) {
+        const account = item.account || {};
+        const reasons = [];
+        if (account.enabled === false) reasons.push('disabled');
+        if (isExpired(account.expired_at)) reasons.push('expired tokens');
+        if (hasCurrentError(account)) reasons.push('errors');
+        if (maxAccountQuotaPercent(item.provider, account) >= 75) reasons.push('near quota');
+        return reasons;
+      }
+      function allAccountsWithProvider() {
+        const out = [];
+        Object.keys(dashboardState.providers).forEach(function(provider) {
+          (dashboardState.providers[provider] || []).forEach(function(account) {
+            out.push({ provider: provider, account: account });
+          });
+        });
+        return out;
+      }
+      function renderAttentionChip(text, extraClass) {
+        return '<span class="attention-chip' + (extraClass ? ' ' + escapeHtml(extraClass) : '') + '">' + escapeHtml(text) + '</span>';
+      }
+      function updateOverview() {
+        const accounts = allAccountsWithProvider();
+        const totalAccounts = accounts.length;
+        const providersWithAccounts = Object.keys(dashboardState.providers)
+          .filter(function(provider) { return (dashboardState.providers[provider] || []).length > 0; }).length;
+        const attentionItems = accounts.map(function(item) {
+          return { item: item, reasons: accountAttentionReasons(item) };
+        }).filter(function(entry) { return entry.reasons.length > 0; });
+        const disabled = attentionItems.filter(function(entry) { return entry.reasons.indexOf('disabled') !== -1; }).length;
+        const expired = attentionItems.filter(function(entry) { return entry.reasons.indexOf('expired tokens') !== -1; }).length;
+        const errorAccounts = attentionItems.filter(function(entry) { return entry.reasons.indexOf('errors') !== -1; }).length;
+        const nearQuota = attentionItems.filter(function(entry) { return entry.reasons.indexOf('near quota') !== -1; }).length;
+        const attentionCount = attentionItems.length;
+        setText('overviewRequests', formatNumber(dashboardState.totalRequests));
+        setText('overviewErrors', formatNumber(dashboardState.totalErrors));
+        setText('overviewErrorNote', errorAccounts ? errorAccounts + ' accounts reporting errors' : 'No account errors reported');
+        setText('overviewAccounts', formatNumber(totalAccounts));
+        setText('overviewProviderNote', providersWithAccounts + ' active providers');
+        setText('overviewAttention', formatNumber(attentionCount));
+        setText('overviewAttentionNote', attentionCount ? 'Review highlighted items' : 'No obvious issues');
+        setText('pageSubtitle', totalAccounts
+          ? totalAccounts + ' accounts across ' + providersWithAccounts + ' providers'
+          : 'No accounts loaded yet');
+        const panel = document.getElementById('attentionPanel');
+        const list = document.getElementById('attentionList');
+        if (!panel || !list) return;
+        const chips = [];
+        if (attentionCount) chips.push(renderAttentionChip(attentionCount + ' accounts need review'));
+        if (disabled) chips.push(renderAttentionChip(disabled + ' disabled'));
+        if (expired) chips.push(renderAttentionChip(expired + ' expired tokens'));
+        if (nearQuota) chips.push(renderAttentionChip(nearQuota + ' near quota'));
+        if (errorAccounts) chips.push(renderAttentionChip(errorAccounts + ' errors'));
+        if (!chips.length) {
+          panel.hidden = true;
+          list.innerHTML = '';
+          return;
+        }
+        panel.hidden = false;
+        list.innerHTML = chips.join('');
+      }
+      function notify(message, tone) {
+        const toast = document.getElementById('toast');
+        if (!toast) return;
+        toast.textContent = message || '';
+        toast.className = 'toast show' + (tone === 'error' ? ' error' : '');
+        clearTimeout(notify.timer);
+        notify.timer = setTimeout(function() {
+          toast.className = 'toast';
+        }, 3200);
+      }
+      function refreshCredentialViews() {
+        refresh();
+        refreshQuota();
+        refreshAgwQuota();
+        refreshAgwAccounts();
+        refreshGeminiQuota();
+        refreshGeminiAccounts();
+        refreshQwenQuota();
+        refreshQwenAccounts();
+        refreshDeepSeekAccounts();
+        refreshDeepSeekQuota();
+        refreshGrokQuota().then(() => refreshGrokAccounts());
+        refreshMiniMaxAccounts();
+        refreshMiniMaxQuota();
+      }
+      function accountActionMenuId(fileName) {
+        var value = String(fileName || '');
+        var hash = 0;
+        for (var i = 0; i < value.length; i++) {
+          hash = ((hash * 31) + value.charCodeAt(i)) >>> 0;
+        }
+        return 'account-action-menu-' + hash.toString(36);
+      }
+      function closeAccountActionMenus(exceptId) {
+        document.querySelectorAll('.account-action-menu').forEach(function(menu) {
+          if (exceptId && menu.id === exceptId) return;
+          menu.hidden = true;
+          var button = menu.parentElement && menu.parentElement.querySelector('.account-menu-button');
+          if (button) button.setAttribute('aria-expanded', 'false');
+        });
+      }
+      function toggleAccountActionMenu(event, menuId) {
+        if (event) event.stopPropagation();
+        var menu = document.getElementById(menuId);
+        if (!menu) return;
+        var shouldOpen = menu.hidden;
+        closeAccountActionMenus(menuId);
+        menu.hidden = !shouldOpen;
+        var button = menu.parentElement && menu.parentElement.querySelector('.account-menu-button');
+        if (button) button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+      }
+      function closeCredentialActionConfirm() {
+        pendingCredentialAction = null;
+        closeModal('confirmActionModal');
+      }
+      function openCredentialActionConfirm(options) {
+        closeAccountActionMenus();
+        pendingCredentialAction = options || null;
+        var title = document.getElementById('confirmActionTitle');
+        var message = document.getElementById('confirmActionMessage');
+        var approve = document.getElementById('confirmActionApproveBtn');
+        if (title) title.textContent = options.title || 'Confirm action';
+        if (message) message.textContent = options.message || '';
+        if (approve) {
+          approve.textContent = options.approveLabel || 'Approve';
+          approve.className = options.danger ? 'danger' : '';
+        }
+        openModal('confirmActionModal');
+      }
+      async function approveCredentialAction() {
+        var action = pendingCredentialAction;
+        if (!action || typeof action.run !== 'function') {
+          closeCredentialActionConfirm();
+          return;
+        }
+        var approve = document.getElementById('confirmActionApproveBtn');
+        var reject = document.getElementById('confirmActionRejectBtn');
+        if (approve) approve.disabled = true;
+        if (reject) reject.disabled = true;
+        try {
+          await action.run();
+          closeCredentialActionConfirm();
+        } finally {
+          if (approve) approve.disabled = false;
+          if (reject) reject.disabled = false;
+        }
+      }
       function normalizeTheme(theme) {
         return theme === 'light' ? 'light' : 'dark';
       }
@@ -1050,21 +1909,101 @@ async fn dashboard() -> impl IntoResponse {
       }
       function closeProviderMenu() {
         const menu = document.getElementById('providerMenu');
+        const button = document.getElementById('addProviderBtn');
         if (menu) {
-          menu.style.display = 'none';
+          menu.hidden = true;
+        }
+        if (button) {
+          button.setAttribute('aria-expanded', 'false');
+        }
+      }
+      function setMobileNavOpen(open) {
+        const header = document.querySelector('.page-header');
+        const button = document.getElementById('mobileMenuBtn');
+        if (header) header.classList.toggle('mobile-nav-open', !!open);
+        if (button) {
+          button.setAttribute('aria-expanded', open ? 'true' : 'false');
+          button.setAttribute('aria-label', open ? 'Close navigation menu' : 'Open navigation menu');
+        }
+        if (!open) closeProviderMenu();
+      }
+      function configureMobileNav() {
+        const button = document.getElementById('mobileMenuBtn');
+        if (!button) return;
+        button.addEventListener('click', function() {
+          const expanded = button.getAttribute('aria-expanded') === 'true';
+          setMobileNavOpen(!expanded);
+        });
+        window.addEventListener('resize', function() {
+          if (!window.matchMedia('(max-width: 768px)').matches) {
+            setMobileNavOpen(false);
+          }
+        });
+      }
+      function setDashboardInactive(inactive) {
+        const content = document.getElementById('dashboardContent');
+        if (!content) return;
+        if (inactive) {
+          content.setAttribute('aria-hidden', 'true');
+          content.setAttribute('inert', '');
+        } else {
+          content.removeAttribute('aria-hidden');
+          content.removeAttribute('inert');
+        }
+      }
+      function anyVisibleModal() {
+        return modalIds.some(function(id) {
+          const el = document.getElementById(id);
+          return el && el.style.display !== 'none';
+        });
+      }
+      function adminGateVisible() {
+        const gate = document.getElementById('adminLoginGate');
+        return !!gate && gate.style.display !== 'none';
+      }
+      function openModal(id) {
+        closeProviderMenu();
+        modalIds.forEach(function(modalId) {
+          if (modalId !== id) closeModal(modalId, true);
+        });
+        const modal = document.getElementById(id);
+        if (!modal) return;
+        modal.style.display = 'block';
+        modal.setAttribute('aria-hidden', 'false');
+        setDashboardInactive(true);
+        setTimeout(function() {
+          const focusTarget = modal.querySelector('input, textarea, button, [tabindex]:not([tabindex="-1"])');
+          if (focusTarget) focusTarget.focus();
+        }, 0);
+      }
+      function closeModal(id, keepBackgroundInactive) {
+        const modal = document.getElementById(id);
+        if (!modal) return;
+        modal.style.display = 'none';
+        modal.setAttribute('aria-hidden', 'true');
+        if (!keepBackgroundInactive && !anyVisibleModal() && !adminGateVisible()) {
+          setDashboardInactive(false);
         }
       }
       function showAdminLogin(message) {
         adminAuthenticated = false;
         adminAuthEpoch += 1;
         closeProviderMenu();
-        document.getElementById('adminLoginGate').style.display = 'block';
+        const gate = document.getElementById('adminLoginGate');
+        gate.style.display = 'block';
+        gate.setAttribute('aria-hidden', 'false');
+        setDashboardInactive(true);
         document.getElementById('logoutBtn').style.display = 'none';
         document.getElementById('adminLoginStatus').textContent = message || '';
       }
       function hideAdminLogin() {
-        document.getElementById('adminLoginGate').style.display = 'none';
+        const gate = document.getElementById('adminLoginGate');
+        gate.style.display = 'none';
+        gate.setAttribute('aria-hidden', 'true');
         document.getElementById('adminLoginStatus').textContent = '';
+        if (!anyVisibleModal() && !adminGateVisible()) {
+          setDashboardInactive(false);
+        }
         if (adminAuthEnabled) {
           document.getElementById('logoutBtn').style.display = 'inline-block';
         }
@@ -1324,14 +2263,19 @@ async fn dashboard() -> impl IntoResponse {
           if (t && t.cost_in_usd_ticks != null) costPieces.push('text ' + (t.cost_in_usd_ticks / 1e6).toFixed(4) + ' ¢');
           if (i && i.cost_in_usd_ticks != null) costPieces.push('image ' + (i.cost_in_usd_ticks / 1e6).toFixed(4) + ' ¢');
           if (v && v.cost_in_usd_ticks != null) costPieces.push('video ' + (v.cost_in_usd_ticks / 1e6).toFixed(4) + ' ¢');
+          var noteLines = [];
           if (costPieces.length) {
-            bars += '<div class="muted quota-cost-line">probe cost: ' + costPieces.join(' · ') + '</div>';
+            noteLines.push('probe cost: ' + costPieces.join(' | '));
           }
           // xAI's consumer OAuth does not send x-ratelimit-reset-* headers, so
           // we can't show a "resets in" countdown the way the Codex / MiniMax
           // cards do. Surface that limitation once at the bottom of the
           // per-kind block instead of leaving the user wondering.
-          bars += '<div class="muted quota-cost-line">xAI OAuth does not expose reset time — quota resets on an opaque schedule.</div>';
+          noteLines.push('xAI OAuth does not expose reset time; quota resets on an opaque schedule.');
+          if (quota.status_msg) noteLines.push(quota.status_msg);
+          bars += '<details class="quota-notes muted"><summary>Quota notes</summary>'
+            + noteLines.map(function(line) { return '<div class="quota-cost-line">' + escapeHtml(line) + '</div>'; }).join('')
+            + '</details>';
         }
         // MiniMax top-level current_window / weekly (matches the
         // platform.minimax.io/console/usage layout: two big bars per
@@ -1365,7 +2309,7 @@ async fn dashboard() -> impl IntoResponse {
             bars += renderProgressBar(label, detail, 100, 'low');
           });
         }
-        if (quota.status_msg) {
+        if (quota.status_msg && !quota.kinds) {
           bars += '<div class="muted quota-status">' + escapeHtml(quota.status_msg) + '</div>';
         }
         return bars ? '<div class="card-quota">' + bars + '</div>' : '';
@@ -1374,6 +2318,99 @@ async fn dashboard() -> impl IntoResponse {
         return String(value).replace(/[&<>"']/g, function(ch) {
           return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch];
         });
+      }
+      function renderAccountState(a) {
+        const enabled = !a || a.enabled !== false;
+        return '<span class="account-state ' + (enabled ? 'enabled' : 'disabled') + '">'
+          + (enabled ? 'Enabled' : 'Disabled')
+          + '</span>';
+      }
+      function renderAttentionBadge(provider, a) {
+        const reasons = accountAttentionReasons({ provider: provider, account: a });
+        if (!reasons.length) return '';
+        const label = reasons.join(' / ');
+        const title = 'Attention: ' + label;
+        return '<span class="attention-account-badge" title="' + escapeHtml(title) + '" aria-label="' + escapeHtml(title) + '">' + escapeHtml(label) + '</span>';
+      }
+      function renderAccountActions(a) {
+        if (!a || !a.file_name) {
+          return '';
+        }
+        const label = accountLabel(a);
+        const isEnabled = a.enabled !== false;
+        const toggleLabel = isEnabled ? 'Disable' : 'Enable';
+        const toggleClass = isEnabled ? 'danger' : 'is-enabled';
+        const menuId = accountActionMenuId(a.file_name);
+        const menuArg = escapeHtml(jsString(menuId));
+        const fileArg = escapeHtml(jsString(a.file_name));
+        const labelArg = escapeHtml(jsString(label));
+        return '<span class="account-menu-wrap">'
+          + '<button type="button" class="mini-btn account-menu-button" aria-label="' + escapeHtml('Open actions for ' + label) + '" aria-haspopup="menu" aria-expanded="false" aria-controls="' + escapeHtml(menuId) + '" onclick="toggleAccountActionMenu(event, ' + menuArg + ')">...</button>'
+          + '<span id="' + escapeHtml(menuId) + '" class="account-action-menu" role="menu" hidden onclick="event.stopPropagation()">'
+          + '<button type="button" role="menuitem" aria-label="' + escapeHtml(toggleLabel + ' ' + label) + '" onclick="toggleCred(' + fileArg + ', ' + (isEnabled ? 'false' : 'true') + ', ' + labelArg + ')" class="mini-btn action-btn ' + toggleClass + '">' + toggleLabel + '</button>'
+          + '<button type="button" role="menuitem" aria-label="' + escapeHtml('Delete ' + label) + '" onclick="deleteCred(' + fileArg + ', ' + labelArg + ')" class="mini-btn action-btn danger">Delete</button>'
+          + '</span>'
+          + '</span>';
+      }
+      function accountDetailStateKey(provider, a, fallback) {
+        return provider + ':' + (accountKey(a) || fallback || accountLabel(a));
+      }
+      function isAccountDetailOpen(kind, key) {
+        const store = openAccountDetails[kind];
+        return !!store && store.has(key);
+      }
+      function trackAccountDetail(el, kind, key) {
+        const store = openAccountDetails[kind];
+        if (!store) return;
+        if (el.open) {
+          store.add(key);
+        } else {
+          store.delete(key);
+        }
+      }
+      function detailToggleAttrs(kind, key) {
+        if (!kind || !key) return '';
+        return (isAccountDetailOpen(kind, key) ? ' open' : '')
+          + ' ontoggle="trackAccountDetail(this, ' + escapeHtml(jsString(kind)) + ', ' + escapeHtml(jsString(key)) + ')"';
+      }
+      function renderMetaDetails(rows, title, provider, a, fallbackKey) {
+        if (!rows || !rows.length) return '';
+        var key = accountDetailStateKey(provider || 'account', a, fallbackKey);
+        return '<details class="account-meta muted"' + detailToggleAttrs('connection', key) + '><summary>' + escapeHtml(title || 'Details') + '</summary><div class="meta-list">'
+          + rows.join('')
+          + '</div></details>';
+      }
+      function renderMetaLine(label, value, code) {
+        if (value == null || value === '') return '';
+        return '<div><span>' + escapeHtml(label) + ': </span>'
+          + (code ? '<code>' + escapeHtml(value) + '</code>' : escapeHtml(value))
+          + '</div>';
+      }
+      function firstPresent(object, keys) {
+        if (!object) return '';
+        for (var i = 0; i < keys.length; i++) {
+          var value = object[keys[i]];
+          if (value != null && value !== '') return value;
+        }
+        return '';
+      }
+      function connectionRows(provider, a) {
+        var rows = [];
+        var label = providerLabels[provider] || provider || 'Provider';
+        rows.push(renderMetaLine('provider', label, false));
+        rows.push(renderMetaLine('credential file', firstPresent(a, ['file_name']), true));
+        rows.push(renderMetaLine('label', firstPresent(a, ['label', 'name']), false));
+        rows.push(renderMetaLine('email', firstPresent(a, ['email']), false));
+        rows.push(renderMetaLine('account id', firstPresent(a, ['account_id', 'subject']), true));
+        rows.push(renderMetaLine('project id', firstPresent(a, ['project_id']), true));
+        rows.push(renderMetaLine('resource URL', firstPresent(a, ['resource_url', 'base_url', 'api_base_url']), true));
+        rows.push(renderMetaLine('saved token expiry', firstPresent(a, ['expired_at']), false));
+        rows.push(renderMetaLine('last success', firstPresent(a, ['last_success_at']), false));
+        rows.push(renderMetaLine('last error', firstPresent(a, ['last_error_at']), false));
+        rows.push(renderMetaLine('user id', firstPresent(a, ['user_id']), true));
+        rows.push(renderMetaLine('team id', a && a.team_id ? a.team_id + (a.team_blocked ? ' (blocked)' : '') : '', true));
+        rows.push(renderMetaLine('zdr', firstPresent(a, ['zdr_status']), true));
+        return rows.filter(Boolean);
       }
       function modelLabel(model) {
         if (!model) return '';
@@ -1390,47 +2427,43 @@ async fn dashboard() -> impl IntoResponse {
           out.push(label);
         });
       }
-      function renderAccountModels(a, quota) {
+      function renderAccountModels(a, quota, provider, fallbackKey) {
         var labels = [];
         var seen = new Set();
         appendModelLabels(labels, seen, a && a.models);
         appendModelLabels(labels, seen, quota && quota.available_models);
         appendModelLabels(labels, seen, quota && quota.models);
         appendModelLabels(labels, seen, quota && quota.data);
+        var key = accountDetailStateKey(provider || 'account', a, fallbackKey);
         return labels.length
-          ? '<div class="muted account-models">models:<span class="model-list">' + labels.map(escapeHtml).join(' | ') + '</span></div>'
+          ? '<details class="muted account-models"' + detailToggleAttrs('models', key) + '><summary>Models <span class="model-count">(' + labels.length + ')</span></summary><span class="model-list">' + labels.map(escapeHtml).join(' | ') + '</span></details>'
           : '';
       }
       function buildCard(a, quota) {
         var key = a.file_name || a.label;
-        var dot = a.enabled ? '#2ecc71' : '#e74c3c';
-        var toggleLabel = a.enabled ? 'Disable' : 'Enable';
-        var actions = '';
-        if (a.file_name) {
-          actions += '<button title="' + toggleLabel + '" onclick="toggleCred(\'' + a.file_name + '\', ' + (a.enabled ? 'false' : 'true') + ')" class="mini-btn" style="background:' + dot + ';color:#fff;">&#9679;</button>';
-          actions += '<button title="Delete" onclick="deleteCred(\'' + a.file_name + '\')" class="mini-btn danger">&#128465;</button>';
-        } else {
-          actions += '<span class="dot-indicator" style="background:' + dot + ';"></span>';
-        }
         return '<div class="card">'
-          + '<div class="card-header"><span class="card-email">' + a.label + '</span><span class="card-actions">' + actions + '</span></div>'
+          + '<div class="card-header"><span class="card-email">' + escapeHtml(accountLabel(a)) + '</span>' + renderAccountState(a) + renderAttentionBadge('codex', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">'
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>'
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
           + '</div>'
           + renderQuotaBars(quota, { provider: 'codex', key: key })
-          + renderAccountModels(a, quota)
+          + renderAccountModels(a, quota, 'codex', key)
+          + renderMetaDetails(connectionRows('codex', a), 'Connection details', 'codex', a, key)
           + '</div>';
       }
       async function refresh() {
         const res = await adminFetch('/dashboard.json');
         if (!res) return;
         const data = await res.json();
-        document.getElementById('totals').textContent =
-          'Total requests: ' + data.total_requests + ' | Total errors: ' + data.total_errors;
-        var cards = data.accounts.map(function(a) { return buildCard(a, lastQuota.get(a.file_name || a.label)); }).join('');
+        const accounts = data.accounts || [];
+        dashboardState.totalRequests = data.total_requests || 0;
+        dashboardState.totalErrors = data.total_errors || 0;
+        dashboardState.providers.codex = accounts;
+        var cards = accounts.map(function(a) { return buildCard(a, lastQuota.get(a.file_name || a.label)); }).join('');
         document.getElementById('codexCards').innerHTML = cards || '<div class="empty-state">No Codex accounts</div>';
-        document.getElementById('codexBadgeCount').textContent = data.accounts.length + ' accounts';
+        document.getElementById('codexBadgeCount').textContent = accounts.length + ' accounts';
+        updateOverview();
       }
       async function refreshQuota() {
         const res = await adminFetch('/quota.json');
@@ -1442,54 +2475,27 @@ async fn dashboard() -> impl IntoResponse {
           quotaMap.set(key, q);
         });
         lastQuota = quotaMap;
+        dashboardState.quotas.codex = quotaMap;
+        updateOverview();
         refresh();
       }
       function buildProviderCard(a, quota, provider) {
         var key = a.file_name || a.label || a.email || a.account_id || '';
-        var dot = a.enabled ? '#2ecc71' : '#e74c3c';
-        var toggleLabel = a.enabled ? 'Disable' : 'Enable';
-        var actions = '';
-        if (a.file_name) {
-          actions += '<button title="' + toggleLabel + '" onclick="toggleCred(\'' + a.file_name + '\', ' + (a.enabled ? 'false' : 'true') + ')" class="mini-btn" style="background:' + dot + ';color:#fff;">&#9679;</button>';
-          actions += '<button title="Delete" onclick="deleteCred(\'' + a.file_name + '\')" class="mini-btn danger">&#128465;</button>';
-        } else {
-          actions += '<span class="dot-indicator" style="background:' + dot + ';"></span>';
-        }
         var extra = '';
-        if (a.email) extra += '<span class="stat-pill"><span class="stat-pill-label">email</span><span class="stat-pill-value">' + a.email + '</span></span>';
-        if (a.project_id) extra += '<span class="stat-pill"><span class="stat-pill-label">project</span><span class="stat-pill-value"><code>' + a.project_id + '</code></span></span>';
+        if (a.email) extra += '<span class="stat-pill"><span class="stat-pill-label">email</span><span class="stat-pill-value">' + escapeHtml(a.email) + '</span></span>';
+        if (a.project_id) extra += '<span class="stat-pill"><span class="stat-pill-label">project</span><span class="stat-pill-value"><code>' + escapeHtml(a.project_id) + '</code></span></span>';
         return '<div class="card">'
-          + '<div class="card-header"><span class="card-email">' + (a.label || a.email || a.account_id || 'N/A') + '</span><span class="card-actions">' + actions + '</span></div>'
+          + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.email || a.account_id || 'N/A') + '</span>' + renderAccountState(a) + renderAttentionBadge(provider, a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">'
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>'
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
           + extra + '</div>'
           + renderQuotaBars(quota, { provider: provider, key: key })
-          + renderAccountModels(a, quota)
+          + renderAccountModels(a, quota, provider, key)
+          + renderMetaDetails(connectionRows(provider, a), 'Connection details', provider, a, key)
           + '</div>';
       }
       function buildQwenCard(a, quota) {
-        var dot = a.enabled ? '#2ecc71' : '#e74c3c';
-        var toggleLabel = a.enabled ? 'Disable' : 'Enable';
-        var actions = '';
-        if (a.file_name) {
-          actions += '<button title="' + toggleLabel + '" onclick="toggleCred(\'' + a.file_name + '\', ' + (a.enabled ? 'false' : 'true') + ')" class="mini-btn" style="background:' + dot + ';color:#fff;">&#9679;</button>';
-          actions += '<button title="Delete" onclick="deleteCred(\'' + a.file_name + '\')" class="mini-btn danger">&#128465;</button>';
-        } else {
-          actions += '<span class="dot-indicator" style="background:' + dot + ';"></span>';
-        }
-        var resource = a.resource_url || 'https://portal.qwen.ai/v1';
-        var meta = '';
-        meta += '<div class="muted">resource: <code>' + resource + '</code></div>';
-        if (a.expired_at) {
-          meta += '<div class="muted">saved token expiry: ' + a.expired_at + '</div>';
-        }
-        if (a.last_success_at) {
-          meta += '<div class="muted">last success: ' + a.last_success_at + '</div>';
-        }
-        if (a.last_error_at) {
-          meta += '<div class="muted">last error: ' + a.last_error_at + '</div>';
-        }
         var usage = '';
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>';
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>';
@@ -1504,26 +2510,17 @@ async fn dashboard() -> impl IntoResponse {
           usage += '<span class="stat-pill"><span class="stat-pill-value">' + a.reasoning_tokens + '</span><span class="stat-pill-label">reason tok</span></span>';
         }
         if (a.email) {
-          usage += '<span class="stat-pill"><span class="stat-pill-label">email</span><span class="stat-pill-value">' + a.email + '</span></span>';
+          usage += '<span class="stat-pill"><span class="stat-pill-label">email</span><span class="stat-pill-value">' + escapeHtml(a.email) + '</span></span>';
         }
         return '<div class="card">'
-          + '<div class="card-header"><span class="card-email">' + (a.label || a.email || a.account_id || 'N/A') + '</span><span class="card-actions">' + actions + '</span></div>'
+          + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.email || a.account_id || 'N/A') + '</span>' + renderAccountState(a) + renderAttentionBadge('qwen', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quota, { provider: 'qwen', key: a.file_name || a.label || a.email || a.account_id || '' })
-          + renderAccountModels(a, quota)
-          + meta
+          + renderAccountModels(a, quota, 'qwen', a.file_name || a.label || a.email || a.account_id || '')
+          + renderMetaDetails(connectionRows('qwen', a), 'Connection details', 'qwen', a, a.file_name || a.label || a.email || a.account_id || '')
           + '</div>';
       }
       function buildGrokCard(a, quota) {
-        var dot = a.enabled ? '#2ecc71' : '#e74c3c';
-        var toggleLabel = a.enabled ? 'Disable' : 'Enable';
-        var actions = '';
-        if (a.file_name) {
-          actions += '<button title="' + toggleLabel + '" onclick="toggleCred(\'' + a.file_name + '\', ' + (a.enabled ? 'false' : 'true') + ')" class="mini-btn" style="background:' + dot + ';color:#fff;">&#9679;</button>';
-          actions += '<button title="Delete" onclick="deleteCred(\'' + a.file_name + '\')" class="mini-btn danger">&#128465;</button>';
-        } else {
-          actions += '<span class="dot-indicator" style="background:' + dot + ';"></span>';
-        }
         var usage = '';
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>';
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>';
@@ -1538,10 +2535,10 @@ async fn dashboard() -> impl IntoResponse {
           usage += '<span class="stat-pill"><span class="stat-pill-value">' + a.cache_tokens + '</span><span class="stat-pill-label">cache tok</span></span>';
         }
         if (a.email) {
-          usage += '<span class="stat-pill"><span class="stat-pill-label">email</span><span class="stat-pill-value">' + a.email + '</span></span>';
+          usage += '<span class="stat-pill"><span class="stat-pill-label">email</span><span class="stat-pill-value">' + escapeHtml(a.email) + '</span></span>';
         }
         if (a.last_effective_model) {
-          usage += '<span class="stat-pill"><span class="stat-pill-label">model</span><span class="stat-pill-value"><code>' + a.last_effective_model + '</code></span></span>';
+          usage += '<span class="stat-pill"><span class="stat-pill-label">model</span><span class="stat-pill-value"><code>' + escapeHtml(a.last_effective_model) + '</code></span></span>';
         }
         // Live per-kind snapshots when /grok/quota.json is available.
         if (quota && quota.kinds) {
@@ -1567,26 +2564,6 @@ async fn dashboard() -> impl IntoResponse {
             usage += '<span class="stat-pill-divider"></span>' + livePills;
           }
         }
-        var meta = '';
-        if (a.user_id) {
-          meta += '<div class="muted">user id: <code>' + a.user_id + '</code></div>';
-        }
-        if (a.team_id) {
-          meta += '<div class="muted">team id: <code>' + a.team_id + '</code>' + (a.team_blocked ? ' (blocked)' : '') + '</div>';
-        }
-        if (a.zdr_status) {
-          meta += '<div class="muted">zdr: <code>' + a.zdr_status + '</code></div>';
-        }
-        if (a.expired_at) {
-          meta += '<div class="muted">saved token expiry: ' + a.expired_at + '</div>';
-        }
-        if (a.last_success_at) {
-          meta += '<div class="muted">last success: ' + a.last_success_at + '</div>';
-        }
-        if (a.last_error_at) {
-          meta += '<div class="muted">last error: ' + a.last_error_at + '</div>';
-        }
-        meta += renderAccountModels(a, null);
         // Pass both the static rate_limits (from /grok/accounts.json, captured
         // at last token refresh) and the live kinds snapshot (from
         // /grok/quota.json, refreshed on every poll).
@@ -1596,10 +2573,11 @@ async fn dashboard() -> impl IntoResponse {
           if (quota.note) quotaPayload.status_msg = quota.note;
         }
         return '<div class="card">'
-          + '<div class="card-header"><span class="card-email">' + (a.name || a.label || a.email || a.account_id || 'N/A') + '</span><span class="card-actions">' + actions + '</span></div>'
+          + '<div class="card-header"><span class="card-email">' + escapeHtml(a.name || a.label || a.email || a.account_id || 'N/A') + '</span>' + renderAccountState(a) + renderAttentionBadge('grok', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quotaPayload, { provider: 'grok', key: a.file_name || a.label || a.email || a.account_id || '' })
-          + meta
+          + renderMetaDetails(connectionRows('grok', a), 'Connection details', 'grok', a, a.file_name || a.label || a.email || a.account_id || '')
+          + renderAccountModels(a, null, 'grok', a.file_name || a.label || a.email || a.account_id || '')
           + '</div>';
       }
       async function refreshAgwAccounts() {
@@ -1607,9 +2585,11 @@ async fn dashboard() -> impl IntoResponse {
         if (!res) return;
         var data = await res.json();
         var accounts = data.accounts || [];
+        dashboardState.providers.agw = accounts;
         var cards = accounts.map(function(a) { return buildProviderCard(a, lastAgwQuota.get(a.file_name || a.label), 'agw'); }).join('');
         document.getElementById('agwCards').innerHTML = cards || '<div class="empty-state">No Antigravity accounts</div>';
         document.getElementById('agwBadgeCount').textContent = accounts.length + ' accounts';
+        updateOverview();
       }
       async function refreshAgwQuota() {
         const res = await adminFetch('/agw/quota.json');
@@ -1618,6 +2598,8 @@ async fn dashboard() -> impl IntoResponse {
         const quotaMap = new Map();
         (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
         lastAgwQuota = quotaMap;
+        dashboardState.quotas.agw = quotaMap;
+        updateOverview();
         refreshAgwAccounts();
       }
       async function refreshGeminiAccounts() {
@@ -1625,9 +2607,11 @@ async fn dashboard() -> impl IntoResponse {
         if (!res) return;
         var data = await res.json();
         var accounts = data.accounts || [];
+        dashboardState.providers.gemini = accounts;
         var cards = accounts.map(function(a) { return buildProviderCard(a, lastGeminiQuota.get(a.file_name || a.label), 'gemini'); }).join('');
         document.getElementById('geminiCards').innerHTML = cards || '<div class="empty-state">No Gemini accounts</div>';
         document.getElementById('geminiBadgeCount').textContent = accounts.length + ' accounts';
+        updateOverview();
       }
       async function refreshGeminiQuota() {
         const res = await adminFetch('/gemini/quota.json');
@@ -1636,6 +2620,8 @@ async fn dashboard() -> impl IntoResponse {
         const quotaMap = new Map();
         (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
         lastGeminiQuota = quotaMap;
+        dashboardState.quotas.gemini = quotaMap;
+        updateOverview();
         refreshGeminiAccounts();
       }
       async function refreshQwenAccounts() {
@@ -1643,9 +2629,11 @@ async fn dashboard() -> impl IntoResponse {
         if (!res) return;
         var data = await res.json();
         var accounts = data.accounts || [];
+        dashboardState.providers.qwen = accounts;
         var cards = accounts.map(function(a) { return buildQwenCard(a, lastQwenQuota.get(a.file_name || a.label)); }).join('');
         document.getElementById('qwenCards').innerHTML = cards || '<div class="empty-state">No Qwen accounts</div>';
         document.getElementById('qwenBadgeCount').textContent = accounts.length + ' accounts';
+        updateOverview();
       }
       async function refreshQwenQuota() {
         const res = await adminFetch('/qwen/quota.json');
@@ -1654,6 +2642,8 @@ async fn dashboard() -> impl IntoResponse {
         const quotaMap = new Map();
         (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
         lastQwenQuota = quotaMap;
+        dashboardState.quotas.qwen = quotaMap;
+        updateOverview();
         refreshQwenAccounts();
       }
       async function refreshDeepSeekAccounts() {
@@ -1661,9 +2651,11 @@ async fn dashboard() -> impl IntoResponse {
         if (!res) return;
         var data = await res.json();
         var accounts = data.accounts || [];
+        dashboardState.providers.deepseek = accounts;
         var cards = accounts.map(function(a) { return buildProviderCard(a, lastDeepSeekQuota.get(a.file_name || a.label), 'deepseek'); }).join('');
         document.getElementById('deepseekCards').innerHTML = cards || '<div class="empty-state">No DeepSeek accounts</div>';
         document.getElementById('deepseekBadgeCount').textContent = accounts.length + ' accounts';
+        updateOverview();
       }
       async function refreshDeepSeekQuota() {
         const res = await adminFetch('/deepseek/quota.json');
@@ -1672,18 +2664,11 @@ async fn dashboard() -> impl IntoResponse {
         const quotaMap = new Map();
         (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
         lastDeepSeekQuota = quotaMap;
+        dashboardState.quotas.deepseek = quotaMap;
+        updateOverview();
         refreshDeepSeekAccounts();
       }
       function buildMiniMaxCard(a, quota) {
-        var dot = a.enabled ? '#2ecc71' : '#e74c3c';
-        var toggleLabel = a.enabled ? 'Disable' : 'Enable';
-        var actions = '';
-        if (a.file_name) {
-          actions += '<button title="' + toggleLabel + '" onclick="toggleCred(\'' + a.file_name + '\', ' + (a.enabled ? 'false' : 'true') + ')" class="mini-btn" style="background:' + dot + ';color:#fff;">&#9679;</button>';
-          actions += '<button title="Delete" onclick="deleteCred(\'' + a.file_name + '\')" class="mini-btn danger">&#128465;</button>';
-        } else {
-          actions += '<span class="dot-indicator" style="background:' + dot + ';"></span>';
-        }
         var usage = '';
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>';
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>';
@@ -1691,22 +2676,12 @@ async fn dashboard() -> impl IntoResponse {
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.input_tokens || 0) + '</span><span class="stat-pill-label">in tok</span></span>';
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.output_tokens || 0) + '</span><span class="stat-pill-label">out tok</span></span>';
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.total_tokens || 0) + '</span><span class="stat-pill-label">total tok</span></span>';
-        var meta = '';
-        if (a.base_url) {
-          meta += '<div class="muted">base URL: <code>' + a.base_url + '</code></div>';
-        }
-        if (a.last_success_at) {
-          meta += '<div class="muted">last success: ' + a.last_success_at + '</div>';
-        }
-        if (a.last_error_at) {
-          meta += '<div class="muted">last error: ' + a.last_error_at + '</div>';
-        }
         return '<div class="card">'
-          + '<div class="card-header"><span class="card-email">' + (a.label || a.account_id || 'MiniMax') + '</span><span class="card-actions">' + actions + '</span></div>'
+          + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.account_id || 'MiniMax') + '</span>' + renderAccountState(a) + renderAttentionBadge('minimax', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quota, { provider: 'minimax', key: a.file_name || a.label || a.account_id || '' })
-          + renderAccountModels(a, quota)
-          + meta
+          + renderAccountModels(a, quota, 'minimax', a.file_name || a.label || a.account_id || '')
+          + renderMetaDetails(connectionRows('minimax', a), 'Connection details', 'minimax', a, a.file_name || a.label || a.account_id || '')
           + '</div>';
       }
       let lastMiniMaxQuota = new Map();
@@ -1716,9 +2691,11 @@ async fn dashboard() -> impl IntoResponse {
         if (!res) return;
         var data = await res.json();
         var accounts = data.accounts || [];
+        dashboardState.providers.minimax = accounts;
         var cards = accounts.map(function(a) { return buildMiniMaxCard(a, lastMiniMaxQuota.get(a.file_name || a.label)); }).join('');
         document.getElementById('minimaxCards').innerHTML = cards || '<div class="empty-state">No MiniMax accounts</div>';
         document.getElementById('minimaxBadgeCount').textContent = accounts.length + ' accounts';
+        updateOverview();
       }
       async function refreshMiniMaxQuota() {
         const res = await adminFetch('/minimax/quota.json');
@@ -1727,6 +2704,8 @@ async fn dashboard() -> impl IntoResponse {
         const quotaMap = new Map();
         (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
         lastMiniMaxQuota = quotaMap;
+        dashboardState.quotas.minimax = quotaMap;
+        updateOverview();
         refreshMiniMaxAccounts();
       }
       let lastGrokQuota = new Map();
@@ -1755,6 +2734,7 @@ async fn dashboard() -> impl IntoResponse {
         var data;
         try { data = await res.json(); } catch (e) { console.error('refreshGrokAccounts parse failed', e); return; }
         var accounts = (data && data.accounts) || [];
+        dashboardState.providers.grok = accounts;
         var quotaSnap = findGrokQuota(accounts);
         var cards = accounts.map(function(a) {
           // Per-card quota lookup: prefer the per-account key, but fall back
@@ -1764,6 +2744,7 @@ async fn dashboard() -> impl IntoResponse {
         }).join('');
         document.getElementById('grokCards').innerHTML = cards || '<div class="empty-state">No Grok accounts</div>';
         document.getElementById('grokBadgeCount').textContent = accounts.length + ' accounts';
+        updateOverview();
       }
       async function refreshGrokQuota() {
         let res;
@@ -1776,6 +2757,8 @@ async fn dashboard() -> impl IntoResponse {
         // Single-account snapshot. Key by the same priority the lookup uses.
         const key = data.account.email || data.account.label || data.account.file_name || '__grok__';
         lastGrokQuota = new Map([[key, data]]);
+        dashboardState.quotas.grok = lastGrokQuota;
+        updateOverview();
         // Re-render the cards so the live overlay shows up immediately.
         // (refreshGrokAccounts is also chained via .then() in startDashboard;
         //  call it here too so the overlay appears even on the 60s poll
@@ -1789,19 +2772,168 @@ async fn dashboard() -> impl IntoResponse {
         cache: '#f59e0b',
         reasoning: '#a855f7'
       };
+      const contextPresets = {
+        hour: { preset: 'hour', label: '1h', hours: 1, bucketMinutes: 1 },
+        day: { preset: 'day', label: '24h', hours: 24, bucketMinutes: 5 },
+        week: { preset: 'week', label: '7d', hours: 168, bucketMinutes: 60 }
+      };
+      let contextRange = readContextRange();
+      function clampInteger(value, min, max, fallback) {
+        var parsed = Number.parseInt(value, 10);
+        if (!Number.isFinite(parsed)) parsed = fallback;
+        return Math.max(min, Math.min(max, parsed));
+      }
+      function defaultBucketForHours(hours) {
+        if (hours <= 2) return 1;
+        if (hours <= 48) return 5;
+        return 60;
+      }
+      function contextRangeLabel(hours) {
+        if (hours === 1) return '1h';
+        if (hours % 24 === 0) return (hours / 24) + 'd';
+        return hours + 'h';
+      }
+      function normalizeContextRange(value) {
+        var preset = value && value.preset;
+        if (preset && preset !== 'custom' && contextPresets[preset]) {
+          return Object.assign({}, contextPresets[preset]);
+        }
+        if (preset !== 'custom') {
+          return Object.assign({}, contextPresets.day);
+        }
+        var hours = clampInteger(value && value.hours, 1, 720, 24);
+        var bucketMinutes = clampInteger(value && (value.bucketMinutes || value.bucket_minutes), 1, 60, defaultBucketForHours(hours));
+        return { preset: 'custom', label: contextRangeLabel(hours), hours: hours, bucketMinutes: bucketMinutes };
+      }
+      function readContextRange() {
+        try {
+          var saved = JSON.parse(localStorage.getItem(CONTEXT_RANGE_KEY) || 'null');
+          return normalizeContextRange(saved);
+        } catch (_) {
+          return Object.assign({}, contextPresets.day);
+        }
+      }
+      function writeContextRange(range) {
+        try {
+          localStorage.setItem(CONTEXT_RANGE_KEY, JSON.stringify(range));
+        } catch (_) {}
+      }
+      function updateContextTitle() {
+        setText('contextChartTitle', 'Context Usage (' + contextRange.label + ')');
+      }
+      function syncContextRangeControls() {
+        updateContextTitle();
+        var select = document.getElementById('contextRangeSelect');
+        var customControls = document.getElementById('contextCustomControls');
+        var hoursInput = document.getElementById('contextCustomHours');
+        var bucketSelect = document.getElementById('contextBucketMinutes');
+        if (select) select.value = contextRange.preset;
+        if (customControls) customControls.hidden = contextRange.preset !== 'custom';
+        if (hoursInput) hoursInput.value = contextRange.hours;
+        if (bucketSelect) bucketSelect.value = String(contextRange.bucketMinutes);
+      }
+      function applyContextRange(range, refreshNow) {
+        contextRange = normalizeContextRange(range);
+        writeContextRange(contextRange);
+        syncContextRangeControls();
+        if (refreshNow) refreshContextChart();
+      }
+      function configureContextRangeControls() {
+        syncContextRangeControls();
+        var select = document.getElementById('contextRangeSelect');
+        var applyButton = document.getElementById('contextApplyRangeBtn');
+        if (select) {
+          select.addEventListener('change', function() {
+            var preset = select.value;
+            if (preset === 'custom') {
+              applyContextRange({
+                preset: 'custom',
+                hours: document.getElementById('contextCustomHours')?.value || contextRange.hours,
+                bucketMinutes: document.getElementById('contextBucketMinutes')?.value || contextRange.bucketMinutes
+              }, true);
+            } else {
+              applyContextRange({ preset: preset }, true);
+            }
+          });
+        }
+        if (applyButton) {
+          applyButton.addEventListener('click', function() {
+            applyContextRange({
+              preset: 'custom',
+              hours: document.getElementById('contextCustomHours')?.value || 24,
+              bucketMinutes: document.getElementById('contextBucketMinutes')?.value || 5
+            }, true);
+          });
+        }
+      }
+      function configureChartDisclosure() {
+        const details = document.getElementById('chartDetails');
+        if (!details) return;
+        if (window.matchMedia('(max-width: 768px)').matches) {
+          details.removeAttribute('open');
+        }
+        details.addEventListener('toggle', function() {
+          if (details.open) {
+            refreshContextChart();
+          } else {
+            ensureChartDestroyed();
+          }
+        });
+      }
       function ensureChartDestroyed() {
         if (contextChart) {
           contextChart.destroy();
           contextChart = null;
         }
       }
+      function formatCompact(value) {
+        try {
+          return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(Number(value || 0));
+        } catch (_) {
+          return formatNumber(value);
+        }
+      }
+      function sumBucketField(buckets, field) {
+        return buckets.reduce(function(total, bucket) {
+          return total + Number(bucket && bucket[field] || 0);
+        }, 0);
+      }
+      function updateContextSummary(buckets) {
+        var summary = document.getElementById('contextUsageSummary');
+        if (!summary) return;
+        var input = sumBucketField(buckets, 'input_tokens');
+        var output = sumBucketField(buckets, 'output_tokens');
+        var cache = sumBucketField(buckets, 'cache_tokens');
+        var reasoning = sumBucketField(buckets, 'reasoning_tokens');
+        if (!input && !output && !cache && !reasoning) {
+          summary.textContent = contextRange.label + ': no recorded usage';
+          return;
+        }
+        summary.textContent = contextRange.label + ': '
+          + formatCompact(input) + ' input, '
+          + formatCompact(output) + ' output, '
+          + formatCompact(cache) + ' cache, '
+          + formatCompact(reasoning) + ' reasoning';
+      }
       async function refreshContextChart() {
         try {
-          const res = await adminFetch('/usage/context-history.json?hours=24&bucket_minutes=5');
+          const chartDetails = document.getElementById('chartDetails');
+          const params = new URLSearchParams({
+            hours: String(contextRange.hours),
+            bucket_minutes: String(contextRange.bucketMinutes)
+          });
+          const res = await adminFetch('/usage/context-history.json?' + params.toString());
           if (!res) return;
           const data = await res.json();
           const labels = data.labels || [];
           const buckets = data.buckets || [];
+          updateContextSummary(buckets);
+          updateContextTitle();
+
+          if (chartDetails && !chartDetails.open) {
+            ensureChartDestroyed();
+            return;
+          }
 
           const inputData = [];
           const outputData = [];
@@ -1816,6 +2948,10 @@ async fn dashboard() -> impl IntoResponse {
 
           const canvas = document.getElementById('contextChart');
           if (!canvas) return;
+          if (typeof Chart === 'undefined') {
+            ensureChartDestroyed();
+            return;
+          }
 
           ensureChartDestroyed();
           const ctx = canvas.getContext('2d');
@@ -1937,16 +3073,16 @@ async fn dashboard() -> impl IntoResponse {
         }
       }
     </script>
-    <div id="addModal" class="modal" style="display:none;">
+    <div id="addModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addCodexTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
-        <h2 style="margin-top:0;">Add Codex Account</h2>
+        <h2 id="addCodexTitle" style="margin-top:0;">Add Codex Account</h2>
         <p>Click start, open the URL in a new tab, complete login, then paste the callback URL below.</p>
         <button onclick="startLogin()">Start Login</button>
         <div id="status" class="muted" style="margin-top:8px;"></div>
         <pre id="authUrl" class="auth-url"></pre>
         <form id="loginForm" style="margin-top:16px;">
-          <label>Callback URL</label>
-          <input name="redirect_url" placeholder="http://localhost:1455/auth/callback?code=...&state=...">
+          <label for="codexRedirectInput">Callback URL</label>
+          <input id="codexRedirectInput" name="redirect_url" placeholder="http://localhost:1455/auth/callback?code=...&state=...">
           <div class="modal-actions" style="margin-top:8px;">
             <button type="submit">Submit</button>
             <button type="button" id="closeModalBtn" class="secondary-button">Close</button>
@@ -1954,16 +3090,16 @@ async fn dashboard() -> impl IntoResponse {
         </form>
       </div>
     </div>
-    <div id="addAgwModal" class="modal" style="display:none;">
+    <div id="addAgwModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addAgwTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
-        <h2 style="margin-top:0;">Add Antigravity Account</h2>
+        <h2 id="addAgwTitle" style="margin-top:0;">Add Antigravity Account</h2>
         <p>Click start, log in with Google, then paste the callback URL below.</p>
         <button onclick="startAgwLogin()">Start Login</button>
         <div id="agwStatus" class="muted" style="margin-top:8px;"></div>
         <pre id="agwAuthUrl" class="auth-url"></pre>
         <form id="agwLoginForm" style="margin-top:16px;">
-          <label>Callback URL</label>
-          <input name="redirect_url" placeholder="http://localhost:51121/oauth-callback?code=...&state=...">
+          <label for="agwRedirectInput">Callback URL</label>
+          <input id="agwRedirectInput" name="redirect_url" placeholder="http://localhost:51121/oauth-callback?code=...&state=...">
           <div class="modal-actions" style="margin-top:8px;">
             <button type="submit">Submit</button>
             <button type="button" id="closeAgwModalBtn" class="secondary-button">Close</button>
@@ -1971,18 +3107,18 @@ async fn dashboard() -> impl IntoResponse {
         </form>
       </div>
     </div>
-    <div id="addGeminiModal" class="modal" style="display:none;">
+    <div id="addGeminiModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addGeminiTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
-        <h2 style="margin-top:0;">Add Gemini Account</h2>
+        <h2 id="addGeminiTitle" style="margin-top:0;">Add Gemini Account</h2>
         <p>Click start, complete Google OAuth, then paste the final callback URL below. If your Google account has multiple Cloud projects, provide one project ID.</p>
         <button onclick="startGeminiLogin()">Start Login</button>
         <div id="geminiStatus" class="muted" style="margin-top:8px;"></div>
         <pre id="geminiAuthUrl" class="auth-url"></pre>
         <form id="geminiLoginForm" style="margin-top:16px;">
-          <label>Callback URL</label>
-          <input name="redirect_url" placeholder="http://localhost:8085/oauth2callback?code=...&state=...">
-          <label style="margin-top:12px;">Project ID</label>
-          <input name="project_id" placeholder="optional, but recommended when multiple GCP projects exist">
+          <label for="geminiRedirectInput">Callback URL</label>
+          <input id="geminiRedirectInput" name="redirect_url" placeholder="http://localhost:8085/oauth2callback?code=...&state=...">
+          <label for="geminiProjectInput" style="margin-top:12px;">Project ID</label>
+          <input id="geminiProjectInput" name="project_id" placeholder="optional, but recommended when multiple GCP projects exist">
           <div class="muted" style="margin-top:8px;">Leave Project ID empty to let the gateway use the detected project. If multiple projects exist and no default is exposed, login will ask you to retry with one explicit project ID.</div>
           <div class="modal-actions" style="margin-top:8px;">
             <button type="submit">Submit</button>
@@ -1991,15 +3127,16 @@ async fn dashboard() -> impl IntoResponse {
         </form>
       </div>
     </div>
-    <div id="addQwenModal" class="modal" style="display:none;">
+    <div id="addQwenModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addQwenTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
-        <h2 style="margin-top:0;">Add Qwen Account</h2>
+        <h2 id="addQwenTitle" style="margin-top:0;">Add Qwen Account</h2>
         <p>Open the local Qwen token helper first. It explains the same browser-token flow used by <code>qwen-api</code> and gives you the extractor snippet for <code>chat.qwen.ai</code>.</p>
         <div class="modal-actions" style="margin-top:8px;">
           <button type="button" onclick="startQwenLogin()">Open Token Helper</button>
         </div>
         <p class="muted" style="margin-top:12px;">Direct fallback: open <code>chat.qwen.ai</code>, copy <code>localStorage.token</code> from the browser console, and paste it here.</p>
-        <textarea id="qwenTokenInput" rows="6" placeholder="Paste chat.qwen.ai token here" style="width:100%;box-sizing:border-box;font-family:monospace;"></textarea>
+        <label for="qwenTokenInput" style="margin-top:12px;">Browser Token</label>
+        <textarea id="qwenTokenInput" rows="6" placeholder="Paste chat.qwen.ai token here"></textarea>
         <button onclick="submitQwenToken()" style="margin-top:12px;">Save Token</button>
         <div id="qwenStatus" class="muted" style="margin-top:8px;"></div>
         <div class="modal-actions" style="margin-top:16px;">
@@ -2007,18 +3144,18 @@ async fn dashboard() -> impl IntoResponse {
         </div>
       </div>
     </div>
-    <div id="addDeepSeekModal" class="modal" style="display:none;">
+    <div id="addDeepSeekModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addDeepSeekTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
-        <h2 style="margin-top:0;">Add DeepSeek Account</h2>
+        <h2 id="addDeepSeekTitle" style="margin-top:0;">Add DeepSeek Account</h2>
         <p>Paste a DeepSeek API key. The gateway validates it against <code>/models</code> before saving it.</p>
         <div class="modal-actions" style="margin-top:8px;">
           <button type="button" onclick="window.open('/login/deepseek/start', '_blank', 'noopener')">Open Helper</button>
         </div>
-        <label style="margin-top:12px;">API Key</label>
-        <textarea id="deepseekKeyInput" rows="6" placeholder="Paste DeepSeek API key here" style="width:100%;box-sizing:border-box;font-family:monospace;"></textarea>
-        <label style="margin-top:12px;">Label</label>
+        <label for="deepseekKeyInput" style="margin-top:12px;">API Key</label>
+        <textarea id="deepseekKeyInput" rows="6" placeholder="Paste DeepSeek API key here"></textarea>
+        <label for="deepseekLabelInput" style="margin-top:12px;">Label</label>
         <input id="deepseekLabelInput" placeholder="optional label">
-        <label style="margin-top:12px;">Base URL</label>
+        <label for="deepseekBaseUrlInput" style="margin-top:12px;">Base URL</label>
         <input id="deepseekBaseUrlInput" placeholder="https://api.deepseek.com">
         <button onclick="submitDeepSeekKey()" style="margin-top:12px;">Save Key</button>
         <div id="deepseekStatus" class="muted" style="margin-top:8px;"></div>
@@ -2027,18 +3164,18 @@ async fn dashboard() -> impl IntoResponse {
         </div>
       </div>
     </div>
-    <div id="addMiniMaxModal" class="modal" style="display:none;">
+    <div id="addMiniMaxModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addMiniMaxTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
-        <h2 style="margin-top:0;">Add MiniMax Account</h2>
+        <h2 id="addMiniMaxTitle" style="margin-top:0;">Add MiniMax Account</h2>
         <p>Paste a MiniMax API key. The gateway validates it against <code>/v1/models</code> before saving it.</p>
         <div class="modal-actions" style="margin-top:8px;">
           <button type="button" onclick="window.open('/login/minimax/start', '_blank', 'noopener')">Open Helper</button>
         </div>
-        <label style="margin-top:12px;">API Key</label>
-        <textarea id="minimaxKeyInput" rows="6" placeholder="Paste MiniMax API key here" style="width:100%;box-sizing:border-box;font-family:monospace;"></textarea>
-        <label style="margin-top:12px;">Label</label>
+        <label for="minimaxKeyInput" style="margin-top:12px;">API Key</label>
+        <textarea id="minimaxKeyInput" rows="6" placeholder="Paste MiniMax API key here"></textarea>
+        <label for="minimaxLabelInput" style="margin-top:12px;">Label</label>
         <input id="minimaxLabelInput" placeholder="optional label">
-        <label style="margin-top:12px;">Base URL</label>
+        <label for="minimaxBaseUrlInput" style="margin-top:12px;">Base URL</label>
         <input id="minimaxBaseUrlInput" placeholder="https://api.minimaxi.chat">
         <button onclick="submitMiniMaxKey()" style="margin-top:12px;">Save Key</button>
         <div id="minimaxStatus" class="muted" style="margin-top:8px;"></div>
@@ -2047,16 +3184,16 @@ async fn dashboard() -> impl IntoResponse {
         </div>
       </div>
     </div>
-    <div id="addGrokModal" class="modal" style="display:none;">
+    <div id="addGrokModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addGrokTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
-        <h2 style="margin-top:0;">Add Grok Account</h2>
+        <h2 id="addGrokTitle" style="margin-top:0;">Add Grok Account</h2>
         <p>Click start, open the URL in a new tab, complete login with your SuperGrok or X Premium+ account, then paste the callback URL, the <code>?code=...&amp;state=...</code> fragment, or just the authorization code if xAI shows a completion page instead of redirecting.</p>
         <button onclick="startGrokLogin()">Start Login</button>
         <div id="grokStatus" class="muted" style="margin-top:8px;"></div>
         <pre id="grokAuthUrl" class="auth-url"></pre>
         <form id="grokLoginForm" style="margin-top:16px;">
-          <label>Callback URL or Authorization Code</label>
-          <input name="redirect_url" placeholder="http://127.0.0.1:56121/callback?code=...&state=... or paste bare code">
+          <label for="grokRedirectInput">Callback URL or Authorization Code</label>
+          <input id="grokRedirectInput" name="redirect_url" placeholder="http://127.0.0.1:56121/callback?code=...&state=... or paste bare code">
           <input type="hidden" name="state" value="">
           <div class="modal-actions" style="margin-top:8px;">
             <button type="submit">Submit</button>
@@ -2085,33 +3222,56 @@ async fn dashboard() -> impl IntoResponse {
       document.getElementById('addProviderBtn').addEventListener('click', function(e) {
         e.stopPropagation();
         var menu = document.getElementById('providerMenu');
-        menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+        var nextOpen = menu.hidden;
+        menu.hidden = !nextOpen;
+        this.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+        if (nextOpen) {
+          var firstItem = menu.querySelector('.provider-menu-item');
+          if (firstItem) firstItem.focus();
+        }
       });
       document.addEventListener('click', function() {
         closeProviderMenu();
+        closeAccountActionMenus();
+      });
+      document.addEventListener('keydown', function(e) {
+        if (e.key !== 'Escape') return;
+        closeProviderMenu();
+        closeAccountActionMenus();
+        if (document.getElementById('confirmActionModal').style.display !== 'none') {
+          closeCredentialActionConfirm();
+        }
+        modalIds.forEach(function(id) { closeModal(id); });
       });
       document.getElementById('providerMenu').addEventListener('click', function(e) {
         e.stopPropagation();
       });
       document.querySelectorAll('.provider-menu-item').forEach(function(item) {
         item.addEventListener('click', function() {
-          document.getElementById('providerMenu').style.display = 'none';
+          closeProviderMenu();
           var provider = item.getAttribute('data-provider');
-          if (provider === 'codex') document.getElementById('addModal').style.display = 'block';
-          else if (provider === 'antigravity') document.getElementById('addAgwModal').style.display = 'block';
-          else if (provider === 'gemini') document.getElementById('addGeminiModal').style.display = 'block';
-          else if (provider === 'qwen') document.getElementById('addQwenModal').style.display = 'block';
-          else if (provider === 'deepseek') document.getElementById('addDeepSeekModal').style.display = 'block';
-          else if (provider === 'minimax') document.getElementById('addMiniMaxModal').style.display = 'block';
-          else if (provider === 'grok') document.getElementById('addGrokModal').style.display = 'block';
+          if (provider === 'codex') openModal('addModal');
+          else if (provider === 'antigravity') openModal('addAgwModal');
+          else if (provider === 'gemini') openModal('addGeminiModal');
+          else if (provider === 'qwen') openModal('addQwenModal');
+          else if (provider === 'deepseek') openModal('addDeepSeekModal');
+          else if (provider === 'minimax') openModal('addMiniMaxModal');
+          else if (provider === 'grok') openModal('addGrokModal');
         });
       });
+      document.getElementById('confirmActionApproveBtn').addEventListener('click', approveCredentialAction);
+      document.getElementById('confirmActionRejectBtn').addEventListener('click', closeCredentialActionConfirm);
+      document.getElementById('confirmActionModal').addEventListener('click', function(e) {
+        if (e.target.id === 'confirmActionModal') {
+          closeCredentialActionConfirm();
+        }
+      });
       document.getElementById('closeModalBtn').addEventListener('click', () => {
-        document.getElementById('addModal').style.display = 'none';
+        closeModal('addModal');
       });
       document.getElementById('addModal').addEventListener('click', (e) => {
         if (e.target.id === 'addModal') {
-          document.getElementById('addModal').style.display = 'none';
+          closeModal('addModal');
         }
       });
       async function startAgwLogin() {
@@ -2129,11 +3289,11 @@ async fn dashboard() -> impl IntoResponse {
         }
       }
       document.getElementById('closeAgwModalBtn').addEventListener('click', () => {
-        document.getElementById('addAgwModal').style.display = 'none';
+        closeModal('addAgwModal');
       });
       document.getElementById('addAgwModal').addEventListener('click', (e) => {
         if (e.target.id === 'addAgwModal') {
-          document.getElementById('addAgwModal').style.display = 'none';
+          closeModal('addAgwModal');
         }
       });
       async function startGeminiLogin() {
@@ -2151,15 +3311,15 @@ async fn dashboard() -> impl IntoResponse {
         }
       }
       document.getElementById('closeGeminiModalBtn').addEventListener('click', () => {
-        document.getElementById('addGeminiModal').style.display = 'none';
+        closeModal('addGeminiModal');
       });
       document.getElementById('addGeminiModal').addEventListener('click', (e) => {
         if (e.target.id === 'addGeminiModal') {
-          document.getElementById('addGeminiModal').style.display = 'none';
+          closeModal('addGeminiModal');
         }
       });
       function closeQwenModal() {
-        document.getElementById('addQwenModal').style.display = 'none';
+        closeModal('addQwenModal');
       }
       function startQwenLogin() {
         const popup = window.open('/login/qwen/start', '_blank', 'noopener');
@@ -2200,7 +3360,7 @@ async fn dashboard() -> impl IntoResponse {
         }
       });
       function closeDeepSeekModal() {
-        document.getElementById('addDeepSeekModal').style.display = 'none';
+        closeModal('addDeepSeekModal');
       }
       async function submitDeepSeekKey() {
         const apiKey = document.getElementById('deepseekKeyInput').value.trim();
@@ -2241,7 +3401,7 @@ async fn dashboard() -> impl IntoResponse {
         }
       });
       function closeMiniMaxModal() {
-        document.getElementById('addMiniMaxModal').style.display = 'none';
+        closeModal('addMiniMaxModal');
       }
       async function submitMiniMaxKey() {
         const apiKey = document.getElementById('minimaxKeyInput').value.trim();
@@ -2283,7 +3443,7 @@ async fn dashboard() -> impl IntoResponse {
       });
       // Grok modal
       function closeGrokModal() {
-        document.getElementById('addGrokModal').style.display = 'none';
+        closeModal('addGrokModal');
         const form = document.getElementById('grokLoginForm');
         form.querySelector('input[name="state"]').value = '';
         form.querySelector('input[name="redirect_url"]').value = '';
@@ -2404,7 +3564,17 @@ async fn dashboard() -> impl IntoResponse {
           refreshGeminiAccounts();
         }
       });
-      async function deleteCred(fileName) {
+      function deleteCred(fileName, label) {
+        const display = label || fileName || 'this credential';
+        openCredentialActionConfirm({
+          title: 'Delete credential?',
+          message: 'Delete ' + display + '? This cannot be undone.',
+          approveLabel: 'Delete',
+          danger: true,
+          run: function() { return performDeleteCred(fileName); }
+        });
+      }
+      async function performDeleteCred(fileName) {
         const res = await adminFetch('/credentials/delete', {
           method: 'POST',
           headers: {
@@ -2414,22 +3584,21 @@ async fn dashboard() -> impl IntoResponse {
         });
         if (!res) return;
         const data = await res.json();
-        alert(data.message || 'done');
-        refresh();
-        refreshQuota();
-        refreshAgwQuota();
-        refreshAgwAccounts();
-        refreshGeminiQuota();
-        refreshGeminiAccounts();
-        refreshQwenQuota();
-        refreshQwenAccounts();
-        refreshDeepSeekAccounts();
-        refreshDeepSeekQuota();
-        refreshGrokAccounts();
-        refreshMiniMaxAccounts();
-        refreshMiniMaxQuota();
+        notify(data.message || 'Credential deleted', data.ok === false ? 'error' : '');
+        refreshCredentialViews();
       }
-      async function toggleCred(fileName, enabled) {
+      function toggleCred(fileName, enabled, label) {
+        const display = label || fileName || 'this credential';
+        const action = enabled ? 'Enable' : 'Disable';
+        openCredentialActionConfirm({
+          title: action + ' credential?',
+          message: action + ' ' + display + '?',
+          approveLabel: action,
+          danger: !enabled,
+          run: function() { return performToggleCred(fileName, enabled); }
+        });
+      }
+      async function performToggleCred(fileName, enabled) {
         const res = await adminFetch('/credentials/toggle', {
           method: 'POST',
           headers: {
@@ -2439,20 +3608,8 @@ async fn dashboard() -> impl IntoResponse {
         });
         if (!res) return;
         const data = await res.json();
-        alert(data.message || 'done');
-        refresh();
-        refreshQuota();
-        refreshAgwQuota();
-        refreshAgwAccounts();
-        refreshGeminiQuota();
-        refreshGeminiAccounts();
-        refreshQwenQuota();
-        refreshQwenAccounts();
-        refreshDeepSeekAccounts();
-        refreshDeepSeekQuota();
-        refreshGrokQuota().then(() => refreshGrokAccounts());
-        refreshMiniMaxAccounts();
-        refreshMiniMaxQuota();
+        notify(data.message || 'Credential updated', data.ok === false ? 'error' : '');
+        refreshCredentialViews();
       }
       async function startDashboard() {
         refresh();
@@ -2518,6 +3675,10 @@ async fn dashboard() -> impl IntoResponse {
         }
         showAdminLogin('Logged out.');
       });
+      configureMobileNav();
+      configureContextRangeControls();
+      configureChartDisclosure();
+      updateOverview();
       bootstrapAdmin();
     </script>
   </body>
@@ -2570,7 +3731,9 @@ async fn admin_login_route(
             let ttl_seconds = admin_auth::session_ttl_seconds(&state.cfg.admin_auth);
             let session_id = {
                 let mut sessions = state.admin_sessions.lock().unwrap();
-                admin_auth::create_session(&mut sessions, ttl_seconds)
+                let session_id = admin_auth::create_session(&mut sessions, ttl_seconds);
+                admin_auth::save_sessions(&admin_session_path(state.cfg.as_ref()), &sessions);
+                session_id
             };
             let mut response = axum::Json(serde_json::json!({
                 "ok": true,
@@ -2601,6 +3764,7 @@ async fn admin_logout_route(
     {
         let mut sessions = state.admin_sessions.lock().unwrap();
         admin_auth::remove_session(&headers, &mut sessions);
+        admin_auth::save_sessions(&admin_session_path(state.cfg.as_ref()), &sessions);
     }
     let mut response = axum::Json(serde_json::json!({
         "ok": true,
@@ -2653,7 +3817,9 @@ async fn dashboard_json(State(state): State<AppState>, headers: HeaderMap) -> Re
                 "errors": a.errors,
                 "file_name": file_name,
                 "enabled": enabled,
-                "expired_at": expired_at
+                "expired_at": expired_at,
+                "last_success_at": a.last_success_at,
+                "last_error_at": a.last_error_at
             })
         })
         .collect();
@@ -3131,7 +4297,10 @@ async fn context_history_route(
         return response;
     }
     let hours = query.hours.max(1).min(720);
-    let bucket_minutes = query.bucket_minutes.max(1).min(60);
+    let requested_bucket_minutes = query.bucket_minutes.max(1).min(60);
+    let max_buckets = 720;
+    let minimum_bucket_minutes = ((hours * 60) + max_buckets - 1) / max_buckets;
+    let bucket_minutes = requested_bucket_minutes.max(minimum_bucket_minutes).min(60);
     let account_filter = query
         .account_key
         .as_deref()
@@ -3177,7 +4346,10 @@ async fn context_history_route(
     if filtered.is_empty() {
         return axum::Json(serde_json::json!({
             "labels": [],
-            "models": {}
+            "buckets": [],
+            "models": {},
+            "hours": hours,
+            "bucket_minutes": bucket_minutes
         }))
         .into_response();
     }
@@ -3185,15 +4357,17 @@ async fn context_history_route(
     let bucket_secs = bucket_minutes * 60;
     let start_ts = cutoff.timestamp();
     let end_ts = chrono::Utc::now().timestamp();
-    let num_buckets = ((end_ts - start_ts) / bucket_secs as i64).max(1) as usize;
-    let num_buckets = num_buckets.min(288);
+    let num_buckets =
+        ((end_ts - start_ts + bucket_secs as i64 - 1) / bucket_secs as i64).max(1) as usize;
+    let num_buckets = num_buckets.min(max_buckets as usize);
 
     let mut labels = Vec::with_capacity(num_buckets);
+    let label_format = if hours > 48 { "%m-%d %H:%M" } else { "%H:%M" };
     for i in 0..num_buckets {
         let bucket_start = start_ts + (i as i64 * bucket_secs as i64);
         let dt = chrono::DateTime::from_timestamp(bucket_start, 0)
             .unwrap_or(chrono::DateTime::UNIX_EPOCH);
-        labels.push(dt.format("%H:%M").to_string());
+        labels.push(dt.format(label_format).to_string());
     }
 
     if per_model {
@@ -3226,7 +4400,9 @@ async fn context_history_route(
 
         return axum::Json(serde_json::json!({
             "labels": labels,
-            "models": model_data
+            "models": model_data,
+            "hours": hours,
+            "bucket_minutes": bucket_minutes
         }))
         .into_response();
     }
@@ -3269,7 +4445,9 @@ async fn context_history_route(
 
     axum::Json(serde_json::json!({
         "labels": labels,
-        "buckets": buckets
+        "buckets": buckets,
+        "hours": hours,
+        "bucket_minutes": bucket_minutes
     }))
     .into_response()
 }
@@ -6003,6 +7181,14 @@ fn load_config() -> Config {
     let mut cfg: Config = serde_json::from_str(&data).expect("invalid config.json");
     admin_auth::apply_env_overrides(&mut cfg.admin_auth);
     cfg
+}
+
+fn admin_session_path(cfg: &Config) -> PathBuf {
+    cfg.auth_dir
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("admin-sessions.json")
 }
 
 fn detect_source_api(raw_path: &str) -> SourceApi {

@@ -19,7 +19,7 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
         stats
             .deepseek_accounts
             .iter()
-            .map(|usage| (usage.key.clone(), (usage.requests, usage.errors)))
+            .map(|usage| (usage.key.clone(), usage.clone()))
             .collect::<std::collections::HashMap<_, _>>()
     };
 
@@ -30,15 +30,17 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
         .iter()
         .map(|account| {
             let stats_key = crate::deepseek_stats_key(account);
-            let (requests, errors) = usage_by_key.get(&stats_key).copied().unwrap_or((0, 0));
+            let usage = usage_by_key.get(&stats_key).cloned().unwrap_or_default();
             serde_json::json!({
                 "account_id": account.account_id,
                 "label": account.label,
                 "file_name": account.file_name,
                 "enabled": account.enabled,
                 "base_url": account.base_url,
-                "requests": requests,
-                "errors": errors
+                "requests": usage.requests,
+                "errors": usage.errors,
+                "last_success_at": usage.last_success_at,
+                "last_error_at": usage.last_error_at
             })
         })
         .collect::<Vec<_>>();

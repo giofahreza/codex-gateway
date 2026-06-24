@@ -15,7 +15,7 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
         stats
             .agw_accounts
             .iter()
-            .map(|usage| (usage.key.clone(), (usage.requests, usage.errors)))
+            .map(|usage| (usage.key.clone(), usage.clone()))
             .collect::<std::collections::HashMap<_, _>>()
     };
     let accounts = state
@@ -25,7 +25,7 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
         .iter()
         .map(|account| {
             let stats_key = crate::antigravity_stats_key(account);
-            let (requests, errors) = usage_by_key.get(&stats_key).copied().unwrap_or((0, 0));
+            let usage = usage_by_key.get(&stats_key).cloned().unwrap_or_default();
             serde_json::json!({
                 "label": account.label,
                 "email": account.email,
@@ -33,8 +33,10 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
                 "enabled": account.enabled,
                 "project_id": account.project_id,
                 "expired_at": account.access_token_expires_at,
-                "requests": requests,
-                "errors": errors
+                "requests": usage.requests,
+                "errors": usage.errors,
+                "last_success_at": usage.last_success_at,
+                "last_error_at": usage.last_error_at
             })
         })
         .collect::<Vec<_>>();

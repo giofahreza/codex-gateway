@@ -1,11 +1,12 @@
 use axum::http::{header, HeaderMap, HeaderValue};
 use data_encoding::BASE32_NOPAD;
 use hmac::{Hmac, Mac};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use std::{
     collections::HashMap,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
@@ -31,9 +32,9 @@ pub(crate) struct AdminAuthConfig {
     pub session_ttl_seconds: Option<u64>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct AdminSession {
-    pub expires_at: Instant,
+    pub expires_at_unix: u64,
 }
 
 #[derive(Deserialize)]
@@ -128,11 +129,10 @@ pub(crate) fn create_session(
 ) -> String {
     prune_expired_sessions(sessions);
     let session_id = Uuid::new_v4().simple().to_string();
+    let expires_at_unix = now_unix_seconds().saturating_add(ttl_seconds);
     sessions.insert(
         session_id.clone(),
-        AdminSession {
-            expires_at: Instant::now() + Duration::from_secs(ttl_seconds),
-        },
+        AdminSession { expires_at_unix },
     );
     session_id
 }
@@ -146,7 +146,7 @@ pub(crate) fn validate_session(
         return false;
     };
     match sessions.get(&session_id) {
-        Some(session) if session.expires_at > Instant::now() => true,
+        Some(session) if session.expires_at_unix > now_unix_seconds() => true,
         _ => {
             sessions.remove(&session_id);
             false
@@ -178,6 +178,36 @@ pub(crate) fn clear_session_cookie() -> String {
 pub(crate) fn append_set_cookie(headers: &mut axum::http::HeaderMap, cookie: &str) {
     if let Ok(value) = HeaderValue::from_str(cookie) {
         headers.append(header::SET_COOKIE, value);
+    }
+}
+
+pub(crate) fn load_sessions(path: &Path) -> HashMap<String, AdminSession> {
+    let Ok(data) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let Ok(mut sessions) = serde_json::from_str::<HashMap<String, AdminSession>>(&data) else {
+        return HashMap::new();
+    };
+    prune_expired_sessions(&mut sessions);
+    sessions
+}
+
+pub(crate) fn save_sessions(path: &Path, sessions: &HashMap<String, AdminSession>) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(data) = serde_json::to_vec_pretty(sessions) else {
+        return;
+    };
+    let tmp_path = path.with_extension("json.tmp");
+    if std::fs::write(&tmp_path, data).is_ok() && std::fs::rename(&tmp_path, path).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+    } else {
+        let _ = std::fs::remove_file(&tmp_path);
     }
 }
 
@@ -250,8 +280,15 @@ fn read_cookie_value(headers: &HeaderMap, target_name: &str) -> Option<String> {
 }
 
 fn prune_expired_sessions(sessions: &mut HashMap<String, AdminSession>) {
-    let now = Instant::now();
-    sessions.retain(|_, session| session.expires_at > now);
+    let now = now_unix_seconds();
+    sessions.retain(|_, session| session.expires_at_unix > now);
+}
+
+fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn timing_safe_eq(left: &str, right: &str) -> bool {
@@ -299,7 +336,7 @@ mod tests {
             session_ttl_seconds: None,
         };
 
-        let now = UNIX_EPOCH + Duration::from_secs(59);
+        let now = UNIX_EPOCH + std::time::Duration::from_secs(59);
         assert!(verify_login(&cfg, "fallback", "admin-key", "287082", now).is_ok());
     }
 
@@ -312,7 +349,7 @@ mod tests {
             session_ttl_seconds: None,
         };
 
-        let now = UNIX_EPOCH + Duration::from_secs(59);
+        let now = UNIX_EPOCH + std::time::Duration::from_secs(59);
         assert!(verify_login(&cfg, "fallback", "admin-key", "000000", now).is_err());
     }
 
