@@ -1013,7 +1013,7 @@ async fn dashboard() -> impl IntoResponse {
       <div class="provider-section">
         <div class="provider-badge">
           <span>Grok (xAI)</span>
-          <span class="provider-badge-count" id="grokBadgeCount">0 accounts</span>
+          <span class="provider-badge-count" id="grokBadgeCount">— accounts</span>
         </div>
         <div id="grokCards"></div>
       </div>
@@ -1777,6 +1777,9 @@ async fn dashboard() -> impl IntoResponse {
         const key = data.account.email || data.account.label || data.account.file_name || '__grok__';
         lastGrokQuota = new Map([[key, data]]);
         // Re-render the cards so the live overlay shows up immediately.
+        // (refreshGrokAccounts is also chained via .then() in startDashboard;
+        //  call it here too so the overlay appears even on the 60s poll
+        //  when no fresh accounts refresh is scheduled.)
         refreshGrokAccounts();
       }
       let contextChart = null;
