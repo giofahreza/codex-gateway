@@ -51,6 +51,26 @@ pub fn resolve(path: &str, method: &Method) -> Result<String, RouteError> {
             })
         };
     }
+    if upstream_path == "images/generations" {
+        return if *method == Method::POST {
+            Ok(upstream_path)
+        } else {
+            Err(RouteError {
+                status: StatusCode::METHOD_NOT_ALLOWED,
+                message: "method not allowed for v1 endpoint",
+            })
+        };
+    }
+    if upstream_path == "videos/generations" {
+        return if *method == Method::POST {
+            Ok(upstream_path)
+        } else {
+            Err(RouteError {
+                status: StatusCode::METHOD_NOT_ALLOWED,
+                message: "method not allowed for v1 endpoint",
+            })
+        };
+    }
     Err(RouteError {
         status: StatusCode::NOT_FOUND,
         message: "v1 endpoint not found",

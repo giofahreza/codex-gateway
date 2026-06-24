@@ -295,6 +295,7 @@ async fn main() {
         .route("/deepseek/accounts.json", any(deepseek_accounts_route))
         .route("/login/deepseek/start", any(deepseek_login_start_route))
         .route("/grok/accounts.json", any(grok_accounts_route))
+        .route("/grok/quota.json", any(grok_quota_route))
         .route("/login/grok/start", any(grok_login_start_route))
         .route("/login/grok/submit", any(grok_login_submit_route))
         .route("/login/grok/status", any(grok_login_status_route))
@@ -677,6 +678,42 @@ async fn dashboard() -> impl IntoResponse {
       .stat-pill-icon { font-size: 16px; }
       .stat-pill-value { font-weight: 700; color: var(--text); }
       .stat-pill-label { color: var(--muted); }
+      .stat-pill-divider {
+        display: inline-block;
+        width: 1px;
+        height: 22px;
+        background: var(--border);
+        margin: 0 4px;
+        align-self: center;
+      }
+      .quota-mini-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        background: var(--surface-alt);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 6px 10px;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .quota-mini-pill .quota-mini-pill-label { color: var(--muted); }
+      .quota-mini-pill .quota-mini-pill-value { font-weight: 700; }
+      .quota-mini-pill.low  { border-color: rgba(34,197,94,0.35); }
+      .quota-mini-pill.mid  { border-color: rgba(245,158,11,0.35); }
+      .quota-mini-pill.high { border-color: rgba(239,68,68,0.45); background: rgba(239,68,68,0.08); }
+      .quota-cost-line {
+        font-size: 11px;
+        margin-top: 4px;
+        width: 100%;
+      }
+      .quota-kind-group {
+        flex: 1 1 100%;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 4px;
+      }
       .card-chart-wrap {
         position: relative;
         height: 180px;
@@ -1253,6 +1290,44 @@ async fn dashboard() -> impl IntoResponse {
             bars += renderProgressBar(label, hint, pct);
           });
         }
+        // Grok-style "kinds" snapshot from /grok/quota.json. Mirrors the
+        // JoshuaWang2211/grok-usage-watch data model (requestKind + modelName +
+        // remaining/total) and adds the cost_in_usd_ticks from the probe.
+        if (quota.kinds) {
+          function grokBar(kind, opts) {
+            if (!kind) return '';
+            var rl = kind.rate_limits || {};
+            var pieces = [];
+            if (opts && opts.showRequests !== false) {
+              var rq = rl.requests;
+              if (rq && rq.limit != null) {
+                pieces.push({ label: 'requests', hint: (rq.remaining != null ? rq.remaining : '?') + '/' + rq.limit, pct: rq.limit > 0 ? (100 * (rq.limit - (rq.remaining != null ? rq.remaining : rq.limit)) / rq.limit) : 0 });
+              }
+            }
+            if (opts && opts.showTokens) {
+              var tk = rl.tokens;
+              if (tk && tk.limit != null) {
+                pieces.push({ label: 'tokens', hint: (tk.remaining != null ? Math.round(tk.remaining) : '?') + '/' + tk.limit, pct: tk.limit > 0 ? (100 * (tk.limit - (tk.remaining != null ? tk.remaining : tk.limit)) / tk.limit) : 0 });
+              }
+            }
+            var parts = pieces.map(function(p) {
+              return renderProgressBar(p.label, p.hint, pctValue(p.pct));
+            }).join('');
+            return parts;
+          }
+          var t = quota.kinds.DEFAULT_TEXT, i = quota.kinds.DEFAULT_IMAGE, v = quota.kinds.DEFAULT_VIDEO;
+          if (t) bars += '<div class="quota-kind-group">' + grokBar(t, { showRequests: true, showTokens: true }) + '</div>';
+          if (i) bars += '<div class="quota-kind-group">' + grokBar(i, { showRequests: true }) + '</div>';
+          if (v) bars += '<div class="quota-kind-group">' + grokBar(v, { showRequests: true }) + '</div>';
+          // Show a compact cost summary
+          var costPieces = [];
+          if (t && t.cost_in_usd_ticks != null) costPieces.push('text ' + (t.cost_in_usd_ticks / 1e6).toFixed(4) + ' ¢');
+          if (i && i.cost_in_usd_ticks != null) costPieces.push('image ' + (i.cost_in_usd_ticks / 1e6).toFixed(4) + ' ¢');
+          if (v && v.cost_in_usd_ticks != null) costPieces.push('video ' + (v.cost_in_usd_ticks / 1e6).toFixed(4) + ' ¢');
+          if (costPieces.length) {
+            bars += '<div class="muted quota-cost-line">probe cost: ' + costPieces.join(' · ') + '</div>';
+          }
+        }
         // MiniMax top-level current_window / weekly (matches the
         // platform.minimax.io/console/usage layout: two big bars per
         // account: "5h" and "Weekly" with a "resets in" countdown).
@@ -1434,7 +1509,7 @@ async fn dashboard() -> impl IntoResponse {
           + meta
           + '</div>';
       }
-      function buildGrokCard(a) {
+      function buildGrokCard(a, quota) {
         var dot = a.enabled ? '#2ecc71' : '#e74c3c';
         var toggleLabel = a.enabled ? 'Disable' : 'Enable';
         var actions = '';
@@ -1454,11 +1529,38 @@ async fn dashboard() -> impl IntoResponse {
         if (a.reasoning_tokens) {
           usage += '<span class="stat-pill"><span class="stat-pill-value">' + a.reasoning_tokens + '</span><span class="stat-pill-label">reason tok</span></span>';
         }
+        if (a.cache_tokens) {
+          usage += '<span class="stat-pill"><span class="stat-pill-value">' + a.cache_tokens + '</span><span class="stat-pill-label">cache tok</span></span>';
+        }
         if (a.email) {
           usage += '<span class="stat-pill"><span class="stat-pill-label">email</span><span class="stat-pill-value">' + a.email + '</span></span>';
         }
         if (a.last_effective_model) {
           usage += '<span class="stat-pill"><span class="stat-pill-label">model</span><span class="stat-pill-value"><code>' + a.last_effective_model + '</code></span></span>';
+        }
+        // Live per-kind snapshots when /grok/quota.json is available.
+        if (quota && quota.kinds) {
+          function safeTone(pct) { return pct > 80 ? 'high' : pct > 50 ? 'mid' : 'low'; }
+          function livePill(kind, key, label) {
+            if (!kind || !kind.rate_limits || !kind.rate_limits[key]) return '';
+            var r = kind.rate_limits[key];
+            if (r.limit == null) return '';
+            var rem = r.remaining != null ? r.remaining : r.limit;
+            var pct = r.limit > 0 ? Math.max(0, Math.min(100, 100 * (r.limit - rem) / r.limit)) : 0;
+            var cls = 'quota-mini-pill ' + safeTone(pct);
+            return '<span class="' + cls + '" title="' + label + ' ' + rem + '/' + r.limit + '">'
+              + '<span class="quota-mini-pill-label">' + label + '</span>'
+              + '<span class="quota-mini-pill-value">' + rem + '/' + r.limit + '</span>'
+              + '</span>';
+          }
+          var livePills = '';
+          livePills += livePill(quota.kinds.DEFAULT_TEXT, 'requests', 'text req');
+          livePills += livePill(quota.kinds.DEFAULT_TEXT, 'tokens',   'text tok');
+          livePills += livePill(quota.kinds.DEFAULT_IMAGE, 'requests', 'img req');
+          livePills += livePill(quota.kinds.DEFAULT_VIDEO, 'requests', 'vid req');
+          if (livePills) {
+            usage += '<span class="stat-pill-divider"></span>' + livePills;
+          }
         }
         var meta = '';
         if (a.user_id) {
@@ -1480,10 +1582,18 @@ async fn dashboard() -> impl IntoResponse {
           meta += '<div class="muted">last error: ' + a.last_error_at + '</div>';
         }
         meta += renderAccountModels(a, null);
+        // Pass both the static rate_limits (from /grok/accounts.json, captured
+        // at last token refresh) and the live kinds snapshot (from
+        // /grok/quota.json, refreshed on every poll).
+        var quotaPayload = { limits: a.rate_limits || [] };
+        if (quota && quota.kinds) {
+          quotaPayload.kinds = quota.kinds;
+          if (quota.note) quotaPayload.status_msg = quota.note;
+        }
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + (a.name || a.label || a.email || a.account_id || 'N/A') + '</span><span class="card-actions">' + actions + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
-          + renderQuotaBars({ limits: a.rate_limits || [] }, { provider: 'grok', key: a.file_name || a.label || a.email || a.account_id || '' })
+          + renderQuotaBars(quotaPayload, { provider: 'grok', key: a.file_name || a.label || a.email || a.account_id || '' })
           + meta
           + '</div>';
       }
@@ -1614,14 +1724,26 @@ async fn dashboard() -> impl IntoResponse {
         lastMiniMaxQuota = quotaMap;
         refreshMiniMaxAccounts();
       }
+      let lastGrokQuota = new Map();
       async function refreshGrokAccounts() {
         var res = await adminFetch('/grok/accounts.json');
         if (!res) return;
         var data = await res.json();
         var accounts = data.accounts || [];
-        var cards = accounts.map(buildGrokCard).join('');
+        var cards = accounts.map(function(a) { return buildGrokCard(a, lastGrokQuota.get(a.file_name || a.label || a.email)); }).join('');
         document.getElementById('grokCards').innerHTML = cards || '<div class="empty-state">No Grok accounts</div>';
         document.getElementById('grokBadgeCount').textContent = accounts.length + ' accounts';
+      }
+      async function refreshGrokQuota() {
+        const res = await adminFetch('/grok/quota.json');
+        if (!res) return;
+        const data = await res.json();
+        // Single-account snapshot. Key it by the same file_name/label/email
+        // the accounts card uses so the per-card live overlay lines up.
+        const acc = data && data.account ? data.account : null;
+        const key = acc ? (acc.email || acc.label || '__grok__') : '__grok__';
+        lastGrokQuota = new Map([[key, data]]);
+        refreshGrokAccounts();
       }
       let contextChart = null;
       const chartColors = {
@@ -2291,7 +2413,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshQwenAccounts();
         refreshDeepSeekAccounts();
         refreshDeepSeekQuota();
-        refreshGrokAccounts();
+        refreshGrokQuota().then(() => refreshGrokAccounts());
         refreshMiniMaxAccounts();
         refreshMiniMaxQuota();
       }
@@ -2304,7 +2426,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshQwenQuota().then(() => refreshQwenAccounts());
         refreshDeepSeekAccounts();
         refreshDeepSeekQuota();
-        refreshGrokAccounts();
+        refreshGrokQuota().then(() => refreshGrokAccounts());
         refreshMiniMaxAccounts();
         refreshMiniMaxQuota();
         if (dashboardIntervalsStarted) {
@@ -2317,6 +2439,7 @@ async fn dashboard() -> impl IntoResponse {
         setInterval(() => { if (adminAuthenticated) refreshGeminiQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshQwenQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshDeepSeekQuota(); }, 60000);
+        setInterval(() => { if (adminAuthenticated) refreshGrokQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshMiniMaxQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshAgwAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshGeminiAccounts(); }, 10000);
@@ -2802,6 +2925,15 @@ async fn grok_accounts_route(State(state): State<AppState>, headers: HeaderMap) 
         return response;
     }
     target::grok::admin::accounts_json(State(state))
+        .await
+        .into_response()
+}
+
+async fn grok_quota_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::grok::admin::quota_json(State(state))
         .await
         .into_response()
 }
@@ -3561,9 +3693,25 @@ async fn proxy(
                 .into_response();
         }
         TargetModel::Grok => {
-            return target::grok::api::responses(State(state), headers, routed.upstream_body)
+            return match routed.upstream_path.as_str() {
+                "images/generations" => target::grok::api::image_generations(
+                    State(state),
+                    headers,
+                    routed.upstream_body,
+                )
                 .await
-                .into_response();
+                .into_response(),
+                "videos/generations" => target::grok::api::video_generations(
+                    State(state),
+                    headers,
+                    routed.upstream_body,
+                )
+                .await
+                .into_response(),
+                _ => target::grok::api::responses(State(state), headers, routed.upstream_body)
+                    .await
+                    .into_response(),
+            };
         }
         TargetModel::MiniMax => {
             return target::minimax::responses_native::responses(

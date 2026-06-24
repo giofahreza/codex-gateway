@@ -37,6 +37,17 @@ pub fn route_to_target(
         }
     }
 
+    if (upstream_path == "images/generations" || upstream_path == "videos/generations")
+        && *method == Method::POST
+    {
+        provider::validate_provider_prefix_in_body(&body)?;
+        let target = provider::target_from_request_body(&body)
+            .unwrap_or(crate::source::TargetModel::Codex);
+        if target != crate::source::TargetModel::Codex {
+            return Ok(provider::convert(target, upstream_path, uri, body));
+        }
+    }
+
     Ok(codex::convert(upstream_path, uri, method, headers, body))
 }
 

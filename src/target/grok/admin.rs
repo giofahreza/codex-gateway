@@ -101,6 +101,196 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
     axum::Json(serde_json::json!({ "accounts": accounts }))
 }
 
+/// Probes `api.x.ai` (text/image/video endpoints) with the first enabled
+/// account's bearer token and returns the live `x-ratelimit-*` headers as
+/// a single JSON snapshot. Mirrors the data model of the
+/// `JoshuaWang2211/grok-usage-watch` userscript (requestKind + modelName +
+/// remaining/total), since the grok.com `/rest/rate-limits` endpoint rejects
+/// OAuth2 bearers with `oauth2-auth-forbidden`.
+pub async fn quota_json(State(state): State<crate::AppState>) -> impl IntoResponse {
+    let account = match super::accounts::first_enabled(&state) {
+        Some(a) => a,
+        None => {
+            return axum::Json(serde_json::json!({
+                "error": { "code": "no_account", "message": "No Grok accounts configured" }
+            }));
+        }
+    };
+
+    let api_base = account
+        .api_base_url
+        .as_deref()
+        .unwrap_or("https://api.x.ai/v1")
+        .trim_end_matches('/');
+    let auth = format!("{} {}", account.token_type, account.access_token);
+    let client = state.client.clone();
+
+    // Helper that posts a tiny payload and returns the parsed `x-ratelimit-*`
+    // headers + a per-endpoint `cost_in_usd_ticks` (if any) for the cost panel.
+    async fn probe(
+        client: &reqwest::Client,
+        url: &str,
+        auth: &str,
+        body: serde_json::Value,
+    ) -> (u16, serde_json::Value, serde_json::Value, serde_json::Value) {
+        let req = client
+            .post(url)
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(20));
+        match req.send().await {
+            Ok(resp) => {
+                let code = resp.status().as_u16();
+                let mut rl = serde_json::Map::new();
+                let mut reset = serde_json::Map::new();
+                for (k, v) in resp.headers().iter() {
+                    let kl = k.as_str().to_ascii_lowercase();
+                    if kl.starts_with("x-ratelimit-limit-")
+                        || kl.starts_with("x-ratelimit-remaining-")
+                    {
+                        if let Ok(s) = v.to_str() {
+                            rl.insert(kl, serde_json::Value::String(s.to_string()));
+                        }
+                    } else if kl.starts_with("x-ratelimit-reset-") {
+                        if let Ok(s) = v.to_str() {
+                            reset.insert(kl, serde_json::Value::String(s.to_string()));
+                        }
+                    }
+                }
+                let body_bytes = resp.bytes().await.unwrap_or_default();
+                let parsed: serde_json::Value =
+                    serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
+                (
+                    code,
+                    serde_json::Value::Object(rl),
+                    serde_json::Value::Object(reset),
+                    parsed,
+                )
+            }
+            Err(err) => (
+                0,
+                serde_json::json!({}),
+                serde_json::json!({}),
+                serde_json::json!({ "error": err.to_string() }),
+            ),
+        }
+    }
+
+    // Text
+    let (tcode, trl, treset, tbody) = probe(
+        &client,
+        &format!("{}/responses", api_base),
+        &auth,
+        serde_json::json!({"model": "grok-3", "input": "ok"}),
+    )
+    .await;
+    // Image
+    let (icode, irl, _, ibody) = probe(
+        &client,
+        &format!("{}/images/generations", api_base),
+        &auth,
+        serde_json::json!({"model": "grok-imagine-image", "prompt": "x", "n": 1}),
+    )
+    .await;
+    // Video
+    let (vcode, vrl, _, vbody) = probe(
+        &client,
+        &format!("{}/videos/generations", api_base),
+        &auth,
+        serde_json::json!({"model": "grok-imagine-video", "prompt": "x", "duration": 1}),
+    )
+    .await;
+
+    // Userinfo for plan context
+    let me_url = format!("{}/me", api_base);
+    let me = match client
+        .get(&me_url)
+        .header("Authorization", &auth)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(r) => r.json::<serde_json::Value>().await.unwrap_or(serde_json::Value::Null),
+        Err(_) => serde_json::Value::Null,
+    };
+
+    let extract_cost = |body: &serde_json::Value| -> Option<u64> {
+        body.get("usage")
+            .and_then(|u| u.get("cost_in_usd_ticks"))
+            .and_then(|v| v.as_u64())
+    };
+
+    let extract_lim_rem = |rl: &serde_json::Value, scope: &str| -> (Option<f64>, Option<f64>) {
+        let lim = rl
+            .get(format!("x-ratelimit-limit-{}", scope))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok());
+        let rem = rl
+            .get(format!("x-ratelimit-remaining-{}", scope))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok());
+        (lim, rem)
+    };
+
+    let (text_req_lim, text_req_rem) = extract_lim_rem(&trl, "requests");
+    let (text_tok_lim, text_tok_rem) = extract_lim_rem(&trl, "tokens");
+    let (img_req_lim, img_req_rem) = extract_lim_rem(&irl, "requests");
+    let (vid_req_lim, vid_req_rem) = extract_lim_rem(&vrl, "requests");
+
+    axum::Json(serde_json::json!({
+        "account": {
+            "email": account.email,
+            "user_id": account.user_id,
+            "team_id": account.team_id,
+            "zdr_status": account.zdr_status,
+            "team_blocked": account.team_blocked,
+            "label": account.label,
+            "expires_at": account.expires_at,
+        },
+        "userinfo": me,
+        "kinds": {
+            "DEFAULT_TEXT": {
+                "modelName": "grok-3",
+                "requestKind": "DEFAULT",
+                "upstream": "POST /v1/responses",
+                "status": tcode,
+                "rate_limits": {
+                    "requests": { "limit": text_req_lim, "remaining": text_req_rem },
+                    "tokens":   { "limit": text_tok_lim, "remaining": text_tok_rem },
+                },
+                "reset": treset,
+                "cost_in_usd_ticks": extract_cost(&tbody),
+                "note": "Probed with model=grok-3, single token 'ok' to keep cost minimal.",
+            },
+            "DEFAULT_IMAGE": {
+                "modelName": "grok-imagine-image",
+                "requestKind": "IMAGE",
+                "upstream": "POST /v1/images/generations",
+                "status": icode,
+                "rate_limits": {
+                    "requests": { "limit": img_req_lim, "remaining": img_req_rem },
+                },
+                "cost_in_usd_ticks": extract_cost(&ibody),
+                "note": "1 image generated (cost ~$0.20). The grok-imagine-image-quality model has its own quota.",
+            },
+            "DEFAULT_VIDEO": {
+                "modelName": "grok-imagine-video",
+                "requestKind": "VIDEO",
+                "upstream": "POST /v1/videos/generations",
+                "status": vcode,
+                "rate_limits": {
+                    "requests": { "limit": vid_req_lim, "remaining": vid_req_rem },
+                },
+                "request_id": vbody.get("request_id").cloned().unwrap_or(serde_json::Value::Null),
+                "cost_in_usd_ticks": extract_cost(&vbody),
+                "note": "1-second video clip requested. Long clips (10s) cost more ($5) but use the same quota bucket.",
+            },
+        },
+        "note": "grok.com /rest/rate-limits rejects OAuth2 bearers (oauth2-auth-forbidden); this endpoint uses api.x.ai x-ratelimit-* headers from real probes as the equivalent signal. Reset windows are not exposed by xAI.",
+    }))
+}
+
 pub async fn login_start(State(state): State<crate::AppState>) -> impl IntoResponse {
     let pending = super::auth::PendingOAuth::new();
     let url = pending.build_authorize_url();
