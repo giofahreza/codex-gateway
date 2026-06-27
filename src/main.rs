@@ -3176,7 +3176,7 @@ async fn dashboard() -> impl IntoResponse {
         <label for="minimaxLabelInput" style="margin-top:12px;">Label</label>
         <input id="minimaxLabelInput" placeholder="optional label">
         <label for="minimaxBaseUrlInput" style="margin-top:12px;">Base URL</label>
-        <input id="minimaxBaseUrlInput" placeholder="https://api.minimaxi.chat">
+        <input id="minimaxBaseUrlInput" placeholder="https://api.minimax.io">
         <button onclick="submitMiniMaxKey()" style="margin-top:12px;">Save Key</button>
         <div id="minimaxStatus" class="muted" style="margin-top:8px;"></div>
         <div class="modal-actions" style="margin-top:16px;">
@@ -4929,13 +4929,22 @@ async fn proxy(
             };
         }
         TargetModel::MiniMax => {
-            return target::minimax::responses_native::responses(
-                State(state),
-                headers,
-                routed.upstream_body,
-            )
-            .await
-            .into_response();
+            return match routed.upstream_path.as_str() {
+                "anthropic/v1/messages" => target::minimax::anthropic::messages(
+                    State(state),
+                    headers,
+                    routed.upstream_body,
+                )
+                .await
+                .into_response(),
+                _ => target::minimax::responses_native::responses(
+                    State(state),
+                    headers,
+                    routed.upstream_body,
+                )
+                .await
+                .into_response(),
+            };
         }
         TargetModel::Codex => {}
     }
@@ -6300,6 +6309,474 @@ pub(crate) fn minimax_stats_key(account: &target::minimax::accounts::MiniMaxAcco
     format!("minimax:label:{}", account.label)
 }
 
+const ACCOUNT_SELECTION_QUOTA_EPSILON: f64 = 0.01;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct AccountSelectionScore {
+    quota_pressure: Option<f64>,
+    historical_tokens: u64,
+    historical_requests: u64,
+}
+
+impl AccountSelectionScore {
+    pub(crate) fn is_better_than(&self, other: &Self) -> bool {
+        match (self.quota_pressure, other.quota_pressure) {
+            (Some(candidate), Some(current)) => {
+                let diff = candidate - current;
+                if diff.abs() > ACCOUNT_SELECTION_QUOTA_EPSILON {
+                    return candidate < current;
+                }
+            }
+            (Some(candidate), None) if candidate.is_infinite() && candidate.is_sign_positive() => {
+                return false;
+            }
+            (None, Some(current)) if current.is_infinite() && current.is_sign_positive() => {
+                return true;
+            }
+            _ => {}
+        }
+
+        if self.historical_tokens != other.historical_tokens {
+            return self.historical_tokens < other.historical_tokens;
+        }
+        self.historical_requests < other.historical_requests
+    }
+}
+
+pub(crate) fn select_best_account_index<FEnabled, FScore>(
+    len: usize,
+    start_idx: usize,
+    mut is_enabled: FEnabled,
+    mut score_for: FScore,
+) -> Option<usize>
+where
+    FEnabled: FnMut(usize) -> bool,
+    FScore: FnMut(usize) -> AccountSelectionScore,
+{
+    if len == 0 {
+        return None;
+    }
+
+    let mut best: Option<(usize, AccountSelectionScore)> = None;
+    for offset in 0..len {
+        let candidate_idx = (start_idx + offset) % len;
+        if !is_enabled(candidate_idx) {
+            continue;
+        }
+        let candidate_score = score_for(candidate_idx);
+        if best
+            .as_ref()
+            .map(|(_, best_score)| candidate_score.is_better_than(best_score))
+            .unwrap_or(true)
+        {
+            best = Some((candidate_idx, candidate_score));
+        }
+    }
+
+    best.map(|(idx, _)| idx)
+}
+
+fn quota_cache_key(file_name: Option<&str>, label: &str) -> String {
+    file_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| label.to_string())
+}
+
+fn push_quota_pressure(current: &mut Option<f64>, value: Option<f64>) {
+    let Some(value) = value else {
+        return;
+    };
+    if value.is_nan() {
+        return;
+    }
+    *current = Some(current.map(|existing| existing.max(value)).unwrap_or(value));
+}
+
+fn usage_backed_selection_score(
+    state: &AppState,
+    provider: Provider,
+    key: String,
+    quota_pressure: Option<f64>,
+) -> AccountSelectionScore {
+    let stored = {
+        state
+            .persisted_stats
+            .lock()
+            .unwrap()
+            .account_usage(provider, &key)
+            .cloned()
+    };
+    AccountSelectionScore {
+        quota_pressure: quota_pressure.filter(|value| !value.is_nan()),
+        historical_tokens: stored.as_ref().map(|usage| usage.total_tokens).unwrap_or(0),
+        historical_requests: stored.as_ref().map(|usage| usage.requests).unwrap_or(0),
+    }
+}
+
+pub(crate) fn codex_token_selection_score(
+    state: &AppState,
+    token_idx: usize,
+    token: &UpstreamToken,
+) -> AccountSelectionScore {
+    let quota_pressure = {
+        let cache = state.quota_cache.lock().unwrap();
+        cache
+            .get(token_idx)
+            .and_then(|entry| entry.as_ref())
+            .and_then(|entry| {
+                if entry.error.is_some() {
+                    Some(f64::INFINITY)
+                } else {
+                    codex_quota_pressure(&entry.summary)
+                }
+            })
+    };
+    usage_backed_selection_score(
+        state,
+        Provider::Codex,
+        codex_stats_key(token),
+        quota_pressure,
+    )
+}
+
+pub(crate) fn antigravity_account_selection_score(
+    state: &AppState,
+    account: &target::antigravity::accounts::AntigravityAccount,
+) -> AccountSelectionScore {
+    let key = quota_cache_key(account.file_name.as_deref(), &account.label);
+    let quota_pressure = {
+        let cache = state.agw_quota_cache.lock().unwrap();
+        cache.get(&key).and_then(|entry| {
+            if entry.error.is_some() {
+                Some(f64::INFINITY)
+            } else {
+                google_quota_pressure(&entry.summary.groups, &entry.summary.models)
+            }
+        })
+    };
+    usage_backed_selection_score(
+        state,
+        Provider::Antigravity,
+        antigravity_stats_key(account),
+        quota_pressure,
+    )
+}
+
+pub(crate) fn gemini_account_selection_score(
+    state: &AppState,
+    account: &target::gemini::accounts::GeminiAccount,
+) -> AccountSelectionScore {
+    let key = quota_cache_key(account.file_name.as_deref(), &account.label);
+    let quota_pressure = {
+        let cache = state.gemini_quota_cache.lock().unwrap();
+        cache.get(&key).and_then(|entry| {
+            if entry.error.is_some() {
+                Some(f64::INFINITY)
+            } else {
+                gemini_quota_pressure(&entry.summary.groups, &entry.summary.models)
+            }
+        })
+    };
+    usage_backed_selection_score(
+        state,
+        Provider::Gemini,
+        gemini_stats_key(account),
+        quota_pressure,
+    )
+}
+
+pub(crate) fn qwen_account_selection_score(
+    state: &AppState,
+    account: &target::qwen::accounts::QwenAccount,
+) -> AccountSelectionScore {
+    let key = quota_cache_key(account.file_name.as_deref(), &account.label);
+    let quota_pressure = {
+        let cache = state.qwen_quota_cache.lock().unwrap();
+        cache.get(&key).and_then(|entry| {
+            if entry.error.is_some() {
+                Some(f64::INFINITY)
+            } else {
+                qwen_quota_pressure(&entry.summary.limits)
+            }
+        })
+    };
+    usage_backed_selection_score(
+        state,
+        Provider::Qwen,
+        qwen_stats_key(account),
+        quota_pressure,
+    )
+}
+
+pub(crate) fn deepseek_account_selection_score(
+    state: &AppState,
+    account: &target::deepseek::accounts::DeepSeekAccount,
+) -> AccountSelectionScore {
+    let key = quota_cache_key(account.file_name.as_deref(), &account.label);
+    let quota_pressure = {
+        let cache = state.deepseek_quota_cache.lock().unwrap();
+        cache.get(&key).and_then(|entry| {
+            if entry.error.is_some() {
+                Some(f64::INFINITY)
+            } else {
+                deepseek_balance_pressure(&entry.summary)
+            }
+        })
+    };
+    usage_backed_selection_score(
+        state,
+        Provider::DeepSeek,
+        deepseek_stats_key(account),
+        quota_pressure,
+    )
+}
+
+pub(crate) fn minimax_account_selection_score(
+    state: &AppState,
+    account: &target::minimax::accounts::MiniMaxAccount,
+) -> AccountSelectionScore {
+    let key = quota_cache_key(account.file_name.as_deref(), &account.label);
+    let quota_pressure = {
+        let cache = state.minimax_quota_cache.lock().unwrap();
+        cache.get(&key).and_then(|entry| {
+            if entry.error.is_some() {
+                Some(f64::INFINITY)
+            } else {
+                minimax_quota_pressure(&entry.summary)
+            }
+        })
+    };
+    usage_backed_selection_score(
+        state,
+        Provider::MiniMax,
+        minimax_stats_key(account),
+        quota_pressure,
+    )
+}
+
+pub(crate) fn grok_account_selection_score(
+    state: &AppState,
+    account: &target::grok::accounts::GrokAccount,
+) -> AccountSelectionScore {
+    usage_backed_selection_score(
+        state,
+        Provider::Grok,
+        grok_stats_key(account),
+        grok_rate_limit_pressure(&account.rate_limits),
+    )
+}
+
+fn codex_quota_pressure(summary: &target::codex::quota::QuotaSummary) -> Option<f64> {
+    let mut pressure = None;
+    push_quota_pressure(
+        &mut pressure,
+        summary
+            .code_generation
+            .five_hour
+            .as_ref()
+            .and_then(|bucket| bucket.used_percent),
+    );
+    push_quota_pressure(
+        &mut pressure,
+        summary
+            .code_generation
+            .weekly
+            .as_ref()
+            .and_then(|bucket| bucket.used_percent),
+    );
+    push_quota_pressure(
+        &mut pressure,
+        summary
+            .code_review
+            .five_hour
+            .as_ref()
+            .and_then(|bucket| bucket.used_percent),
+    );
+    push_quota_pressure(
+        &mut pressure,
+        summary
+            .code_review
+            .weekly
+            .as_ref()
+            .and_then(|bucket| bucket.used_percent),
+    );
+    for limit in &summary.additional_rate_limits {
+        push_quota_pressure(
+            &mut pressure,
+            limit
+                .five_hour
+                .as_ref()
+                .and_then(|bucket| bucket.used_percent),
+        );
+        push_quota_pressure(
+            &mut pressure,
+            limit.weekly.as_ref().and_then(|bucket| bucket.used_percent),
+        );
+    }
+    pressure
+}
+
+fn google_quota_pressure(
+    groups: &[target::antigravity::quota::QuotaGroupSummary],
+    models: &[target::antigravity::quota::ModelQuotaSummary],
+) -> Option<f64> {
+    let mut pressure = None;
+    for group in groups {
+        push_quota_pressure(
+            &mut pressure,
+            group
+                .five_hour
+                .as_ref()
+                .and_then(|bucket| bucket.used_percent),
+        );
+        push_quota_pressure(
+            &mut pressure,
+            group.weekly.as_ref().and_then(|bucket| bucket.used_percent),
+        );
+    }
+    for model in models {
+        push_quota_pressure(
+            &mut pressure,
+            model
+                .current
+                .as_ref()
+                .and_then(|bucket| bucket.used_percent),
+        );
+        push_quota_pressure(
+            &mut pressure,
+            model
+                .five_hour
+                .as_ref()
+                .and_then(|bucket| bucket.used_percent),
+        );
+        push_quota_pressure(
+            &mut pressure,
+            model.weekly.as_ref().and_then(|bucket| bucket.used_percent),
+        );
+    }
+    pressure
+}
+
+fn gemini_quota_pressure(
+    groups: &[target::gemini::quota::QuotaGroupSummary],
+    models: &[target::gemini::quota::ModelQuotaSummary],
+) -> Option<f64> {
+    let mut pressure = None;
+    for group in groups {
+        push_quota_pressure(
+            &mut pressure,
+            group
+                .five_hour
+                .as_ref()
+                .and_then(|bucket| bucket.used_percent),
+        );
+        push_quota_pressure(
+            &mut pressure,
+            group.weekly.as_ref().and_then(|bucket| bucket.used_percent),
+        );
+    }
+    for model in models {
+        push_quota_pressure(
+            &mut pressure,
+            model
+                .current
+                .as_ref()
+                .and_then(|bucket| bucket.used_percent),
+        );
+        push_quota_pressure(
+            &mut pressure,
+            model
+                .five_hour
+                .as_ref()
+                .and_then(|bucket| bucket.used_percent),
+        );
+        push_quota_pressure(
+            &mut pressure,
+            model.weekly.as_ref().and_then(|bucket| bucket.used_percent),
+        );
+    }
+    pressure
+}
+
+fn qwen_quota_pressure(limits: &[target::qwen::quota::RateLimitSummary]) -> Option<f64> {
+    let mut pressure = None;
+    for limit in limits {
+        push_quota_pressure(&mut pressure, limit.used_percent);
+    }
+    pressure
+}
+
+fn deepseek_balance_pressure(summary: &target::deepseek::quota::QuotaSummary) -> Option<f64> {
+    if !summary.is_available {
+        return Some(f64::INFINITY);
+    }
+    if !summary.has_balance {
+        return None;
+    }
+    let total_balance: f64 = summary
+        .balances
+        .iter()
+        .filter_map(|balance| parse_balance_amount(&balance.total_balance))
+        .sum();
+    Some(-total_balance)
+}
+
+fn parse_balance_amount(value: &str) -> Option<f64> {
+    let normalized = value.trim().replace(',', "");
+    if normalized.is_empty() {
+        return None;
+    }
+    normalized
+        .parse::<f64>()
+        .ok()
+        .filter(|value| !value.is_nan())
+}
+
+fn minimax_quota_pressure(summary: &target::minimax::quota::QuotaSummary) -> Option<f64> {
+    if !summary.is_available {
+        return Some(f64::INFINITY);
+    }
+    let mut pressure = None;
+    push_quota_pressure(
+        &mut pressure,
+        summary
+            .current_window
+            .as_ref()
+            .and_then(|bucket| bucket.used_percent),
+    );
+    push_quota_pressure(
+        &mut pressure,
+        summary
+            .weekly
+            .as_ref()
+            .and_then(|bucket| bucket.used_percent),
+    );
+    for model in &summary.models {
+        push_quota_pressure(
+            &mut pressure,
+            model
+                .current_window
+                .as_ref()
+                .and_then(|bucket| bucket.used_percent),
+        );
+        push_quota_pressure(
+            &mut pressure,
+            model.weekly.as_ref().and_then(|bucket| bucket.used_percent),
+        );
+    }
+    pressure
+}
+
+fn grok_rate_limit_pressure(rate_limits: &[target::grok::auth::GrokRateLimitInfo]) -> Option<f64> {
+    let mut pressure = None;
+    for limit in rate_limits {
+        push_quota_pressure(&mut pressure, limit.used_percent);
+    }
+    pressure
+}
+
 pub(crate) fn minimax_usage_context(
     account: &target::minimax::accounts::MiniMaxAccount,
     model: Option<String>,
@@ -6488,7 +6965,11 @@ fn check_api_key(headers: &HeaderMap, expected: &str) -> bool {
     if let Some(token) = auth.strip_prefix("Bearer ") {
         return token == expected;
     }
-    false
+    headers
+        .get("x-api-key")
+        .and_then(|h| h.to_str().ok())
+        .map(str::trim)
+        .is_some_and(|token| token == expected)
 }
 
 fn require_admin_session_json(state: &AppState, headers: &HeaderMap) -> Option<Response> {
@@ -6533,20 +7014,19 @@ fn require_admin_session_text(state: &AppState, headers: &HeaderMap) -> Option<R
 
 fn pick_token(state: &AppState) -> Option<(usize, UpstreamToken)> {
     let mut idx = state.rr.lock().unwrap();
-    let tokens = state.tokens.lock().unwrap();
+    let tokens = state.tokens.lock().unwrap().clone();
     if tokens.is_empty() {
         return None;
     }
     let len = tokens.len();
-    for _ in 0..len {
-        let picked_idx = *idx % len;
-        *idx = (*idx + 1) % len;
-        if tokens[picked_idx].enabled {
-            let token = tokens[picked_idx].clone();
-            return Some((picked_idx, token));
-        }
-    }
-    None
+    let picked_idx = select_best_account_index(
+        len,
+        *idx,
+        |candidate_idx| tokens[candidate_idx].enabled,
+        |candidate_idx| codex_token_selection_score(state, candidate_idx, &tokens[candidate_idx]),
+    )?;
+    *idx = (picked_idx + 1) % len;
+    Some((picked_idx, tokens[picked_idx].clone()))
 }
 
 fn update_account_counters(
@@ -7154,10 +7634,76 @@ mod codex_provider_model_tests {
     }
 }
 
-fn should_drop_incoming_header(name: &str) -> bool {
+#[cfg(test)]
+mod account_selection_tests {
+    use super::{select_best_account_index, AccountSelectionScore};
+
+    #[test]
+    fn quota_pressure_wins_when_both_accounts_have_quota_data() {
+        let scores = [
+            AccountSelectionScore {
+                quota_pressure: Some(81.0),
+                historical_tokens: 1,
+                historical_requests: 1,
+            },
+            AccountSelectionScore {
+                quota_pressure: Some(22.0),
+                historical_tokens: 10_000,
+                historical_requests: 100,
+            },
+        ];
+
+        let picked =
+            select_best_account_index(2, 0, |_| true, |idx| scores[idx]).expect("picked account");
+        assert_eq!(picked, 1);
+    }
+
+    #[test]
+    fn equal_scores_keep_round_robin_tie_breaker() {
+        let scores = [
+            AccountSelectionScore {
+                quota_pressure: Some(50.0),
+                historical_tokens: 10,
+                historical_requests: 1,
+            },
+            AccountSelectionScore {
+                quota_pressure: Some(50.0),
+                historical_tokens: 10,
+                historical_requests: 1,
+            },
+        ];
+
+        let picked =
+            select_best_account_index(2, 1, |_| true, |idx| scores[idx]).expect("picked account");
+        assert_eq!(picked, 1);
+    }
+
+    #[test]
+    fn disabled_accounts_are_skipped_before_scoring() {
+        let scores = [
+            AccountSelectionScore {
+                quota_pressure: Some(1.0),
+                historical_tokens: 0,
+                historical_requests: 0,
+            },
+            AccountSelectionScore {
+                quota_pressure: Some(90.0),
+                historical_tokens: 0,
+                historical_requests: 0,
+            },
+        ];
+
+        let picked = select_best_account_index(2, 0, |idx| idx == 1, |idx| scores[idx])
+            .expect("picked account");
+        assert_eq!(picked, 1);
+    }
+}
+
+pub(crate) fn should_drop_incoming_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     if is_hop_header(&lower)
         || lower == "authorization"
+        || lower == "x-api-key"
         || lower == "accept-encoding"
         || lower == "host"
         || lower == "content-length"

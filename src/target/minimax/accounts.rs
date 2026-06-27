@@ -108,20 +108,20 @@ pub fn reload_state(state: &crate::AppState) {
 
 pub fn pick_account(state: &crate::AppState) -> Option<MiniMaxAccount> {
     let mut idx = state.minimax_rr.lock().unwrap();
-    let accounts = state.minimax_accounts.lock().unwrap();
+    let accounts = state.minimax_accounts.lock().unwrap().clone();
     if accounts.is_empty() {
         return None;
     }
 
     let len = accounts.len();
-    for _ in 0..len {
-        let picked_idx = *idx % len;
-        *idx = (*idx + 1) % len;
-        if accounts[picked_idx].enabled {
-            return Some(accounts[picked_idx].clone());
-        }
-    }
-    None
+    let picked_idx = crate::select_best_account_index(
+        len,
+        *idx,
+        |candidate_idx| accounts[candidate_idx].enabled,
+        |candidate_idx| crate::minimax_account_selection_score(state, &accounts[candidate_idx]),
+    )?;
+    *idx = (picked_idx + 1) % len;
+    Some(accounts[picked_idx].clone())
 }
 
 pub fn first_enabled(state: &crate::AppState) -> Option<MiniMaxAccount> {

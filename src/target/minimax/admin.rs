@@ -184,7 +184,7 @@ fn sanitize_label(value: &str) -> String {
 fn helper_html() -> String {
     r#"<!doctype html><html><head><meta charset="utf-8"><title>MiniMax Setup</title></head><body>
 <h1>MiniMax Setup</h1>
-<p>Open <a href="https://api.minimaxi.chat" target="_blank" rel="noopener">https://api.minimaxi.chat</a>, sign in, create an API key, then paste it into the dashboard MiniMax modal.</p>
+<p>Open <a href="https://platform.minimax.io" target="_blank" rel="noopener">https://platform.minimax.io</a>, sign in, create an API key, then paste it into the dashboard MiniMax modal.</p>
 <p>You can also POST the key directly to <code>/login/minimax/start</code> with JSON <code>{"api_key":"...","label":"optional","base_url":"optional"}</code>.</p>
 </body></html>"#
     .to_string()

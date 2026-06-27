@@ -12,11 +12,12 @@ pub fn resolve(path: &str, method: &Method) -> Result<String, RouteError> {
     }
 
     match upstream_path.as_str() {
-        // Bridge Claude-style messages endpoint to codex responses target.
-        "messages" if *method == Method::POST => Ok("responses".to_string()),
+        "messages" | "v1/messages" if *method == Method::POST => Ok(upstream_path),
         "responses" if *method == Method::POST => Ok(upstream_path),
-        "models" if *method == Method::GET || *method == Method::HEAD => Ok(upstream_path),
-        "messages" | "responses" | "models" => Err(RouteError {
+        "models" | "v1/models" if *method == Method::GET || *method == Method::HEAD => {
+            Ok(upstream_path)
+        }
+        "messages" | "v1/messages" | "responses" | "models" | "v1/models" => Err(RouteError {
             status: StatusCode::METHOD_NOT_ALLOWED,
             message: "method not allowed for claude endpoint",
         }),

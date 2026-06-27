@@ -1,21 +1,9 @@
 //! Native OpenAI Responses API pass-through to MiniMax.
 //!
-//! MiniMax exposes an OpenAI Responses-API-compatible endpoint at
-//! `POST /v1/responses`
-//! (https://platform.minimax.io/docs/api-reference/responses-create). The
-//! field names there line up exactly with the Codex SDK's request body,
-//! so we can forward the request largely as-is instead of doing the
-//! lossy Responses → Chat-Completions translation.
-//!
-//! Two fields that need special handling:
-//!
-//!   * `reasoning` — MiniMax-M3 only enters Adaptive Thinking when this
-//!     field is set to a non-`none` value. Without it, the model produces
-//!     very short answers and the Codex agent loop sees the model
-//!     "stop before task done". We default it to `medium` for M3 when
-//!     the client did not set it.
-//!   * `tools` — the Codex SDK registers an `apply_patch` tool that
-//!     MiniMax does not support. We strip it before forwarding.
+//! MiniMax's Codex setup documents `base_url = "https://api.minimax.io/v1"`
+//! with `wire_api = "responses"`, so the gateway forwards Codex Responses
+//! bodies to `POST /v1/responses` without translating them to chat
+//! completions.
 
 use axum::{
     body::Body,
@@ -25,7 +13,7 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::time::Duration;
 
 use super::accounts::MiniMaxAccount;
@@ -62,20 +50,9 @@ fn responses_url(base_url: &str) -> String {
     format!("{}{}", base, RESPONSES_PATH)
 }
 
-/// Decide which path to use for a MiniMax account.
-///
-/// Default is chat-completions. MiniMax-M3 in chat-completions mode with
-/// `thinking: {type: "adaptive"}` is significantly more thorough on
-/// multi-step agentic tasks than the native `/v1/responses` endpoint —
-/// the latter tends to stop after a single tool call. The native
-/// `/v1/responses` path is therefore opt-in: it activates only when the
-/// account's `base_url` explicitly ends with `/v1/responses`.
-///
-/// The fallback chat-completions path also covers accounts whose
-/// `base_url` ends with `/chat/completions`.
 pub fn use_native_responses(account_base_url: Option<&str>) -> bool {
     let normalized = normalize_base_url(account_base_url);
-    normalized.ends_with("/v1/responses") || normalized.ends_with("/responses")
+    !normalized.ends_with("/v1/chat/completions") && !normalized.ends_with("/chat/completions")
 }
 
 pub async fn responses(
@@ -148,10 +125,7 @@ pub async fn responses(
     if use_native_responses(Some(&base_url)) {
         native_responses(&state, &account, &base_url, &model, &raw, &headers, &body).await
     } else {
-        chat_completions_responses(
-            &state, &account, &base_url, &model, &raw, &headers, &body,
-        )
-        .await
+        chat_completions_responses(&state, &account, &base_url, &model, &raw, &headers, &body).await
     }
 }
 
@@ -172,28 +146,24 @@ async fn native_responses(
     );
     crate::record_minimax_request(state, &context);
 
-    let payload = match build_native_payload(raw) {
-        Ok(payload) => payload,
-        Err(err) => {
-            crate::record_minimax_error(state, &context, &err);
-            return (
-                StatusCode::BAD_REQUEST,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    &err,
-                    "invalid_request_error",
-                    None,
-                ),
-            )
-                .into_response();
-        }
-    };
-
     let wants_stream = crate::source::wants_stream(incoming_headers, body);
     let url = responses_url(base_url);
     let mut request = state
         .client
         .post(&url)
+        .timeout(Duration::from_secs(180))
+        .body(body.clone());
+
+    for (key, value) in incoming_headers.iter() {
+        if crate::should_drop_incoming_header(key.as_str())
+            || key.as_str().eq_ignore_ascii_case("x-api-key")
+        {
+            continue;
+        }
+        request = request.header(key, value);
+    }
+
+    request = request
         .header(
             "Authorization",
             format!("Bearer {}", account.api_key.trim()),
@@ -206,9 +176,7 @@ async fn native_responses(
             } else {
                 "application/json"
             },
-        )
-        .timeout(Duration::from_secs(180))
-        .body(payload.to_string());
+        );
 
     if !incoming_headers.contains_key("accept-encoding") {
         request = request.header("Accept-Encoding", "identity");
@@ -225,11 +193,7 @@ async fn native_responses(
             return (
                 StatusCode::BAD_GATEWAY,
                 [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    &message,
-                    "server_error",
-                    None,
-                ),
+                crate::source::v1::response::openai_error_body(&message, "server_error", None),
             )
                 .into_response();
         }
@@ -240,16 +204,7 @@ async fn native_responses(
         let text = resp.text().await.unwrap_or_default();
         let message = format!("MiniMax returned {}: {}", status, text);
         crate::record_minimax_error(state, &context, &message);
-        return (
-            StatusCode::BAD_GATEWAY,
-            [("Content-Type", "application/json")],
-            crate::source::v1::response::openai_error_body(
-                &message,
-                "server_error",
-                None,
-            ),
-        )
-            .into_response();
+        return (status, [("Content-Type", "application/json")], text).into_response();
     }
 
     if wants_stream {
@@ -264,11 +219,7 @@ async fn native_responses(
             return (
                 StatusCode::BAD_GATEWAY,
                 [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    &message,
-                    "server_error",
-                    None,
-                ),
+                crate::source::v1::response::openai_error_body(&message, "server_error", None),
             )
                 .into_response();
         }
@@ -282,11 +233,7 @@ async fn native_responses(
             return (
                 StatusCode::BAD_GATEWAY,
                 [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    &message,
-                    "server_error",
-                    None,
-                ),
+                crate::source::v1::response::openai_error_body(&message, "server_error", None),
             )
                 .into_response();
         }
@@ -310,49 +257,28 @@ async fn stream_native_responses(
 ) -> axum::response::Response {
     let usage_state = state.clone();
     let usage_context = context.clone();
-    let mut upstream = resp.bytes_stream();
-    let mut sse_buffer: Vec<u8> = Vec::new();
-    let mut last_response: Option<Value> = None;
     let stream = async_stream::stream! {
+        let mut upstream = resp.bytes_stream();
+        let mut parser = NativeResponsesSseUsageTracker::default();
         while let Some(chunk) = upstream.next().await {
-            let bytes = match chunk {
-                Ok(bytes) => bytes,
+            match chunk {
+                Ok(bytes) => {
+                    parser.push(&bytes);
+                    yield Ok::<Bytes, std::io::Error>(bytes);
+                }
                 Err(err) => {
                     let message = format!("MiniMax stream read failed: {}", err);
                     crate::record_minimax_error(&usage_state, &usage_context, &message);
-                    yield Ok::<Bytes, std::io::Error>(Bytes::from(format!(
-                        "event: error\ndata: {{\"message\":\"{}\"}}\n\n",
-                        message.replace('"', "\\\"")
-                    )));
+                    yield Err(std::io::Error::new(std::io::ErrorKind::Other, "stream"));
                     return;
-                }
-            };
-            sse_buffer.extend_from_slice(&bytes);
-            while let Some((event_end, delimiter_len)) = find_sse_boundary(&sse_buffer) {
-                let raw_event: Vec<u8> = sse_buffer.drain(..event_end + delimiter_len).collect();
-                if let Some(data) = parse_sse_data(&raw_event[..event_end]) {
-                    if data.trim() == "[DONE]" {
-                        yield Ok(Bytes::from_static(b"data: [DONE]\n\n"));
-                        continue;
-                    }
-                    if let Ok(value) = serde_json::from_str::<Value>(&data) {
-                        if let Some(obj) = value.as_object() {
-                            if obj.get("type").and_then(|v| v.as_str())
-                                == Some("response.completed")
-                            {
-                                if let Some(response) = obj.get("response").cloned() {
-                                    last_response = Some(response);
-                                }
-                            }
-                        }
-                    }
-                    yield Ok(Bytes::from(raw_event));
                 }
             }
         }
-        if let Some(response) = last_response {
+        if let Some(response) = parser.finish() {
             let usage = crate::usage_metrics_from_response_value(&response);
             crate::record_minimax_success(&usage_state, &usage_context, &usage);
+        } else {
+            crate::record_minimax_success(&usage_state, &usage_context, &crate::UsageMetrics::default());
         }
     };
 
@@ -365,6 +291,47 @@ async fn stream_native_responses(
         Body::from_stream(stream),
     )
         .into_response()
+}
+
+#[derive(Default)]
+struct NativeResponsesSseUsageTracker {
+    buffer: Vec<u8>,
+    last_response: Option<Value>,
+}
+
+impl NativeResponsesSseUsageTracker {
+    fn push(&mut self, bytes: &Bytes) {
+        self.buffer.extend_from_slice(bytes);
+        while let Some((event_end, delimiter_len)) = find_sse_boundary(&self.buffer) {
+            let raw_event: Vec<u8> = self.buffer.drain(..event_end + delimiter_len).collect();
+            self.absorb_event(&raw_event[..event_end]);
+        }
+    }
+
+    fn finish(mut self) -> Option<Value> {
+        if !self.buffer.is_empty() {
+            let raw = std::mem::take(&mut self.buffer);
+            self.absorb_event(&raw);
+        }
+        self.last_response
+    }
+
+    fn absorb_event(&mut self, raw_event: &[u8]) {
+        let Some(data) = parse_sse_data(raw_event) else {
+            return;
+        };
+        if data.trim() == "[DONE]" {
+            return;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+            return;
+        };
+        if value.get("type").and_then(|v| v.as_str()) == Some("response.completed") {
+            if let Some(response) = value.get("response").cloned() {
+                self.last_response = Some(response);
+            }
+        }
+    }
 }
 
 fn find_sse_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
@@ -396,98 +363,6 @@ fn parse_sse_data(raw_event: &[u8]) -> Option<String> {
     }
 }
 
-/// Build the request body we forward to MiniMax `/v1/responses`. Most
-/// fields are forwarded verbatim; the transformations are:
-///
-///   * drop Codex-specific fields (`store`, `include`, `user`,
-///     `safety_identifier`, `parallel_tool_calls`, `truncation`).
-///   * strip the `apply_patch` tool MiniMax does not support.
-///   * default `reasoning` to `medium` for M3 when the client did not
-///     set it.
-fn build_native_payload(raw: &Value) -> Result<Value, String> {
-    let mut out = serde_json::Map::new();
-
-    for key in &[
-        "model",
-        "input",
-        "instructions",
-        "max_output_tokens",
-        "temperature",
-        "top_p",
-        "stream",
-        "metadata",
-        "prompt_cache_key",
-        "text",
-        "service_tier",
-        "tool_choice",
-    ] {
-        if let Some(value) = raw.get(*key) {
-            out.insert((*key).to_string(), value.clone());
-        }
-    }
-
-    if let Some(tools_value) = filter_tools(raw.get("tools")) {
-        out.insert("tools".to_string(), tools_value);
-    }
-
-    if let Some(reasoning) = normalize_reasoning(raw) {
-        out.insert("reasoning".to_string(), reasoning);
-    }
-
-    serde_json::to_value(out).map_err(|e| e.to_string())
-}
-
-fn filter_tools(raw: Option<&Value>) -> Option<Value> {
-    let tools = raw?.as_array()?;
-    let mut out = Vec::new();
-    for tool in tools {
-        let name = tool
-            .get("name")
-            .and_then(|v| v.as_str())
-            .or_else(|| {
-                tool.get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(|v| v.as_str())
-            })
-            .unwrap_or("");
-        if name == "apply_patch" {
-            continue;
-        }
-        out.push(tool.clone());
-    }
-    if out.is_empty() {
-        None
-    } else {
-        Some(Value::Array(out))
-    }
-}
-
-fn normalize_reasoning(raw: &Value) -> Option<Value> {
-    if let Some(reasoning) = raw.get("reasoning") {
-        if let Some(obj) = reasoning.as_object() {
-            let effort = obj
-                .get("effort")
-                .and_then(|v| v.as_str())
-                .unwrap_or("none");
-            if matches!(effort, "none") {
-                return Some(json!({ "effort": "none" }));
-            }
-            return Some(reasoning.clone());
-        }
-    }
-
-    if let Some(effort) = raw.get("reasoning_effort").and_then(|v| v.as_str()) {
-        return Some(json!({ "effort": effort }));
-    }
-
-    let model = raw.get("model").and_then(|v| v.as_str()).unwrap_or("");
-    if model.eq_ignore_ascii_case("MiniMax-M3") {
-        return Some(json!({ "effort": "medium" }));
-    }
-
-    None
-}
-
 /// Chat-Completions fallback path. Used when the configured account's
 /// `base_url` explicitly points at the chat-completions endpoint.
 async fn chat_completions_responses(
@@ -516,11 +391,7 @@ async fn chat_completions_responses(
             return (
                 StatusCode::BAD_REQUEST,
                 [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    &err,
-                    "invalid_request_error",
-                    None,
-                ),
+                crate::source::v1::response::openai_error_body(&err, "invalid_request_error", None),
             )
                 .into_response();
         }
@@ -560,11 +431,7 @@ async fn chat_completions_responses(
             return (
                 StatusCode::BAD_GATEWAY,
                 [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    &message,
-                    "server_error",
-                    None,
-                ),
+                crate::source::v1::response::openai_error_body(&message, "server_error", None),
             )
                 .into_response();
         }
@@ -579,11 +446,7 @@ async fn chat_completions_responses(
             return (
                 StatusCode::BAD_GATEWAY,
                 [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    &message,
-                    "server_error",
-                    None,
-                ),
+                crate::source::v1::response::openai_error_body(&message, "server_error", None),
             )
                 .into_response();
         }
@@ -615,11 +478,7 @@ async fn chat_completions_responses(
             return (
                 StatusCode::BAD_GATEWAY,
                 [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    &message,
-                    "server_error",
-                    None,
-                ),
+                crate::source::v1::response::openai_error_body(&message, "server_error", None),
             )
                 .into_response();
         }
@@ -636,7 +495,6 @@ async fn chat_completions_responses(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn normalize_base_url_defaults_to_official() {
@@ -650,12 +508,12 @@ mod tests {
     #[test]
     fn responses_url_handles_known_shapes() {
         assert_eq!(
-            responses_url("https://api.minimaxi.chat"),
-            "https://api.minimaxi.chat/v1/responses"
+            responses_url("https://api.minimax.io"),
+            "https://api.minimax.io/v1/responses"
         );
         assert_eq!(
-            responses_url("https://api.minimaxi.chat/v1"),
-            "https://api.minimaxi.chat/v1/responses"
+            responses_url("https://api.minimax.io/v1"),
+            "https://api.minimax.io/v1/responses"
         );
         assert_eq!(
             responses_url("https://example.com/v1/responses"),
@@ -664,147 +522,15 @@ mod tests {
     }
 
     #[test]
-    fn use_native_responses_only_for_responses_path() {
-        // Default paths use chat-completions, which is more thorough.
-        assert!(!use_native_responses(None));
-        assert!(!use_native_responses(Some("https://api.minimaxi.chat")));
-        assert!(!use_native_responses(Some("https://api.minimaxi.chat/v1")));
-        assert!(!use_native_responses(Some(
-            "https://example.com/v1/chat/completions"
-        )));
-        // Opt-in: explicit /v1/responses URL routes to the native path.
+    fn use_native_responses_by_default_unless_chat_completions_is_explicit() {
+        assert!(use_native_responses(None));
+        assert!(use_native_responses(Some("https://api.minimax.io")));
+        assert!(use_native_responses(Some("https://api.minimax.io/v1")));
         assert!(use_native_responses(Some(
             "https://example.com/v1/responses"
         )));
-        assert!(use_native_responses(Some(
-            "https://api.minimaxi.chat/v1/responses"
+        assert!(!use_native_responses(Some(
+            "https://example.com/v1/chat/completions"
         )));
-    }
-
-    #[test]
-    fn build_native_payload_strips_codex_fields() {
-        let raw = json!({
-            "model": "MiniMax-M3",
-            "input": [{"role": "user", "content": "hi"}],
-            "store": true,
-            "include": ["reasoning.encrypted_content"],
-            "parallel_tool_calls": true,
-            "truncation": "auto",
-            "user": "u1",
-            "safety_identifier": "abc",
-            "metadata": {"k": "v"}
-        });
-        let out = build_native_payload(&raw).unwrap();
-        assert_eq!(out["model"], "MiniMax-M3");
-        assert!(out.get("input").is_some());
-        assert!(out.get("metadata").is_some());
-        assert!(out.get("store").is_none());
-        assert!(out.get("include").is_none());
-        assert!(out.get("parallel_tool_calls").is_none());
-        assert!(out.get("truncation").is_none());
-        assert!(out.get("user").is_none());
-        assert!(out.get("safety_identifier").is_none());
-    }
-
-    #[test]
-    fn build_native_payload_filters_apply_patch() {
-        let raw = json!({
-            "model": "MiniMax-M3",
-            "input": "hi",
-            "tools": [
-                {"type": "function", "name": "apply_patch", "parameters": {"type": "object"}},
-                {"type": "function", "name": "shell", "parameters": {"type": "object"}}
-            ]
-        });
-        let out = build_native_payload(&raw).unwrap();
-        let tools = out["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0]["name"], "shell");
-    }
-
-    #[test]
-    fn build_native_payload_defaults_reasoning_for_m3() {
-        let raw = json!({"model": "MiniMax-M3", "input": "hi"});
-        let out = build_native_payload(&raw).unwrap();
-        assert_eq!(out["reasoning"]["effort"], "medium");
-    }
-
-    #[test]
-    fn build_native_payload_respects_explicit_none_reasoning() {
-        let raw = json!({
-            "model": "MiniMax-M3",
-            "input": "hi",
-            "reasoning": {"effort": "none"}
-        });
-        let out = build_native_payload(&raw).unwrap();
-        assert_eq!(out["reasoning"]["effort"], "none");
-    }
-
-    #[test]
-    fn build_native_payload_forwards_non_none_reasoning() {
-        let raw = json!({
-            "model": "MiniMax-M3",
-            "input": "hi",
-            "reasoning": {"effort": "high"}
-        });
-        let out = build_native_payload(&raw).unwrap();
-        assert_eq!(out["reasoning"]["effort"], "high");
-    }
-
-    #[test]
-    fn build_native_payload_omits_reasoning_for_m2() {
-        let raw = json!({"model": "MiniMax-M2.7", "input": "hi"});
-        let out = build_native_payload(&raw).unwrap();
-        assert!(out.get("reasoning").is_none());
-    }
-
-    #[test]
-    fn filter_tools_keeps_supported_tools_only() {
-        let raw = json!([
-            {"type": "function", "name": "apply_patch"},
-            {"type": "function", "name": "shell"},
-            {"type": "function", "function": {"name": "apply_patch"}},
-            {"type": "function", "function": {"name": "read_file"}}
-        ]);
-        let out = filter_tools(Some(&raw)).unwrap();
-        let arr = out.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0]["name"], "shell");
-        assert_eq!(arr[1]["function"]["name"], "read_file");
-    }
-
-    #[test]
-    fn build_native_payload_forwards_text_field() {
-        let raw = json!({
-            "model": "MiniMax-M3",
-            "input": "hi",
-            "text": {"format": {"type": "text"}}
-        });
-        let out = build_native_payload(&raw).unwrap();
-        assert_eq!(out["text"]["format"]["type"], "text");
-    }
-
-    #[test]
-    fn build_native_payload_forwards_metadata_and_prompt_cache_key() {
-        let raw = json!({
-            "model": "MiniMax-M3",
-            "input": "hi",
-            "metadata": {"k": "v"},
-            "prompt_cache_key": "abc"
-        });
-        let out = build_native_payload(&raw).unwrap();
-        assert_eq!(out["metadata"]["k"], "v");
-        assert_eq!(out["prompt_cache_key"], "abc");
-    }
-
-    #[test]
-    fn build_native_payload_handles_reasoning_effort_alias() {
-        let raw = json!({
-            "model": "MiniMax-M3",
-            "input": "hi",
-            "reasoning_effort": "low"
-        });
-        let out = build_native_payload(&raw).unwrap();
-        assert_eq!(out["reasoning"]["effort"], "low");
     }
 }

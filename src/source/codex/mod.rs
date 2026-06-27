@@ -31,6 +31,14 @@ pub fn route_to_target(
         let target = crate::source::v1::provider::target_from_request_body(&body)
             .unwrap_or(TargetModel::Codex);
         if target != TargetModel::Codex {
+            if target == TargetModel::MiniMax {
+                return Ok(crate::source::v1::provider::convert(
+                    target,
+                    upstream_path,
+                    uri,
+                    body,
+                ));
+            }
             let body = normalize_codex_provider_body(target, body);
             return Ok(crate::source::v1::provider::convert(
                 target,
@@ -274,6 +282,29 @@ mod tests {
         let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
         assert_eq!(body["model"], "gemini-2.5-pro");
         assert_eq!(body["messages"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn codex_responses_passes_minimax_body_through() {
+        let uri: Uri = "/codex/responses".parse().unwrap();
+        let routed = route_to_target(
+            "/codex/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(
+                br#"{"model":"min:MiniMax-M3","input":"hello","store":true,"include":["reasoning.encrypted_content"],"tools":[{"type":"function","name":"shell","parameters":{"type":"object"}}]}"#,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::MiniMax);
+        let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "MiniMax-M3");
+        assert_eq!(body["input"], "hello");
+        assert_eq!(body["store"], true);
+        assert_eq!(body["include"][0], "reasoning.encrypted_content");
+        assert_eq!(body["tools"][0]["name"], "shell");
     }
 
     #[test]

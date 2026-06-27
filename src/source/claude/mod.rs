@@ -1,7 +1,7 @@
 use axum::http::{HeaderMap, Method, Uri};
 use bytes::Bytes;
 
-use crate::source::{RouteError, RoutedRequest};
+use crate::source::{ResponseMode, RouteError, RoutedRequest, TargetModel};
 
 pub mod codex;
 pub mod response;
@@ -15,7 +15,86 @@ pub fn route_to_target(
     body: Bytes,
 ) -> Result<RoutedRequest, RouteError> {
     let upstream_path = route::resolve(path, method)?;
+    if is_messages_path(&upstream_path) && *method == Method::POST {
+        if crate::source::v1::provider::target_from_request_body(&body)
+            == Some(TargetModel::MiniMax)
+        {
+            return Ok(RoutedRequest {
+                target: TargetModel::MiniMax,
+                upstream_path: "anthropic/v1/messages".to_string(),
+                upstream_query: uri.query().map(|value| value.to_string()),
+                upstream_body: crate::source::v1::provider::strip_provider_prefix_from_body(body),
+                response_mode: ResponseMode::Passthrough,
+            });
+        }
+
+        // Legacy bridge: Claude-style messages endpoint to Codex responses target.
+        return Ok(codex::convert(
+            "responses".to_string(),
+            uri,
+            method,
+            headers,
+            body,
+        ));
+    }
+
+    if upstream_path == "responses" && *method == Method::POST {
+        if crate::source::v1::provider::target_from_request_body(&body)
+            == Some(TargetModel::MiniMax)
+        {
+            return Ok(crate::source::v1::provider::convert(
+                TargetModel::MiniMax,
+                upstream_path,
+                uri,
+                body,
+            ));
+        }
+    }
+
     Ok(codex::convert(upstream_path, uri, method, headers, body))
+}
+
+fn is_messages_path(path: &str) -> bool {
+    path == "messages" || path == "v1/messages"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_v1_messages_routes_minimax_to_anthropic_pass_through() {
+        let uri: Uri = "/claude/v1/messages".parse().unwrap();
+        let routed = route_to_target(
+            "/claude/v1/messages",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"MiniMax-M3[1m]","messages":[]}"#),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::MiniMax);
+        assert_eq!(routed.upstream_path, "anthropic/v1/messages");
+        let body: serde_json::Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "MiniMax-M3[1m]");
+    }
+
+    #[test]
+    fn claude_messages_keeps_non_minimax_codex_bridge() {
+        let uri: Uri = "/claude/messages".parse().unwrap();
+        let routed = route_to_target(
+            "/claude/messages",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"claude-sonnet-4-5","messages":[]}"#),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::Codex);
+        assert_eq!(routed.upstream_path, "responses");
+    }
 }
 
 /// Lists models through the Claude-prefixed compatibility surface.

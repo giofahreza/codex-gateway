@@ -84,7 +84,7 @@ pub async fn responses(
             .into_response();
     }
 
-    let account = match super::accounts::first_enabled(&state) {
+    let account = match super::accounts::pick_account(&state) {
         Some(a) => a,
         None => {
             return (
@@ -242,7 +242,11 @@ pub async fn responses(
                 });
 
                 let stream_body = Body::from_stream(rx_stream(rx));
-                let mut response = (StatusCode::OK, [("Content-Type", "text/event-stream")], stream_body)
+                let mut response = (
+                    StatusCode::OK,
+                    [("Content-Type", "text/event-stream")],
+                    stream_body,
+                )
                     .into_response();
                 let response_headers = response.headers_mut();
                 for (k, v) in rl_headers {
@@ -377,7 +381,7 @@ async fn proxy_simple(
             .into_response();
     }
 
-    let account = match super::accounts::first_enabled(state) {
+    let account = match super::accounts::pick_account(state) {
         Some(a) => a,
         None => {
             return (

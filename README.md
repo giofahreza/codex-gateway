@@ -362,7 +362,7 @@ after a synthetic tool result) instead of hallucinating completion.
 | Provider | Agentic loop | Notes |
 |---|---|---|
 | `codex` (gpt-5.5, gpt-5.4, gpt-5.4-mini, codex-auto-review) | ✅ | Native Codex backend, the reference behaviour. |
-| `MiniMax-M3` | ✅ | Routed through chat-completions with `thinking: {type: "adaptive"}`; produces a reasoning summary plus a tool call. |
+| `MiniMax-M3` | ✅ | Routed through MiniMax's native Responses endpoint for Codex and the Anthropic endpoint for Claude Code. |
 | `MiniMax-M2.7` and the other M2.x line | ⚠️ | Text-only — returns "Cannot see image" but does iterate tool calls. |
 | `deepseek-v4-pro` / `deepseek-v4-flash` | ✅ | Goes through Anthropic messages; tool calls and reasoning are translated. |
 | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-3-pro` | ✅ | After the gateway forwards `functionDeclarations` and translates `functionCall` parts. |
@@ -423,12 +423,13 @@ Each DeepSeek account card on the dashboard shows the current balance pulled fro
 
 MiniMax is exposed as an OpenAI-compatible target. Add a MiniMax API key through the dashboard, or `POST /login/minimax/start` with JSON `{"api_key":"...","label":"optional","base_url":"optional"}`.
 
-Public routing (the gateway translates to MiniMax internally; no `/minimax/*` routes are exposed to clients):
+Public routing (no `/minimax/*` routes are exposed to clients):
 
-- `POST /v1/responses` and `POST /codex/responses` translate the request to MiniMax's `/v1/chat/completions` by default and add `thinking: {type: "adaptive"}` so `MiniMax-M3` uses Adaptive Thinking on agentic tasks. The Codex SDK's `reasoning.effort` is mapped to MiniMax's `thinking.type` (`high` → `adaptive`, `none` → `disabled`). The `apply_patch` tool is filtered, and Codex-only fields (`store`, `include`, `parallel_tool_calls`, …) are dropped.
-- If the account's `base_url` is configured to end with `/v1/responses` the gateway uses MiniMax's native `/v1/responses` endpoint instead. The native path is a closer passthrough, but `MiniMax-M3` tends to stop after a single tool call on it, so the chat-completions path is the default.
+- `POST /v1/responses` and `POST /codex/responses` route MiniMax models to MiniMax's native `/v1/responses` endpoint and forward the Codex Responses body without translating it to chat completions.
+- `POST /claude/v1/messages` and `POST /claude/messages` route `MiniMax-*` models to MiniMax's Anthropic-compatible `/anthropic/v1/messages` endpoint and forward the Claude Messages body as-is.
+- If an account's `base_url` is explicitly configured to end with `/v1/chat/completions` or `/chat/completions`, the gateway keeps the old chat-completions fallback for OpenAI/Codex Responses requests.
 - `GET /v1/models` and `GET /codex/models` include live MiniMax models such as `MiniMax-M3`, `MiniMax-M2.7`, and `MiniMax-M2.7-highspeed` whenever a MiniMax account is enabled.
-- Auth: `Authorization: Bearer <proxy_api_key>`.
+- Auth: `Authorization: Bearer <proxy_api_key>` or `x-api-key: <proxy_api_key>`.
 
 ### MiniMax usage and quota on the dashboard
 
@@ -473,22 +474,26 @@ wire_api = "responses"
 [profiles.minimax]
 model = "MiniMax-M3"
 model_provider = "minimax_via_gateway"
-model_context_window = 512_000
+model_context_window = 1000000
 model_reasoning_effort = "high"
 ```
 
 The model catalog fields documented at the link above (`default_reasoning_level`, `input_modalities: ["text", "image"]`, `supports_parallel_tool_calls: true`, etc.) all work end-to-end through the gateway.
 
-### Why the gateway uses chat-completions by default for MiniMax
+### Using MiniMax with Claude Code
 
-`MiniMax-M3` is significantly more thorough on multi-step agentic tasks when invoked through the `/v1/chat/completions` endpoint with `thinking: {type: "adaptive"}` than through the native `/v1/responses` endpoint. On the native Responses API path, the model often stops after a single tool call and returns `response.completed`, which the Codex agent loop reads as "task done" even when the work is not finished. The chat-completions path instead produces a longer, more thorough response (multiple tool calls in a single turn, or one comprehensive script that covers the whole task) and the Codex agent loop is able to drive the work to completion.
+The gateway can also stand in for MiniMax's Anthropic endpoint from the official Claude Code guide (https://platform.minimax.io/docs/token-plan/claude-code). Configure Claude Code with the gateway as the Anthropic base URL:
 
-The gateway does the protocol translation:
-
-* `reasoning: {effort: "..."}` from the Codex SDK is mapped to `thinking: {type: "..."}`. `effort: "none"` becomes `thinking: {type: "disabled"}`; any other value (or absence) becomes `thinking: {type: "adaptive"}` for M3.
-* The Codex Responses-API input format is translated to MiniMax's `messages` shape. Function calls and function results are mapped to OpenAI's `tool_calls` and `tool` role.
-* The `apply_patch` tool is filtered (MiniMax does not implement it).
-* Codex-only fields (`store`, `include`, `parallel_tool_calls`, `truncation`, `user`, `safety_identifier`) are dropped.
-* The response stream is translated back to the OpenAI Responses-API SSE event sequence (`response.created`, `response.output_item.added`, `response.output_text.delta`, `response.function_call_arguments.delta`, `response.completed`, …) so the Codex SDK sees the same shape it would see from OpenAI's own Responses API.
-
-MiniMax also exposes a native `/v1/responses` endpoint (https://platform.minimax.io/docs/api-reference/responses-create). The gateway uses that path instead when the account's `base_url` is configured to end with `/v1/responses`. That path is a closer passthrough, but in practice the chat-completions path gives much better multi-step agentic behavior.
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://DEPLOY_HOST:DEPLOY_PORT/claude",
+    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
+    "ANTHROPIC_MODEL": "MiniMax-M3[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "MiniMax-M3[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "MiniMax-M3[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "MiniMax-M3[1m]"
+  }
+}
+```
