@@ -398,11 +398,7 @@ fn parse_quota_response(value: &Value) -> Result<(bool, String, Vec<ModelQuota>)
 }
 
 fn parse_window(item: &Value, prefix: &str) -> Option<WindowSummary> {
-    let get_i64 = |suffix: &str| -> i64 {
-        item.get(format!("{}{}", prefix, suffix))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0)
-    };
+    let get_i64 = |suffix: &str| -> i64 { get_i64_key(item, &format!("{}{}", prefix, suffix)) };
     let get_opt_f64 = |suffix: &str| -> Option<f64> {
         item.get(format!("{}{}", prefix, suffix))
             .and_then(|v| v.as_f64())
@@ -415,20 +411,100 @@ fn parse_window(item: &Value, prefix: &str) -> Option<WindowSummary> {
     }
     let remaining = get_opt_f64("remaining_percent");
     let used = remaining.map(|r| (100.0 - r).max(0.0).min(100.0));
-    let remains_time = get_i64("remains_time");
+    let (start_time_raw, end_time_raw, remains_time_raw) = match prefix {
+        "current_interval_" => (
+            get_i64_first(item, &["current_interval_start_time", "start_time"]),
+            get_i64_first(item, &["current_interval_end_time", "end_time"]),
+            get_i64_first(item, &["current_interval_remains_time", "remains_time"]),
+        ),
+        "current_weekly_" => (
+            get_i64_first(item, &["current_weekly_start_time", "weekly_start_time"]),
+            get_i64_first(item, &["current_weekly_end_time", "weekly_end_time"]),
+            get_i64_first(
+                item,
+                &["current_weekly_remains_time", "weekly_remains_time"],
+            ),
+        ),
+        _ => (
+            get_i64("start_time"),
+            get_i64("end_time"),
+            get_i64("remains_time"),
+        ),
+    };
+    let start_time = normalize_epoch_seconds(start_time_raw);
+    let end_time = normalize_epoch_seconds(end_time_raw);
+    let reset_from_end_time = reset_seconds_from_end_time(end_time);
+    let remains_time = normalize_duration_seconds(remains_time_raw, reset_from_end_time)
+        .or(reset_from_end_time)
+        .unwrap_or(0);
     Some(WindowSummary {
         total_count: total,
         usage_count: usage,
         remaining_percent: remaining,
         used_percent: used,
-        start_time: get_i64("start_time"),
-        end_time: get_i64("end_time"),
+        start_time,
+        end_time,
         remains_time,
         status: item
             .get(format!("{}status", prefix))
             .and_then(|v| v.as_i64()),
         reset_label: humanize_seconds(remains_time),
     })
+}
+
+fn get_i64_key(item: &Value, key: &str) -> i64 {
+    item.get(key).and_then(|v| v.as_i64()).unwrap_or(0)
+}
+
+fn get_i64_first(item: &Value, keys: &[&str]) -> i64 {
+    keys.iter()
+        .find_map(|key| item.get(*key).and_then(|v| v.as_i64()))
+        .unwrap_or(0)
+}
+
+fn normalize_epoch_seconds(value: i64) -> i64 {
+    if value > 100_000_000_000 {
+        value / 1000
+    } else {
+        value
+    }
+}
+
+fn normalize_duration_seconds(value: i64, reset_from_end_time: Option<i64>) -> Option<i64> {
+    if value <= 0 {
+        return None;
+    }
+    let as_seconds = value;
+    let as_milliseconds = ((value + 999) / 1000).max(1);
+    if let Some(reference) = reset_from_end_time {
+        if absolute_diff(as_milliseconds, reference) < absolute_diff(as_seconds, reference) {
+            return Some(as_milliseconds);
+        }
+        return Some(as_seconds);
+    }
+    // MiniMax's live coding-plan endpoint currently returns remains_time
+    // in milliseconds, while older examples used seconds.
+    if value > 31 * 86_400 {
+        Some(as_milliseconds)
+    } else {
+        Some(as_seconds)
+    }
+}
+
+fn reset_seconds_from_end_time(end_time: i64) -> Option<i64> {
+    if end_time <= 0 {
+        return None;
+    }
+    let remaining = end_time.saturating_sub(chrono::Utc::now().timestamp());
+    (remaining > 0).then_some(remaining)
+}
+
+fn absolute_diff(left: i64, right: i64) -> i64 {
+    if left >= right {
+        left - right
+    } else {
+        right - left
+    }
 }
 
 fn humanize_seconds(secs: i64) -> String {
@@ -535,6 +611,81 @@ mod tests {
         });
         let (_, _, models) = parse_quota_response(&raw).unwrap();
         assert!(models.is_empty());
+    }
+
+    #[test]
+    fn parses_live_minimax_reset_aliases_and_millisecond_durations() {
+        let raw = json!({
+            "model_remains": [
+                {
+                    "model_name": "general",
+                    "current_interval_total_count": 100,
+                    "current_interval_usage_count": 55,
+                    "current_interval_status": 1,
+                    "current_interval_remaining_percent": 45.0,
+                    "start_time": 1782622800000i64,
+                    "end_time": 1782640800000i64,
+                    "remains_time": 15032113i64,
+                    "current_weekly_total_count": 1000,
+                    "current_weekly_usage_count": 260,
+                    "current_weekly_status": 1,
+                    "current_weekly_remaining_percent": 74.0,
+                    "weekly_start_time": 1782086400000i64,
+                    "weekly_end_time": 1782691200000i64,
+                    "weekly_remains_time": 65432113i64
+                }
+            ],
+            "base_resp": { "status_code": 0, "status_msg": "success" }
+        });
+
+        let (_, _, models) = parse_quota_response(&raw).unwrap();
+        let general = &models[0];
+        let current = general.current_window.as_ref().unwrap();
+        assert_eq!(current.start_time, 1782622800);
+        assert_eq!(current.end_time, 1782640800);
+        assert_eq!(current.remains_time, 15033);
+        assert_eq!(current.reset_label, "4h 10m");
+
+        let weekly = general.weekly.as_ref().unwrap();
+        assert_eq!(weekly.start_time, 1782086400);
+        assert_eq!(weekly.end_time, 1782691200);
+        assert_eq!(weekly.remains_time, 65433);
+        assert_eq!(weekly.reset_label, "18h 10m");
+    }
+
+    #[test]
+    fn falls_back_to_end_time_when_remains_time_is_missing() {
+        let end_time = chrono::Utc::now().timestamp() + 90 * 60;
+        let item = json!({
+            "model_name": "general",
+            "current_interval_total_count": 100,
+            "current_interval_usage_count": 20,
+            "current_interval_remaining_percent": 80.0,
+            "current_interval_end_time": end_time
+        });
+
+        let current = parse_window(&item, "current_interval_").unwrap();
+        assert!(current.remains_time >= (89 * 60));
+        assert!(current.remains_time <= (90 * 60));
+        assert!(current.reset_label.starts_with("1h "));
+    }
+
+    #[test]
+    fn uses_end_time_to_disambiguate_small_millisecond_durations() {
+        let end_time = (chrono::Utc::now().timestamp() + 5 * 60) * 1000;
+        let item = json!({
+            "model_name": "general",
+            "current_interval_total_count": 100,
+            "current_interval_usage_count": 20,
+            "current_interval_remaining_percent": 80.0,
+            "end_time": end_time,
+            "remains_time": 300000
+        });
+
+        let current = parse_window(&item, "current_interval_").unwrap();
+        assert!(current.remains_time >= 299);
+        assert!(current.remains_time <= 300);
+        assert_eq!(current.reset_label, "5m");
     }
 
     #[test]
