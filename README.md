@@ -244,6 +244,70 @@ Provider prefixes can force a specific target while keeping the upstream model i
 - Supported prefixes: `agw` Antigravity, `gem` Gemini, `qwn` Qwen, `dsk` DeepSeek, `grk` Grok, `min` MiniMax, `cop` GitHub Copilot, `cod` Codex/OpenAI.
 - Old unprefixed model names still work exactly as before.
 
+### Custom models
+
+Custom models expose a stable alias such as `ctm:workhorse` and route it to one or more real provider models. They are configured from the admin dashboard Custom model section or the admin-only API below. The gateway stores them in `custom-models.json` under `auth_dir`; no database is required.
+
+Custom model aliases are returned by `GET /v1/models`, `GET /models`, and `GET /codex/models`. They can be used from `POST /v1/responses`, `POST /codex/responses`, `POST /claude/messages`, and `POST /claude/responses`.
+
+Save or replace an alias:
+
+```bash
+curl -sS http://127.0.0.1:8319/custom-models/save \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "alias": "workhorse",
+    "display_name": "Workhorse",
+    "enabled": true,
+    "load_balance": true,
+    "primary_models": [
+      {"model": "agw:gemini-2.5-pro"},
+      {"model": "gem:gemini-2.5-pro"}
+    ],
+    "fallback_models": [
+      {"model": "min:MiniMax-M3"},
+      {"model": "agw:gpt-oss"}
+    ]
+  }'
+```
+
+Call it like any other model:
+
+```bash
+curl -sS http://127.0.0.1:8319/v1/responses \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{"model":"ctm:workhorse","input":"Reply with OK only."}'
+```
+
+Delete an alias:
+
+```bash
+curl -sS http://127.0.0.1:8319/custom-models/delete \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/json" \
+  --data '{"alias":"workhorse"}'
+```
+
+Custom model rules:
+
+- `alias` is normalized by trimming whitespace and removing an optional `ctm:` prefix. `workhorse` and `ctm:workhorse` refer to the same alias.
+- Aliases must not be empty and must not contain whitespace, `:`, `/`, or `\`.
+- A custom model must have at least one enabled primary target.
+- Targets may use these provider prefixes: `agw`, `gem`, `qwn`, `dsk`, `grk`, `min`, `cop`, and `cod`. Unprefixed targets still use the normal provider routing rules.
+- Targets cannot point at another custom model, so recursive `ctm:` routes are rejected.
+- Disabled custom models are hidden from model catalogs and return `503` if called directly.
+- Disabled primary or fallback target entries are skipped.
+- When `load_balance` is `true`, enabled primary targets are sorted by provider/account usage score and rotated on ties. The optional target `weight` lowers that target's usage score before comparison, so a higher weight makes it more likely to be selected when other signals are similar.
+- When `load_balance` is `false`, enabled primary targets are tried in the configured order.
+- Fallback targets are always appended after primary targets and are tried in configured order.
+- The gateway falls back only when the selected target returns HTTP status `400` or higher. Successful responses, including short or model-truncated responses, are returned as-is.
+- If every target fails, the response is `502` with the failed target list in the error message.
+- Saving an existing alias replaces it. To rename, send `original_alias` or `previous_alias`; the old alias is removed after the new one is saved.
+
+Rule coverage was manually verified on the live server with curl: admin auth, validation errors, load-balancing rotation, ordered routing, disabled target skipping, fallback chaining, all-target failure, disabled model behavior, alias normalization, rename, catalog exposure, file-backed persistence after service restart, and cleanup.
+
 Generate an image through Antigravity using the unified `/v1/responses` endpoint:
 
 ```bash

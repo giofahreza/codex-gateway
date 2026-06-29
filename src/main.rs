@@ -1876,6 +1876,64 @@ async fn dashboard() -> impl IntoResponse {
           values.push(Number(bucket.used_percent));
         }
       }
+      function modelQuotaBucket(model) {
+        return model && (model.current || model.quota || model.limit || null);
+      }
+      function quotaBucketHasValue(bucket) {
+        return !!bucket && (bucket.used_percent != null || bucket.limit != null || bucket.remaining != null || bucket.limit_text || bucket.remaining_text || bucket.used_text);
+      }
+      function geminiModelFamily(model) {
+        var raw = model && (model.model_id || model.id || model.slug || model.model || model.model_name || model.name || model.display_name) || '';
+        var lower = String(raw).toLowerCase();
+        if (lower.indexOf('gemini') === -1) return '';
+        if (lower.indexOf('flash-lite') !== -1 || lower.indexOf('flash_lite') !== -1 || lower.indexOf('flash lite') !== -1) return 'Flash Lite';
+        if (lower.indexOf('flash') !== -1) return 'Flash';
+        if (lower.indexOf('pro') !== -1) return 'Pro';
+        return '';
+      }
+      function geminiFamilySortValue(label) {
+        return label === 'Flash' ? 0 : label === 'Flash Lite' ? 1 : label === 'Pro' ? 2 : 99;
+      }
+      function geminiModelFamilySummaries(quota) {
+        if (!quota || !Array.isArray(quota.models)) return [];
+        var families = {};
+        quota.models.forEach(function(model) {
+          var family = geminiModelFamily(model);
+          var bucket = modelQuotaBucket(model);
+          if (!family || !quotaBucketHasValue(bucket)) return;
+          if (!families[family]) {
+            families[family] = {
+              label: family,
+              models: [],
+              bucket: {
+                used_percent: null,
+                remaining_percent: null,
+                reset_label: ''
+              }
+            };
+          }
+          var summary = families[family];
+          summary.models.push(model.model_id || model.id || model.model || model.display_name || family);
+          var remaining = Number(bucket.remaining_percent);
+          var used = Number(bucket.used_percent);
+          if (!Number.isFinite(used) && Number.isFinite(remaining)) {
+            used = 100 - remaining;
+          }
+          if (Number.isFinite(used) && (summary.bucket.used_percent == null || used > summary.bucket.used_percent)) {
+            summary.bucket.used_percent = used;
+            summary.bucket.reset_label = bucket.reset_label || summary.bucket.reset_label || '';
+          } else if (!summary.bucket.reset_label && bucket.reset_label) {
+            summary.bucket.reset_label = bucket.reset_label;
+          }
+          if (Number.isFinite(remaining) && (summary.bucket.remaining_percent == null || remaining < summary.bucket.remaining_percent)) {
+            summary.bucket.remaining_percent = remaining;
+          }
+        });
+        return Object.keys(families)
+          .map(function(key) { return families[key]; })
+          .filter(function(item) { return item.bucket.used_percent != null || item.bucket.remaining_percent != null; })
+          .sort(function(a, b) { return geminiFamilySortValue(a.label) - geminiFamilySortValue(b.label); });
+      }
       function accountQuotaPercents(provider, quota) {
         const values = [];
         if (!quota) return values;
@@ -1893,6 +1951,11 @@ async fn dashboard() -> impl IntoResponse {
           quota.groups.forEach(function(group) {
             pushQuotaPercent(values, group.five_hour);
             pushQuotaPercent(values, group.weekly);
+          });
+        }
+        if (provider === 'gemini') {
+          geminiModelFamilySummaries(quota).forEach(function(summary) {
+            pushQuotaPercent(values, summary.bucket);
           });
         }
         if (provider === 'qwen' && quota.limits && Array.isArray(quota.limits)) {
@@ -2321,12 +2384,13 @@ async fn dashboard() -> impl IntoResponse {
         function bucketPct(bucket) {
           return bucket && bucket.used_percent != null ? bucket.used_percent : 0;
         }
-        function renderProgressBar(label, hint, pct, tone) {
+        function renderProgressBar(label, hint, pct, tone, detailTitle) {
           var safeLabel = escapeHtml(label || 'Usage');
           var safeHint = escapeHtml(hint || '...');
+          var safeTitle = safeLabel + ' ' + safeHint + (detailTitle ? ' - ' + escapeHtml(detailTitle) : '');
           var width = pctValue(pct);
           var cls = tone || pctClass(width);
-          return '<div class="quota-bar-wrap"><div class="quota-bar" title="' + safeLabel + ' ' + safeHint + '">'
+          return '<div class="quota-bar-wrap"><div class="quota-bar" title="' + safeTitle + '">'
             + '<div class="quota-bar-fill ' + cls + '" style="width:' + width + '%;"></div>'
             + '<div class="quota-bar-text"><span>' + safeLabel + '</span><span>' + safeHint + '</span></div>'
             + '</div></div>';
@@ -2342,8 +2406,8 @@ async fn dashboard() -> impl IntoResponse {
           if (!quota.models || !quota.models.length) return '';
           var modelBars = '';
           quota.models.forEach(function(m) {
-            var b = m.current || m.quota || m.limit || null;
-            if (!b || (b.used_percent == null && b.limit == null && b.remaining == null && !b.limit_text && !b.remaining_text && !b.used_text)) {
+            var b = modelQuotaBucket(m);
+            if (!quotaBucketHasValue(b)) {
               return;
             }
             modelBars += renderProgressBar(m.display_name || m.model_id || 'Model', fmtQ(b, 'N/A'), bucketPct(b));
@@ -2356,6 +2420,14 @@ async fn dashboard() -> impl IntoResponse {
           var key = options.key || '';
           var label = expanded ? 'Hide model limits' : 'Show model limits (' + quota.models.length + ')';
           return '<div class="model-limit-toggle"><button class="mini-btn secondary-button" onclick="' + toggleFn + '(' + escapeHtml(JSON.stringify(key)) + ')">' + label + '</button></div>';
+        }
+        function renderGeminiFamilyLimits() {
+          var summaries = geminiModelFamilySummaries(quota);
+          if (!summaries.length) return '';
+          return summaries.map(function(summary) {
+            var title = summary.models.length ? summary.models.join(', ') : summary.label;
+            return renderProgressBar('Gemini ' + summary.label, fmtQ(summary.bucket, 'N/A'), bucketPct(summary.bucket), null, title);
+          }).join('');
         }
         var bars = '';
         var provider = options.provider || '';
@@ -2381,14 +2453,17 @@ async fn dashboard() -> impl IntoResponse {
         // by default and can be expanded per account.
         if (quota.models && !hideProviderModels) {
           quota.models.forEach(function(m) {
-            var b = m.current || m.quota || m.limit || null;
-            if (!b || (b.used_percent == null && b.limit == null && b.remaining == null && !b.limit_text && !b.remaining_text && !b.used_text)) {
+            var b = modelQuotaBucket(m);
+            if (!quotaBucketHasValue(b)) {
               return;
             }
             bars += renderProgressBar(m.display_name || m.model_id || 'Model', fmtQ(b, 'N/A'), bucketPct(b));
           });
         }
-        // Provider-style group quota (AGW/Gemini): default view is only
+        if (provider === 'gemini') {
+          bars += renderGeminiFamilyLimits();
+        }
+        // Provider-style group quota (AGW/Gemini): default view keeps
         // the 5h + weekly pairs for each quota group.
         if (quota.groups) {
           quota.groups.forEach(function(g) {
