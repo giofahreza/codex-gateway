@@ -88,6 +88,7 @@ fn target_from_provider_prefix(provider: &str) -> Option<TargetModel> {
         "min" => Some(TargetModel::MiniMax),
         "cop" => Some(TargetModel::Copilot),
         "cod" => Some(TargetModel::Codex),
+        "ctm" => Some(TargetModel::Custom),
         _ => None,
     }
 }
@@ -172,6 +173,7 @@ mod tests {
         assert_eq!(target_from_model("min:MiniMax-M3"), TargetModel::MiniMax);
         assert_eq!(target_from_model("cop:gpt-5.1"), TargetModel::Copilot);
         assert_eq!(target_from_model("cod:gpt-5.4"), TargetModel::Codex);
+        assert_eq!(target_from_model("ctm:default"), TargetModel::Custom);
         assert_eq!(
             target_from_model("gemini-3-pro-image"),
             TargetModel::Antigravity

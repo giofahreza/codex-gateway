@@ -31,7 +31,10 @@ pub fn route_to_target(
         let target = crate::source::v1::provider::target_from_request_body(&body)
             .unwrap_or(TargetModel::Codex);
         if target != TargetModel::Codex {
-            if matches!(target, TargetModel::MiniMax | TargetModel::Copilot) {
+            if matches!(
+                target,
+                TargetModel::MiniMax | TargetModel::Copilot | TargetModel::Custom
+            ) {
                 return Ok(crate::source::v1::provider::convert(
                     target,
                     upstream_path,
@@ -328,6 +331,29 @@ mod tests {
         assert_eq!(body["store"], true);
         assert_eq!(body["include"][0], "reasoning.encrypted_content");
         assert_eq!(body["tools"][0]["name"], "shell");
+    }
+
+    #[test]
+    fn codex_responses_passes_custom_model_body_through() {
+        let uri: Uri = "/codex/responses".parse().unwrap();
+        let routed = route_to_target(
+            "/codex/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(
+                br#"{"model":"ctm:workhorse","input":"hello","store":true,"include":["reasoning.encrypted_content"],"tools":[{"type":"function","name":"trace","parameters":{"type":"object"}}]}"#,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::Custom);
+        let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "workhorse");
+        assert_eq!(body["input"], "hello");
+        assert_eq!(body["store"], true);
+        assert_eq!(body["include"][0], "reasoning.encrypted_content");
+        assert_eq!(body["tools"][0]["name"], "trace");
     }
 
     #[test]

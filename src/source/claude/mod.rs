@@ -16,6 +16,12 @@ pub fn route_to_target(
 ) -> Result<RoutedRequest, RouteError> {
     let upstream_path = route::resolve(path, method)?;
     if is_messages_path(&upstream_path) && *method == Method::POST {
+        if crate::source::v1::provider::target_from_request_body(&body) == Some(TargetModel::Custom)
+        {
+            let mut routed = codex::convert("responses".to_string(), uri, method, headers, body);
+            routed.target = TargetModel::Custom;
+            return Ok(routed);
+        }
         if crate::source::v1::provider::target_from_request_body(&body)
             == Some(TargetModel::MiniMax)
         {
@@ -50,6 +56,15 @@ pub fn route_to_target(
     }
 
     if upstream_path == "responses" && *method == Method::POST {
+        if crate::source::v1::provider::target_from_request_body(&body) == Some(TargetModel::Custom)
+        {
+            return Ok(crate::source::v1::provider::convert(
+                TargetModel::Custom,
+                upstream_path,
+                uri,
+                body,
+            ));
+        }
         if crate::source::v1::provider::target_from_request_body(&body)
             == Some(TargetModel::MiniMax)
         {
@@ -117,6 +132,28 @@ mod tests {
         assert_eq!(routed.upstream_path, "anthropic/v1/messages");
         let body: serde_json::Value = serde_json::from_slice(&routed.upstream_body).unwrap();
         assert_eq!(body["model"], "claude-sonnet-4.5");
+    }
+
+    #[test]
+    fn claude_messages_routes_custom_model_to_responses_bridge() {
+        let uri: Uri = "/claude/messages".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
+        let routed = route_to_target(
+            "/claude/messages",
+            &uri,
+            &Method::POST,
+            &headers,
+            Bytes::from_static(br#"{"model":"ctm:workhorse","messages":[{"role":"user","content":"hello"}],"max_tokens":100}"#),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::Custom);
+        assert_eq!(routed.upstream_path, "responses");
+        let body: serde_json::Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "ctm:workhorse");
+        assert_eq!(body["input"][0]["content"][0]["text"], "hello");
+        assert!(body.get("messages").is_none());
     }
 
     #[test]

@@ -20,6 +20,7 @@ use std::{
 use tracing::{error, info};
 use uuid::Uuid;
 mod admin_auth;
+mod custom_models;
 mod source;
 mod stats_store;
 mod target;
@@ -45,6 +46,7 @@ struct AppState {
     minimax_rr: Arc<Mutex<usize>>,
     grok_rr: Arc<Mutex<usize>>,
     copilot_rr: Arc<Mutex<usize>>,
+    custom_model_rr: Arc<Mutex<HashMap<String, usize>>>,
     client: reqwest::Client,
     tokens: Arc<Mutex<Vec<UpstreamToken>>>,
     agw_accounts: Arc<Mutex<Vec<target::antigravity::accounts::AntigravityAccount>>>,
@@ -54,6 +56,7 @@ struct AppState {
     minimax_accounts: Arc<Mutex<Vec<target::minimax::accounts::MiniMaxAccount>>>,
     grok_accounts: Arc<Mutex<Vec<target::grok::accounts::GrokAccount>>>,
     copilot_accounts: Arc<Mutex<Vec<target::copilot::accounts::CopilotAccount>>>,
+    custom_models: Arc<Mutex<Vec<custom_models::CustomModel>>>,
     stats: Arc<Mutex<UsageStats>>,
     persisted_stats: Arc<Mutex<StatsStore>>,
     quota_cache: Arc<Mutex<Vec<Option<QuotaCacheEntry>>>>,
@@ -207,6 +210,7 @@ async fn main() {
     let grok_accounts = target::grok::accounts::load_accounts(&cfg, &disabled);
     let minimax_accounts = target::minimax::accounts::load_accounts(&cfg, &disabled);
     let copilot_accounts = target::copilot::accounts::load_accounts(&cfg, &disabled);
+    let custom_models = custom_models::load(&cfg);
     let persisted_stats = stats_store::load(&cfg);
     let admin_sessions = admin_auth::load_sessions(&admin_session_path(&cfg));
     let stats = build_usage_stats(
@@ -243,6 +247,7 @@ async fn main() {
         grok_rr: Arc::new(Mutex::new(0)),
         minimax_rr: Arc::new(Mutex::new(0)),
         copilot_rr: Arc::new(Mutex::new(0)),
+        custom_model_rr: Arc::new(Mutex::new(HashMap::new())),
         client,
         tokens: Arc::new(Mutex::new(tokens)),
         agw_accounts: Arc::new(Mutex::new(agw_accounts)),
@@ -252,6 +257,7 @@ async fn main() {
         grok_accounts: Arc::new(Mutex::new(grok_accounts)),
         minimax_accounts: Arc::new(Mutex::new(minimax_accounts)),
         copilot_accounts: Arc::new(Mutex::new(copilot_accounts)),
+        custom_models: Arc::new(Mutex::new(custom_models)),
         stats: Arc::new(Mutex::new(stats)),
         persisted_stats: Arc::new(Mutex::new(persisted_stats)),
         quota_cache: Arc::new(Mutex::new(quota_cache)),
@@ -317,6 +323,9 @@ async fn main() {
         .route("/copilot/quota.json", any(copilot_quota_json_route))
         .route("/login/copilot/start", any(copilot_login_start_route))
         .route("/login/copilot/submit", any(copilot_login_submit_route))
+        .route("/custom-models.json", any(custom_models_json_route))
+        .route("/custom-models/save", any(custom_models_save_route))
+        .route("/custom-models/delete", any(custom_models_delete_route))
         .route("/usage/summary.json", any(usage_summary_route))
         .route("/usage/history.json", any(usage_history_route))
         .route("/usage/context-history.json", any(context_history_route))
@@ -857,6 +866,108 @@ async fn dashboard() -> impl IntoResponse {
         gap: 16px;
         align-items: start;
       }
+      .custom-model-section {
+        margin: 14px 0 18px 0;
+      }
+      .custom-model-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+      .custom-model-header h2 {
+        margin: 0;
+        font-size: 17px;
+        line-height: 1.2;
+      }
+      .custom-model-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 12px;
+      }
+      .custom-model-card {
+        margin-bottom: 0;
+      }
+      .custom-model-route-list {
+        display: grid;
+        gap: 8px;
+        margin-top: 10px;
+      }
+      .custom-model-route-row {
+        display: grid;
+        grid-template-columns: 82px minmax(0, 1fr);
+        gap: 8px;
+        align-items: start;
+      }
+      .custom-model-route-label {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 1.8;
+      }
+      .custom-model-targets {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        min-width: 0;
+      }
+      .custom-model-chip {
+        display: inline-flex;
+        align-items: center;
+        min-height: 26px;
+        max-width: 100%;
+        padding: 3px 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-alt);
+        color: var(--text);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+      .custom-model-form {
+        display: grid;
+        gap: 12px;
+      }
+      .custom-model-form-row {
+        display: grid;
+        gap: 6px;
+      }
+      .inline-checks {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .check-row {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--text);
+        font-weight: 700;
+      }
+      .check-row input {
+        width: auto;
+      }
+      .prefixed-input {
+        display: flex;
+        align-items: center;
+      }
+      .prefixed-input span {
+        display: inline-flex;
+        align-items: center;
+        align-self: stretch;
+        padding: 0 10px;
+        border: 1px solid var(--border);
+        border-right: 0;
+        border-radius: 8px 0 0 8px;
+        background: var(--surface-alt);
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 700;
+      }
+      .prefixed-input input {
+        border-radius: 0 8px 8px 0;
+      }
       .card {
         background: var(--surface);
         border: 1px solid var(--border);
@@ -1332,6 +1443,19 @@ async fn dashboard() -> impl IntoResponse {
           align-items: flex-start;
           flex-direction: column;
         }
+        .custom-model-header {
+          align-items: stretch;
+          flex-direction: column;
+        }
+        .custom-model-header button {
+          width: 100%;
+        }
+        .custom-model-grid {
+          grid-template-columns: 1fr;
+        }
+        .custom-model-route-row {
+          grid-template-columns: 1fr;
+        }
         .page-header {
           align-items: flex-start;
           flex-wrap: wrap;
@@ -1488,6 +1612,7 @@ async fn dashboard() -> impl IntoResponse {
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="minimax">MiniMax</button>
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="grok">Grok (xAI)</button>
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="copilot">GitHub Copilot</button>
+              <button type="button" class="provider-menu-item" role="menuitem" data-provider="custom-model">Custom model</button>
             </div>
           </div>
         </div>
@@ -1557,6 +1682,16 @@ async fn dashboard() -> impl IntoResponse {
         </div>
         <div class="chart-wrap"><canvas id="contextChart"></canvas></div>
       </details>
+      <section class="custom-model-section" aria-labelledby="customModelsTitle">
+        <div class="custom-model-header">
+          <div>
+            <h2 id="customModelsTitle">Custom Models</h2>
+            <div id="customModelsNote" class="muted">Loading custom routes...</div>
+          </div>
+          <button type="button" id="addCustomModelBtn" class="secondary-button">+ Custom model</button>
+        </div>
+        <div id="customModelCards" class="custom-model-grid"></div>
+      </section>
       <div class="providers-grid">
       <section class="provider-section" aria-labelledby="codexProviderTitle">
         <div class="provider-badge">
@@ -1658,6 +1793,7 @@ async fn dashboard() -> impl IntoResponse {
         'addMiniMaxModal',
         'addGrokModal',
         'addCopilotModal',
+        'customModelModal',
         'confirmActionModal'
       ];
       const dashboardState = {
@@ -1673,6 +1809,7 @@ async fn dashboard() -> impl IntoResponse {
           grok: [],
           copilot: []
         },
+        customModels: [],
         quotas: {
           codex: new Map(),
           agw: new Map(),
@@ -1870,6 +2007,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshMiniMaxQuota();
         refreshCopilotQuota();
         refreshCopilotAccounts();
+        refreshCustomModels();
       }
       function accountActionMenuId(fileName) {
         var value = String(fileName || '');
@@ -2802,6 +2940,169 @@ async fn dashboard() -> impl IntoResponse {
         updateOverview();
         refreshCopilotAccounts();
       }
+      function normalizeCustomAlias(alias) {
+        return String(alias || '').trim().replace(/^ctm:/i, '');
+      }
+      function findCustomModel(alias) {
+        var normalized = normalizeCustomAlias(alias).toLowerCase();
+        return (dashboardState.customModels || []).find(function(model) {
+          return normalizeCustomAlias(model.alias).toLowerCase() === normalized;
+        }) || null;
+      }
+      function customModelPublicId(model) {
+        return model && model.id ? model.id : 'ctm:' + normalizeCustomAlias(model && model.alias);
+      }
+      function enabledCustomTargets(targets) {
+        return (targets || []).filter(function(target) {
+          return target && target.enabled !== false && String(target.model || '').trim();
+        });
+      }
+      function customTargetTextarea(targets) {
+        return enabledCustomTargets(targets).map(function(target) {
+          return target.model;
+        }).join('\n');
+      }
+      function renderCustomTargetRow(label, targets, emptyText) {
+        var enabledTargets = enabledCustomTargets(targets);
+        var body = enabledTargets.length
+          ? '<span class="custom-model-targets">' + enabledTargets.map(function(target) {
+              var weight = Number(target.weight || 1);
+              var suffix = weight > 1 ? ' x' + weight : '';
+              return '<span class="custom-model-chip"><code>' + escapeHtml(target.model + suffix) + '</code></span>';
+            }).join('') + '</span>'
+          : '<span class="muted">' + escapeHtml(emptyText || 'None') + '</span>';
+        return '<div class="custom-model-route-row">'
+          + '<span class="custom-model-route-label">' + escapeHtml(label) + '</span>'
+          + body
+          + '</div>';
+      }
+      function renderCustomModelCard(model) {
+        var alias = normalizeCustomAlias(model.alias);
+        var publicId = customModelPublicId(model);
+        var title = model.display_name || alias || publicId;
+        var state = renderAccountState({ enabled: model.enabled });
+        var loadBalance = model.load_balance !== false ? 'Load balance' : 'Ordered';
+        var editArg = escapeHtml(jsString(alias));
+        return '<div class="card custom-model-card">'
+          + '<div class="card-header"><span class="card-email">' + escapeHtml(title) + '</span>' + state + '<span class="card-actions">'
+          + '<button type="button" class="mini-btn" onclick="openCustomModelModal(' + editArg + ')">Edit</button>'
+          + '<button type="button" class="mini-btn danger" onclick="deleteCustomModel(' + editArg + ')">Delete</button>'
+          + '</span></div>'
+          + '<div class="stat-pills">'
+          + '<span class="stat-pill"><span class="stat-pill-label">id</span><span class="stat-pill-value"><code>' + escapeHtml(publicId) + '</code></span></span>'
+          + '<span class="stat-pill"><span class="stat-pill-label">mode</span><span class="stat-pill-value">' + escapeHtml(loadBalance) + '</span></span>'
+          + '<span class="stat-pill"><span class="stat-pill-label">fallbacks</span><span class="stat-pill-value">' + enabledCustomTargets(model.fallback_models).length + '</span></span>'
+          + '</div>'
+          + '<div class="custom-model-route-list">'
+          + renderCustomTargetRow('Primary', model.primary_models, 'No primary target')
+          + renderCustomTargetRow('Fallback', model.fallback_models, 'No fallback targets')
+          + '</div>'
+          + '</div>';
+      }
+      function renderCustomModels(models) {
+        var cards = document.getElementById('customModelCards');
+        var note = document.getElementById('customModelsNote');
+        if (!cards) return;
+        cards.innerHTML = models.length
+          ? models.map(renderCustomModelCard).join('')
+          : '<div class="empty-state">No custom models</div>';
+        if (note) {
+          note.textContent = models.length
+            ? models.length + ' custom routes available'
+            : 'No custom routes configured';
+        }
+      }
+      async function refreshCustomModels() {
+        const res = await adminFetch('/custom-models.json');
+        if (!res) return;
+        const data = await res.json();
+        const models = data.models || [];
+        dashboardState.customModels = models;
+        renderCustomModels(models);
+      }
+      function openCustomModelModal(alias) {
+        var model = alias ? findCustomModel(alias) : null;
+        var title = document.getElementById('customModelTitle');
+        var form = document.getElementById('customModelForm');
+        if (!form) return;
+        if (title) title.textContent = model ? 'Edit Custom Model' : 'Add Custom Model';
+        form.querySelector('input[name="original_alias"]').value = model ? normalizeCustomAlias(model.alias) : '';
+        form.querySelector('input[name="alias"]').value = model ? normalizeCustomAlias(model.alias) : '';
+        form.querySelector('input[name="display_name"]').value = model && model.display_name ? model.display_name : '';
+        form.querySelector('input[name="enabled"]').checked = !model || model.enabled !== false;
+        form.querySelector('input[name="load_balance"]').checked = !model || model.load_balance !== false;
+        form.querySelector('textarea[name="primary_models"]').value = model ? customTargetTextarea(model.primary_models) : '';
+        form.querySelector('textarea[name="fallback_models"]').value = model ? customTargetTextarea(model.fallback_models) : '';
+        setText('customModelStatus', '');
+        openModal('customModelModal');
+      }
+      function closeCustomModelModal() {
+        closeModal('customModelModal');
+        var status = document.getElementById('customModelStatus');
+        if (status) status.textContent = '';
+      }
+      function parseCustomModelList(text) {
+        return String(text || '')
+          .split(/[\n,]+/)
+          .map(function(value) { return value.trim(); })
+          .filter(Boolean);
+      }
+      async function submitCustomModelForm(e) {
+        e.preventDefault();
+        var form = e.target;
+        var payload = {
+          original_alias: form.querySelector('input[name="original_alias"]').value.trim() || undefined,
+          alias: form.querySelector('input[name="alias"]').value.trim(),
+          display_name: form.querySelector('input[name="display_name"]').value.trim() || undefined,
+          enabled: form.querySelector('input[name="enabled"]').checked,
+          load_balance: form.querySelector('input[name="load_balance"]').checked,
+          primary_models: parseCustomModelList(form.querySelector('textarea[name="primary_models"]').value),
+          fallback_models: parseCustomModelList(form.querySelector('textarea[name="fallback_models"]').value)
+        };
+        if (!payload.alias) {
+          setText('customModelStatus', 'Alias is required.');
+          return;
+        }
+        if (!payload.primary_models.length) {
+          setText('customModelStatus', 'At least one primary model is required.');
+          return;
+        }
+        setText('customModelStatus', 'Saving custom model...');
+        const res = await adminFetch('/custom-models/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!res) return;
+        const data = await res.json();
+        setText('customModelStatus', data.message || (data.ok ? 'Saved.' : 'Save failed.'));
+        notify(data.message || (data.ok ? 'Custom model saved' : 'Save failed'), data.ok === false ? 'error' : '');
+        if (!data.ok) return;
+        closeCustomModelModal();
+        refreshCustomModels();
+      }
+      function deleteCustomModel(alias) {
+        var model = findCustomModel(alias);
+        var display = model && (model.display_name || customModelPublicId(model)) || ('ctm:' + normalizeCustomAlias(alias));
+        openCredentialActionConfirm({
+          title: 'Delete custom model?',
+          message: 'Delete ' + display + '?',
+          approveLabel: 'Delete',
+          danger: true,
+          run: function() { return performDeleteCustomModel(alias); }
+        });
+      }
+      async function performDeleteCustomModel(alias) {
+        const res = await adminFetch('/custom-models/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ alias: alias })
+        });
+        if (!res) return;
+        const data = await res.json();
+        notify(data.message || 'Custom model deleted', data.ok === false ? 'error' : '');
+        refreshCustomModels();
+      }
       let lastGrokQuota = new Map();
       // Pick a stable key that matches whatever the accounts card uses first.
       function grokQuotaKey(a) {
@@ -3326,6 +3627,50 @@ async fn dashboard() -> impl IntoResponse {
         </div>
       </div>
     </div>
+    <div id="customModelModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="customModelTitle" aria-hidden="true" style="display:none;">
+      <div class="modal-card">
+        <h2 id="customModelTitle" style="margin-top:0;">Add Custom Model</h2>
+        <form id="customModelForm" class="custom-model-form">
+          <input type="hidden" name="original_alias" value="">
+          <div class="custom-model-form-row">
+            <label for="customModelAliasInput">Alias</label>
+            <div class="prefixed-input">
+              <span>ctm:</span>
+              <input id="customModelAliasInput" name="alias" placeholder="asdasd" autocomplete="off">
+            </div>
+          </div>
+          <div class="custom-model-form-row">
+            <label for="customModelDisplayNameInput">Display Name</label>
+            <input id="customModelDisplayNameInput" name="display_name" placeholder="optional">
+          </div>
+          <div class="inline-checks">
+            <label class="check-row" for="customModelEnabledInput">
+              <input id="customModelEnabledInput" name="enabled" type="checkbox" checked>
+              Enabled
+            </label>
+            <label class="check-row" for="customModelLoadBalanceInput">
+              <input id="customModelLoadBalanceInput" name="load_balance" type="checkbox" checked>
+              Load balance primary models
+            </label>
+          </div>
+          <div class="custom-model-form-row">
+            <label for="customModelPrimaryInput">Primary Models</label>
+            <textarea id="customModelPrimaryInput" name="primary_models" rows="4" placeholder="agw:gemini-2.5-pro&#10;gem:gemini-2.5-pro"></textarea>
+            <div class="muted">One model per line or comma separated.</div>
+          </div>
+          <div class="custom-model-form-row">
+            <label for="customModelFallbackInput">Fallback Models</label>
+            <textarea id="customModelFallbackInput" name="fallback_models" rows="4" placeholder="min:MiniMax-M3&#10;agw:gpt-oss-120b-medium"></textarea>
+            <div class="muted">Fallbacks are tried in order after all enabled primary targets fail.</div>
+          </div>
+          <div id="customModelStatus" class="muted"></div>
+          <div class="modal-actions" style="margin-top:8px;">
+            <button type="submit">Save</button>
+            <button type="button" id="closeCustomModelModalBtn" class="secondary-button">Close</button>
+          </div>
+        </form>
+      </div>
+    </div>
     <script>
       async function startLogin() {
         const res = await adminFetch('/login/codex/start');
@@ -3382,6 +3727,7 @@ async fn dashboard() -> impl IntoResponse {
           else if (provider === 'minimax') openModal('addMiniMaxModal');
           else if (provider === 'grok') openModal('addGrokModal');
           else if (provider === 'copilot') openModal('addCopilotModal');
+          else if (provider === 'custom-model') openCustomModelModal();
         });
       });
       document.getElementById('confirmActionApproveBtn').addEventListener('click', approveCredentialAction);
@@ -3692,6 +4038,18 @@ async fn dashboard() -> impl IntoResponse {
           closeCopilotModal();
         }
       });
+      document.getElementById('addCustomModelBtn').addEventListener('click', () => {
+        openCustomModelModal();
+      });
+      document.getElementById('closeCustomModelModalBtn').addEventListener('click', () => {
+        closeCustomModelModal();
+      });
+      document.getElementById('customModelModal').addEventListener('click', (e) => {
+        if (e.target.id === 'customModelModal') {
+          closeCustomModelModal();
+        }
+      });
+      document.getElementById('customModelForm').addEventListener('submit', submitCustomModelForm);
       document.getElementById('copilotDeviceForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         const label = document.getElementById('copilotLabelInput').value.trim();
@@ -3850,6 +4208,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshMiniMaxAccounts();
         refreshMiniMaxQuota();
         refreshCopilotQuota().then(() => refreshCopilotAccounts());
+        refreshCustomModels();
         if (dashboardIntervalsStarted) {
           return;
         }
@@ -4086,6 +4445,334 @@ async fn quota_json_route(State(state): State<AppState>, headers: HeaderMap) -> 
     target::codex::admin::quota_json(State(state))
         .await
         .into_response()
+}
+
+async fn custom_models_json_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    let models = state.custom_models.lock().unwrap().clone();
+    let data = models
+        .into_iter()
+        .map(|model| {
+            serde_json::json!({
+                "id": custom_models::public_model_id(&model.alias),
+                "alias": model.alias,
+                "display_name": model.display_name,
+                "enabled": model.enabled,
+                "load_balance": model.load_balance,
+                "primary_models": model.primary_models,
+                "fallback_models": model.fallback_models
+            })
+        })
+        .collect::<Vec<_>>();
+    axum::Json(serde_json::json!({
+        "models": data,
+        "path": custom_models::custom_models_path(&state.cfg)
+    }))
+    .into_response()
+}
+
+async fn custom_models_save_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    let (model, original_alias) = match parse_custom_model_save(&headers, &body) {
+        Ok((model, original_alias)) => (custom_models::normalize_model(model), original_alias),
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("Content-Type", "application/json")],
+                serde_json::to_vec(&serde_json::json!({
+                    "ok": false,
+                    "message": err
+                }))
+                .unwrap_or_default(),
+            )
+                .into_response()
+        }
+    };
+    if let Err(err) = custom_models::validate_model(&model) {
+        return (
+            StatusCode::BAD_REQUEST,
+            [("Content-Type", "application/json")],
+            serde_json::to_vec(&serde_json::json!({
+                "ok": false,
+                "message": err
+            }))
+            .unwrap_or_default(),
+        )
+            .into_response();
+    }
+
+    let normalized_original_alias = original_alias
+        .map(|alias| custom_models::normalize_alias(&alias))
+        .filter(|alias| !alias.is_empty());
+    let saved_models = {
+        let mut models = state.custom_models.lock().unwrap();
+        models.retain(|existing| {
+            !existing.alias.eq_ignore_ascii_case(&model.alias)
+                && normalized_original_alias
+                    .as_ref()
+                    .map(|alias| !existing.alias.eq_ignore_ascii_case(alias))
+                    .unwrap_or(true)
+        });
+        models.push(model.clone());
+        models.sort_by(|left, right| left.alias.cmp(&right.alias));
+        models.clone()
+    };
+    if let Err(err) = custom_models::save(&state.cfg, &saved_models) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [("Content-Type", "application/json")],
+            serde_json::to_vec(&serde_json::json!({
+                "ok": false,
+                "message": err
+            }))
+            .unwrap_or_default(),
+        )
+            .into_response();
+    }
+    if let Some(original_alias) = normalized_original_alias {
+        if !original_alias.eq_ignore_ascii_case(&model.alias) {
+            state
+                .custom_model_rr
+                .lock()
+                .unwrap()
+                .remove(&original_alias);
+        }
+    }
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "message": "Custom model saved",
+        "model": {
+            "id": custom_models::public_model_id(&model.alias),
+            "alias": model.alias
+        }
+    }))
+    .into_response()
+}
+
+async fn custom_models_delete_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    let alias = match parse_alias_body(&headers, &body) {
+        Some(alias) => custom_models::normalize_alias(&alias),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("Content-Type", "application/json")],
+                serde_json::to_vec(&serde_json::json!({
+                    "ok": false,
+                    "message": "alias is required"
+                }))
+                .unwrap_or_default(),
+            )
+                .into_response()
+        }
+    };
+    let saved_models = {
+        let mut models = state.custom_models.lock().unwrap();
+        let before = models.len();
+        models.retain(|model| !model.alias.eq_ignore_ascii_case(&alias));
+        if models.len() == before {
+            return (
+                StatusCode::NOT_FOUND,
+                [("Content-Type", "application/json")],
+                serde_json::to_vec(&serde_json::json!({
+                    "ok": false,
+                    "message": "custom model not found"
+                }))
+                .unwrap_or_default(),
+            )
+                .into_response();
+        }
+        models.clone()
+    };
+    if let Err(err) = custom_models::save(&state.cfg, &saved_models) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [("Content-Type", "application/json")],
+            serde_json::to_vec(&serde_json::json!({
+                "ok": false,
+                "message": err
+            }))
+            .unwrap_or_default(),
+        )
+            .into_response();
+    }
+    state.custom_model_rr.lock().unwrap().remove(&alias);
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "message": "Custom model deleted"
+    }))
+    .into_response()
+}
+
+fn parse_custom_model_save(
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<(custom_models::CustomModel, Option<String>), String> {
+    if is_json_content(headers) {
+        let value =
+            serde_json::from_slice::<serde_json::Value>(body).map_err(|err| err.to_string())?;
+        let original_alias = value
+            .get("original_alias")
+            .or_else(|| value.get("previous_alias"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string());
+        return custom_model_from_json(&value).map(|model| (model, original_alias));
+    }
+    let form = serde_urlencoded::from_bytes::<HashMap<String, String>>(body)
+        .map_err(|err| err.to_string())?;
+    let alias = form.get("alias").cloned().unwrap_or_default();
+    let original_alias = form
+        .get("original_alias")
+        .or_else(|| form.get("previous_alias"))
+        .cloned();
+    Ok((
+        custom_models::CustomModel {
+            alias,
+            display_name: form.get("display_name").cloned(),
+            enabled: form_bool(&form, "enabled", true),
+            load_balance: form_bool(&form, "load_balance", true),
+            primary_models: custom_models::parse_model_list(
+                form.get("primary_models")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            ),
+            fallback_models: custom_models::parse_model_list(
+                form.get("fallback_models")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            ),
+        },
+        original_alias,
+    ))
+}
+
+fn custom_model_from_json(value: &serde_json::Value) -> Result<custom_models::CustomModel, String> {
+    let alias = value
+        .get("alias")
+        .or_else(|| value.get("id"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Ok(custom_models::CustomModel {
+        alias,
+        display_name: value
+            .get("display_name")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string()),
+        enabled: value
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true),
+        load_balance: value
+            .get("load_balance")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true),
+        primary_models: targets_from_json(
+            value.get("primary_models").or_else(|| value.get("models")),
+        )?,
+        fallback_models: targets_from_json(
+            value
+                .get("fallback_models")
+                .or_else(|| value.get("fallbacks")),
+        )?,
+    })
+}
+
+fn targets_from_json(
+    value: Option<&serde_json::Value>,
+) -> Result<Vec<custom_models::CustomModelTarget>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if let Some(text) = value.as_str() {
+        return Ok(custom_models::parse_model_list(text));
+    }
+    let Some(items) = value.as_array() else {
+        return Err("model lists must be strings or arrays".to_string());
+    };
+    let mut targets = Vec::new();
+    for item in items {
+        if let Some(model) = item.as_str() {
+            targets.push(custom_models::CustomModelTarget {
+                model: model.to_string(),
+                enabled: true,
+                weight: 1,
+            });
+            continue;
+        }
+        let Some(object) = item.as_object() else {
+            return Err("model list entries must be strings or objects".to_string());
+        };
+        targets.push(custom_models::CustomModelTarget {
+            model: object
+                .get("model")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            enabled: object
+                .get("enabled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(true),
+            weight: object
+                .get("weight")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(1)
+                .max(1),
+        });
+    }
+    Ok(targets)
+}
+
+fn parse_alias_body(headers: &HeaderMap, body: &Bytes) -> Option<String> {
+    if is_json_content(headers) {
+        let value = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+        return value
+            .get("alias")
+            .or_else(|| value.get("id"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string());
+    }
+    serde_urlencoded::from_bytes::<HashMap<String, String>>(body)
+        .ok()
+        .and_then(|form| {
+            form.get("alias")
+                .cloned()
+                .or_else(|| form.get("id").cloned())
+        })
+}
+
+fn is_json_content(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase().contains("application/json"))
+        .unwrap_or(false)
+}
+
+fn form_bool(form: &HashMap<String, String>, key: &str, default: bool) -> bool {
+    form.get(key)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
 }
 
 /// Starts the Codex OAuth login flow and returns the upstream authorization URL.
@@ -5157,6 +5844,16 @@ async fn proxy(
         TargetModel::UnifiedV1Models => {
             return unified_v1_models_response(state, headers, &routed.upstream_path).await;
         }
+        TargetModel::Custom => {
+            return custom_model_response(
+                state,
+                headers,
+                &routed.upstream_path,
+                routed.upstream_body,
+                routed.response_mode,
+            )
+            .await;
+        }
         TargetModel::Antigravity => {
             return target::antigravity::api::responses(
                 State(state),
@@ -5247,6 +5944,7 @@ async fn proxy(
         | TargetModel::Grok
         | TargetModel::MiniMax
         | TargetModel::Copilot
+        | TargetModel::Custom
         | TargetModel::CodexModels
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
@@ -5299,6 +5997,7 @@ async fn proxy(
         | TargetModel::Grok
         | TargetModel::MiniMax
         | TargetModel::Copilot
+        | TargetModel::Custom
         | TargetModel::CodexModels
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
@@ -5329,6 +6028,7 @@ async fn proxy(
         | TargetModel::Grok
         | TargetModel::MiniMax
         | TargetModel::Copilot
+        | TargetModel::Custom
         | TargetModel::CodexModels
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
@@ -5551,6 +6251,518 @@ async fn proxy(
     (status, out_headers, body).into_response()
 }
 
+async fn custom_model_response(
+    state: AppState,
+    headers: HeaderMap,
+    upstream_path: &str,
+    body: Bytes,
+    response_mode: ResponseMode,
+) -> axum::response::Response {
+    if upstream_path != "responses" {
+        return (
+            StatusCode::BAD_REQUEST,
+            [("Content-Type", "application/json")],
+            openai_error_body(
+                "custom models currently support /responses requests",
+                "invalid_request_error",
+                None,
+            ),
+        )
+            .into_response();
+    }
+
+    let request_value: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("Content-Type", "application/json")],
+                openai_error_body("Invalid request body", "invalid_request_error", None),
+            )
+                .into_response();
+        }
+    };
+    let alias = request_value
+        .get("model")
+        .and_then(|value| value.as_str())
+        .map(custom_models::normalize_alias)
+        .unwrap_or_default();
+    if alias.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            [("Content-Type", "application/json")],
+            openai_error_body(
+                "custom model alias is required",
+                "invalid_request_error",
+                None,
+            ),
+        )
+            .into_response();
+    }
+
+    let Some(custom_model) = find_custom_model(&state, &alias) else {
+        return (
+            StatusCode::NOT_FOUND,
+            [("Content-Type", "application/json")],
+            openai_error_body(
+                &format!("The custom model '{}' does not exist", alias),
+                "invalid_request_error",
+                Some("model_not_found"),
+            ),
+        )
+            .into_response();
+    };
+    if !custom_model.enabled {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Content-Type", "application/json")],
+            openai_error_body(
+                &format!("The custom model '{}' is disabled", alias),
+                "server_error",
+                None,
+            ),
+        )
+            .into_response();
+    }
+
+    let candidates = custom_model_candidate_order(&state, &custom_model);
+    if candidates.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Content-Type", "application/json")],
+            openai_error_body(
+                &format!("The custom model '{}' has no enabled targets", alias),
+                "server_error",
+                None,
+            ),
+        )
+            .into_response();
+    }
+
+    let mut failures = Vec::new();
+    for (idx, candidate) in candidates.iter().enumerate() {
+        let is_last = idx + 1 == candidates.len();
+        let target = source::v1::provider::target_from_model(&candidate.model);
+        if matches!(
+            target,
+            TargetModel::Custom | TargetModel::CodexModels | TargetModel::UnifiedV1Models
+        ) {
+            failures.push(format!("{}: unsupported target", candidate.model));
+            continue;
+        }
+
+        let candidate_body = match rewrite_request_model(&body, &candidate.model) {
+            Ok(body) => body,
+            Err(err) => {
+                failures.push(format!("{}: {}", candidate.model, err));
+                continue;
+            }
+        };
+        let response = dispatch_custom_target(
+            state.clone(),
+            headers.clone(),
+            upstream_path,
+            target,
+            candidate_body,
+            response_mode,
+        )
+        .await;
+        let status = response.status();
+        if status.is_success() || !should_custom_model_fallback(status) || is_last {
+            return response;
+        }
+
+        let failure_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok())
+            .unwrap_or_default();
+        failures.push(format!(
+            "{} returned {}{}",
+            candidate.model,
+            status,
+            if failure_body.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", failure_body.trim())
+            }
+        ));
+    }
+
+    (
+        StatusCode::BAD_GATEWAY,
+        [("Content-Type", "application/json")],
+        openai_error_body(
+            &format!(
+                "All targets failed for custom model '{}': {}",
+                alias,
+                failures.join(" | ")
+            ),
+            "server_error",
+            None,
+        ),
+    )
+        .into_response()
+}
+
+fn find_custom_model(state: &AppState, alias: &str) -> Option<custom_models::CustomModel> {
+    let alias = custom_models::normalize_alias(alias);
+    state
+        .custom_models
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|model| model.alias.eq_ignore_ascii_case(&alias))
+        .cloned()
+}
+
+fn custom_model_candidate_order(
+    state: &AppState,
+    model: &custom_models::CustomModel,
+) -> Vec<custom_models::CustomModelTarget> {
+    let mut primary = model
+        .primary_models
+        .iter()
+        .filter(|target| target.enabled)
+        .cloned()
+        .collect::<Vec<_>>();
+    if model.load_balance && primary.len() > 1 {
+        let alias = model.alias.clone();
+        let start_idx = {
+            let mut rr = state.custom_model_rr.lock().unwrap();
+            let len = primary.len();
+            let value = rr.entry(alias.clone()).or_insert(0);
+            *value %= len;
+            *value
+        };
+        primary.sort_by(|left, right| {
+            let left_score = custom_model_target_score(state, left);
+            let right_score = custom_model_target_score(state, right);
+            if left_score.is_better_than(&right_score) {
+                std::cmp::Ordering::Less
+            } else if right_score.is_better_than(&left_score) {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
+        if start_idx > 0 && start_idx < primary.len() {
+            primary.rotate_left(start_idx);
+        }
+        let mut rr = state.custom_model_rr.lock().unwrap();
+        rr.insert(alias, (start_idx + 1) % primary.len());
+    }
+
+    let mut out = primary;
+    out.extend(
+        model
+            .fallback_models
+            .iter()
+            .filter(|target| target.enabled)
+            .cloned(),
+    );
+    out
+}
+
+fn custom_model_target_score(
+    state: &AppState,
+    target: &custom_models::CustomModelTarget,
+) -> AccountSelectionScore {
+    let mut score = best_provider_score_for_model(state, &target.model);
+    let weight = u64::from(target.weight.max(1));
+    score.historical_tokens /= weight;
+    score.historical_requests /= weight;
+    score
+}
+
+fn best_provider_score_for_model(state: &AppState, model: &str) -> AccountSelectionScore {
+    match source::v1::provider::target_from_model(model) {
+        TargetModel::Codex => {
+            let tokens = state.tokens.lock().unwrap().clone();
+            best_score_for_len(
+                tokens.len(),
+                |idx| tokens[idx].enabled,
+                |idx| codex_token_selection_score(state, idx, &tokens[idx]),
+            )
+        }
+        TargetModel::Antigravity => {
+            let accounts = state.agw_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| accounts[idx].enabled,
+                |idx| antigravity_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Gemini => {
+            let accounts = state.gemini_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| accounts[idx].enabled,
+                |idx| gemini_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Qwen => {
+            let accounts = state.qwen_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| accounts[idx].enabled,
+                |idx| qwen_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::DeepSeek => {
+            let accounts = state.deepseek_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| accounts[idx].enabled,
+                |idx| deepseek_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Grok => {
+            let accounts = state.grok_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| accounts[idx].enabled,
+                |idx| grok_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::MiniMax => {
+            let accounts = state.minimax_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| accounts[idx].enabled,
+                |idx| minimax_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Copilot => {
+            let accounts = state.copilot_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| accounts[idx].enabled,
+                |idx| copilot_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Custom | TargetModel::CodexModels | TargetModel::UnifiedV1Models => {
+            AccountSelectionScore {
+                quota_pressure: Some(f64::INFINITY),
+                historical_tokens: u64::MAX,
+                historical_requests: u64::MAX,
+            }
+        }
+    }
+}
+
+fn best_score_for_len<FEnabled, FScore>(
+    len: usize,
+    mut enabled: FEnabled,
+    mut score_for: FScore,
+) -> AccountSelectionScore
+where
+    FEnabled: FnMut(usize) -> bool,
+    FScore: FnMut(usize) -> AccountSelectionScore,
+{
+    let mut best: Option<AccountSelectionScore> = None;
+    for idx in 0..len {
+        if !enabled(idx) {
+            continue;
+        }
+        let score = score_for(idx);
+        if best
+            .as_ref()
+            .map(|current| score.is_better_than(current))
+            .unwrap_or(true)
+        {
+            best = Some(score);
+        }
+    }
+    best.unwrap_or(AccountSelectionScore {
+        quota_pressure: Some(f64::INFINITY),
+        historical_tokens: u64::MAX,
+        historical_requests: u64::MAX,
+    })
+}
+
+fn rewrite_request_model(body: &Bytes, model: &str) -> Result<Bytes, String> {
+    let mut value = serde_json::from_slice::<serde_json::Value>(body)
+        .map_err(|_| "invalid request body".to_string())?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "request body must be a JSON object".to_string())?;
+    object.insert(
+        "model".to_string(),
+        serde_json::Value::String(model.to_string()),
+    );
+    let body = serde_json::to_vec(&value)
+        .map(Bytes::from)
+        .map_err(|err| err.to_string())?;
+    Ok(source::v1::provider::strip_provider_prefix_from_body(body))
+}
+
+fn should_custom_model_fallback(status: StatusCode) -> bool {
+    status.as_u16() >= 400
+}
+
+async fn dispatch_custom_target(
+    state: AppState,
+    headers: HeaderMap,
+    upstream_path: &str,
+    target: TargetModel,
+    body: Bytes,
+    response_mode: ResponseMode,
+) -> axum::response::Response {
+    match target {
+        TargetModel::Codex => {
+            dispatch_codex_custom_target(state, headers, upstream_path, body, response_mode).await
+        }
+        TargetModel::Antigravity => {
+            target::antigravity::api::responses(State(state), headers, body)
+                .await
+                .into_response()
+        }
+        TargetModel::Gemini => target::gemini::api::responses(State(state), headers, body)
+            .await
+            .into_response(),
+        TargetModel::Qwen => target::qwen::api::responses(State(state), headers, body)
+            .await
+            .into_response(),
+        TargetModel::DeepSeek => target::deepseek::api::responses(State(state), headers, body)
+            .await
+            .into_response(),
+        TargetModel::Grok => target::grok::api::responses(State(state), headers, body)
+            .await
+            .into_response(),
+        TargetModel::MiniMax => {
+            target::minimax::responses_native::responses(State(state), headers, body)
+                .await
+                .into_response()
+        }
+        TargetModel::Copilot => target::copilot::api::responses(State(state), headers, body)
+            .await
+            .into_response(),
+        TargetModel::Custom | TargetModel::CodexModels | TargetModel::UnifiedV1Models => (
+            StatusCode::BAD_REQUEST,
+            [("Content-Type", "application/json")],
+            openai_error_body("unsupported custom target", "invalid_request_error", None),
+        )
+            .into_response(),
+    }
+}
+
+async fn dispatch_codex_custom_target(
+    state: AppState,
+    headers: HeaderMap,
+    upstream_path: &str,
+    body: Bytes,
+    response_mode: ResponseMode,
+) -> axum::response::Response {
+    let upstream =
+        target::codex::gateway::build_upstream_url(&state.cfg.upstream_base, upstream_path, None);
+    let Some((_token_idx, token)) = pick_token(&state) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Content-Type", "application/json")],
+            openai_error_body("No upstream credentials configured", "server_error", None),
+        )
+            .into_response();
+    };
+    let request_value: Option<serde_json::Value> = serde_json::from_slice(&body).ok();
+    let model = request_value.as_ref().and_then(model_from_request_value);
+    let context = codex_usage_context(
+        &token,
+        model,
+        upstream_path.to_string(),
+        request_value
+            .as_ref()
+            .map(prompt_metrics_from_request_value)
+            .unwrap_or_default(),
+    );
+    record_codex_request(&state, &context);
+
+    let session_id = Uuid::new_v4().to_string();
+    let body = target::codex::gateway::build_request_body(
+        &Method::POST,
+        upstream_path,
+        &headers,
+        body,
+        &session_id,
+    );
+    let mut req = state.client.request(Method::POST, upstream);
+    for (key, value) in headers.iter() {
+        if should_drop_incoming_header(key.as_str()) {
+            continue;
+        }
+        req = req.header(key, value);
+    }
+    req = req.header("Authorization", format!("Bearer {}", token.token));
+    req = target::codex::gateway::apply_default_headers(
+        req,
+        &headers,
+        token.account_id.as_deref(),
+        &session_id,
+    );
+
+    let resp = match req.body(body).send().await {
+        Ok(resp) => resp,
+        Err(err) => {
+            record_codex_error(&state, &context, err.to_string());
+            return (
+                StatusCode::BAD_GATEWAY,
+                [("Content-Type", "application/json")],
+                openai_error_body("Upstream error", "server_error", None),
+            )
+                .into_response();
+        }
+    };
+    let status = resp.status();
+    let mut out_headers = HeaderMap::new();
+    for (key, value) in resp.headers().iter() {
+        let name = key.as_str().to_ascii_lowercase();
+        if !is_hop_header(&name) && name != "content-encoding" && name != "content-length" {
+            out_headers.insert(key.clone(), value.clone());
+        }
+    }
+    let body_bytes = match resp.bytes().await {
+        Ok(body) => body,
+        Err(err) => {
+            record_codex_error(&state, &context, err.to_string());
+            return (
+                StatusCode::BAD_GATEWAY,
+                [("Content-Type", "application/json")],
+                openai_error_body("Upstream error", "server_error", None),
+            )
+                .into_response();
+        }
+    };
+    if status.is_success() {
+        let is_sse = out_headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.contains("text/event-stream"))
+            .unwrap_or(false);
+        if is_sse {
+            if let Some(metrics) = usage_metrics_from_sse_response_body(&body_bytes) {
+                record_usage_success(&state, &context, &metrics);
+            }
+            if matches!(response_mode, ResponseMode::SseToJson) {
+                out_headers.insert(
+                    axum::http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
+                return (status, out_headers, sse_to_response_json(&body_bytes)).into_response();
+            }
+        } else {
+            let value = serde_json::from_slice::<serde_json::Value>(&body_bytes).ok();
+            let metrics = value
+                .as_ref()
+                .map(usage_metrics_from_response_value)
+                .unwrap_or_default();
+            record_usage_success(&state, &context, &metrics);
+        }
+    } else {
+        record_codex_error(&state, &context, format!("upstream status {}", status));
+    }
+    (status, out_headers, body_bytes).into_response()
+}
+
 async fn codex_models_response(state: AppState, headers: HeaderMap) -> axum::response::Response {
     let body_bytes = fetch_raw_codex_models_body(&state, &headers)
         .await
@@ -5684,6 +6896,7 @@ fn preferred_model_provider_prefix(model_id: &str) -> &'static str {
         TargetModel::Grok => "grk",
         TargetModel::MiniMax => "min",
         TargetModel::Copilot => "cop",
+        TargetModel::Custom => "ctm",
         TargetModel::Codex | TargetModel::CodexModels | TargetModel::UnifiedV1Models => "cod",
     }
 }
@@ -5797,8 +7010,33 @@ async fn collect_unified_v1_models(
             "cop",
         ),
     );
+    append_unique_models(&mut models, &mut seen, custom_model_openai_entries(state));
 
     models
+}
+
+fn custom_model_openai_entries(state: &AppState) -> Vec<serde_json::Value> {
+    state
+        .custom_models
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|model| model.enabled)
+        .map(|model| {
+            serde_json::json!({
+                "id": custom_models::public_model_id(&model.alias),
+                "object": "model",
+                "created": 0,
+                "owned_by": "custom",
+                "display_name": model.display_name.clone().unwrap_or_else(|| model.alias.clone()),
+                "provider_prefix": "ctm",
+                "upstream_model": model.alias,
+                "primary_models": model.primary_models,
+                "fallback_models": model.fallback_models,
+                "load_balance": model.load_balance
+            })
+        })
+        .collect()
 }
 
 fn provider_prefixed_models(
@@ -5869,7 +7107,7 @@ fn split_provider_prefixed_model_id(model: &str) -> Option<(&str, &str)> {
 fn is_supported_provider_prefix(prefix: &str) -> bool {
     matches!(
         prefix.to_ascii_lowercase().as_str(),
-        "agw" | "gem" | "qwn" | "dsk" | "grk" | "min" | "cop" | "cod"
+        "agw" | "gem" | "qwn" | "dsk" | "grk" | "min" | "cop" | "cod" | "ctm"
     )
 }
 
@@ -8136,7 +9374,49 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             true,
         ));
     }
+    for model in state
+        .custom_models
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|model| model.enabled)
+    {
+        let display_name = model
+            .display_name
+            .clone()
+            .unwrap_or_else(|| format!("Custom {}", model.alias));
+        let description = if model.fallback_models.is_empty() {
+            format!(
+                "Custom model alias routed through {}.",
+                custom_model_route_summary(model)
+            )
+        } else {
+            format!(
+                "Custom model alias routed through {} with {} fallback model(s).",
+                custom_model_route_summary(model),
+                model.fallback_models.len()
+            )
+        };
+        models.push(codex_provider_model(
+            &custom_models::public_model_id(&model.alias),
+            &display_name,
+            &description,
+            128_000,
+            true,
+            true,
+        ));
+    }
     models
+}
+
+fn custom_model_route_summary(model: &custom_models::CustomModel) -> String {
+    model
+        .primary_models
+        .iter()
+        .filter(|target| target.enabled)
+        .map(|target| target.model.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn codex_provider_model(

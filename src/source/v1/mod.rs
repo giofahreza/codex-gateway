@@ -41,8 +41,8 @@ pub fn route_to_target(
         && *method == Method::POST
     {
         provider::validate_provider_prefix_in_body(&body)?;
-        let target = provider::target_from_request_body(&body)
-            .unwrap_or(crate::source::TargetModel::Codex);
+        let target =
+            provider::target_from_request_body(&body).unwrap_or(crate::source::TargetModel::Codex);
         if target != crate::source::TargetModel::Codex {
             return Ok(provider::convert(target, upstream_path, uri, body));
         }
@@ -280,6 +280,24 @@ mod tests {
         assert_eq!(codex.target, crate::source::TargetModel::Codex);
         let body: serde_json::Value = serde_json::from_slice(&codex.upstream_body).unwrap();
         assert_eq!(body["model"], "gpt-5.4");
+    }
+
+    #[test]
+    fn route_to_target_uses_custom_model_prefix_and_strips_it_for_lookup() {
+        let uri: Uri = "/v1/responses".parse().unwrap();
+        let routed = route_to_target(
+            "/v1/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"ctm:workhorse","input":"hi"}"#),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, crate::source::TargetModel::Custom);
+        let body: serde_json::Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "workhorse");
+        assert_eq!(body["input"], "hi");
     }
 
     #[test]
