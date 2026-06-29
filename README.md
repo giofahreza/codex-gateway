@@ -221,7 +221,7 @@ sed -n 's/^data: //p' "$tmp" \
 
 The public API surface is source-oriented:
 
-- `GET /v1/models` returns the unified model catalog across enabled providers.
+- `GET /v1/models` returns the unified model catalog across enabled providers with provider-prefixed model ids.
 - `POST /v1/responses` is the single OpenAI-compatible execution endpoint.
 - The gateway picks the target adapter from the `model` id instead of exposing provider-specific `/provider/v1/*` APIs.
 
@@ -235,7 +235,7 @@ Current routing rules:
 - Standard `gemini-*` models go to the native Gemini target.
 - Antigravity-only Gemini variants such as `gemini-3-pro-image`, `gemini-3-pro-high`, `gemini-3-pro-low`, and `gemini-2.5-flash-thinking` go to Antigravity.
 
-This means clients should stay on `/v1/*` and switch providers by changing only the `model` field.
+This means clients should stay on `/v1/*` and switch providers by changing only the `model` field. Use the prefixed `id` values returned by `/v1/models` when building model pickers or saved client config.
 
 Provider prefixes can force a specific target while keeping the upstream model id unchanged. Prefixes are exactly three letters and must not include whitespace after the colon. The gateway strips the prefix before forwarding to the provider:
 

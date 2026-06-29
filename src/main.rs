@@ -5638,7 +5638,7 @@ async fn unified_v1_models_response(
 
     let model = models
         .into_iter()
-        .find(|entry| entry.get("id").and_then(|value| value.as_str()) == Some(model_id));
+        .find(|entry| model_entry_matches_id(entry, model_id));
 
     match model {
         Some(model) => (
@@ -5660,6 +5660,34 @@ async fn unified_v1_models_response(
     }
 }
 
+fn model_entry_matches_id(entry: &serde_json::Value, model_id: &str) -> bool {
+    if entry.get("id").and_then(|value| value.as_str()) == Some(model_id) {
+        return true;
+    }
+    if model_id.contains(':') {
+        return false;
+    }
+
+    entry.get("upstream_model").and_then(|value| value.as_str()) == Some(model_id)
+        && entry
+            .get("provider_prefix")
+            .and_then(|value| value.as_str())
+            == Some(preferred_model_provider_prefix(model_id))
+}
+
+fn preferred_model_provider_prefix(model_id: &str) -> &'static str {
+    match source::v1::provider::target_from_model(model_id) {
+        TargetModel::Antigravity => "agw",
+        TargetModel::Gemini => "gem",
+        TargetModel::Qwen => "qwn",
+        TargetModel::DeepSeek => "dsk",
+        TargetModel::Grok => "grk",
+        TargetModel::MiniMax => "min",
+        TargetModel::Copilot => "cop",
+        TargetModel::Codex | TargetModel::CodexModels | TargetModel::UnifiedV1Models => "cod",
+    }
+}
+
 async fn collect_unified_v1_models(
     state: &AppState,
     headers: &HeaderMap,
@@ -5670,86 +5698,249 @@ async fn collect_unified_v1_models(
     append_unique_models(
         &mut models,
         &mut seen,
-        fetch_codex_v1_models(state, headers).await,
+        provider_prefixed_models(fetch_codex_v1_models(state, headers).await, "cod"),
     );
     append_unique_models(
         &mut models,
         &mut seen,
-        fetch_openai_models_from_response(
-            target::gemini::api::models(State(state.clone()), headers.clone())
-                .await
-                .into_response(),
-        )
-        .await,
+        provider_prefixed_models(
+            fetch_openai_models_from_response(
+                target::gemini::api::models(State(state.clone()), headers.clone())
+                    .await
+                    .into_response(),
+            )
+            .await,
+            "gem",
+        ),
     );
     append_unique_models(
         &mut models,
         &mut seen,
-        fetch_openai_models_from_response(
-            target::antigravity::api::models(State(state.clone()), headers.clone())
-                .await
-                .into_response(),
-        )
-        .await,
+        provider_prefixed_models(
+            fetch_openai_models_from_response(
+                target::antigravity::api::models(State(state.clone()), headers.clone())
+                    .await
+                    .into_response(),
+            )
+            .await,
+            "agw",
+        ),
     );
     append_unique_models(
         &mut models,
         &mut seen,
-        fetch_openai_models_from_response(
-            target::qwen::api::models(State(state.clone()), headers.clone())
-                .await
-                .into_response(),
-        )
-        .await,
+        provider_prefixed_models(
+            fetch_openai_models_from_response(
+                target::qwen::api::models(State(state.clone()), headers.clone())
+                    .await
+                    .into_response(),
+            )
+            .await,
+            "qwn",
+        ),
     );
     append_unique_models(
         &mut models,
         &mut seen,
-        fetch_openai_models_from_response(
-            target::deepseek::api::models(State(state.clone()), headers.clone())
-                .await
-                .into_response(),
-        )
-        .await,
+        provider_prefixed_models(
+            fetch_openai_models_from_response(
+                target::deepseek::api::models(State(state.clone()), headers.clone())
+                    .await
+                    .into_response(),
+            )
+            .await,
+            "dsk",
+        ),
     );
     append_unique_models(
         &mut models,
         &mut seen,
-        fetch_openai_models_from_response(if has_enabled_grok_account(state) {
-            target::grok::api::models(State(state.clone()), headers.clone())
-                .await
-                .into_response()
-        } else {
-            (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
-        })
-        .await,
+        provider_prefixed_models(
+            fetch_openai_models_from_response(if has_enabled_grok_account(state) {
+                target::grok::api::models(State(state.clone()), headers.clone())
+                    .await
+                    .into_response()
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
+            })
+            .await,
+            "grk",
+        ),
     );
     append_unique_models(
         &mut models,
         &mut seen,
-        fetch_openai_models_from_response(if has_enabled_minimax_account(state) {
-            target::minimax::api::models(State(state.clone()), headers.clone())
-                .await
-                .into_response()
-        } else {
-            (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
-        })
-        .await,
+        provider_prefixed_models(
+            fetch_openai_models_from_response(if has_enabled_minimax_account(state) {
+                target::minimax::api::models(State(state.clone()), headers.clone())
+                    .await
+                    .into_response()
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
+            })
+            .await,
+            "min",
+        ),
     );
     append_unique_models(
         &mut models,
         &mut seen,
-        fetch_openai_models_from_response(if has_enabled_copilot_account(state) {
-            target::copilot::api::models(State(state.clone()), headers.clone())
-                .await
-                .into_response()
-        } else {
-            (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
-        })
-        .await,
+        provider_prefixed_models(
+            fetch_openai_models_from_response(if has_enabled_copilot_account(state) {
+                target::copilot::api::models(State(state.clone()), headers.clone())
+                    .await
+                    .into_response()
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
+            })
+            .await,
+            "cop",
+        ),
     );
 
     models
+}
+
+fn provider_prefixed_models(
+    incoming: Vec<serde_json::Value>,
+    provider_prefix: &str,
+) -> Vec<serde_json::Value> {
+    incoming
+        .into_iter()
+        .filter_map(|model| provider_prefixed_model(model, provider_prefix))
+        .collect()
+}
+
+fn provider_prefixed_model(
+    mut model: serde_json::Value,
+    provider_prefix: &str,
+) -> Option<serde_json::Value> {
+    let id = model
+        .get("id")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())?;
+
+    let (public_id, upstream_model, public_prefix) =
+        if let Some((existing_prefix, upstream_model)) = split_provider_prefixed_model_id(&id) {
+            let upstream_model = upstream_model.to_string();
+            let public_prefix = existing_prefix.to_ascii_lowercase();
+            (id, upstream_model, public_prefix)
+        } else {
+            (
+                format!("{}:{}", provider_prefix, id),
+                id,
+                provider_prefix.to_string(),
+            )
+        };
+
+    let object = model.as_object_mut()?;
+    object.insert("id".to_string(), serde_json::Value::String(public_id));
+    object.insert(
+        "upstream_model".to_string(),
+        serde_json::Value::String(upstream_model),
+    );
+    object.insert(
+        "provider_prefix".to_string(),
+        serde_json::Value::String(public_prefix),
+    );
+
+    Some(model)
+}
+
+fn split_provider_prefixed_model_id(model: &str) -> Option<(&str, &str)> {
+    let (prefix, upstream_model) = model.split_once(':')?;
+    if !is_supported_provider_prefix(prefix) {
+        return None;
+    }
+    if upstream_model
+        .chars()
+        .next()
+        .is_none_or(|ch| ch.is_whitespace())
+    {
+        return None;
+    }
+    let upstream_model = upstream_model.trim_end();
+    if upstream_model.is_empty() {
+        return None;
+    }
+    Some((prefix, upstream_model))
+}
+
+fn is_supported_provider_prefix(prefix: &str) -> bool {
+    matches!(
+        prefix.to_ascii_lowercase().as_str(),
+        "agw" | "gem" | "qwn" | "dsk" | "grk" | "min" | "cop" | "cod"
+    )
+}
+
+#[cfg(test)]
+mod unified_model_catalog_tests {
+    use super::{
+        model_entry_matches_id, provider_prefixed_model, split_provider_prefixed_model_id,
+    };
+
+    #[test]
+    fn provider_prefixed_model_adds_public_prefix_and_keeps_upstream_model() {
+        let model = provider_prefixed_model(
+            serde_json::json!({
+                "id": "gemini-2.5-pro",
+                "object": "model"
+            }),
+            "gem",
+        )
+        .unwrap();
+
+        assert_eq!(model["id"], "gem:gemini-2.5-pro");
+        assert_eq!(model["upstream_model"], "gemini-2.5-pro");
+        assert_eq!(model["provider_prefix"], "gem");
+    }
+
+    #[test]
+    fn provider_prefixed_model_does_not_double_prefix_existing_ids() {
+        let model = provider_prefixed_model(
+            serde_json::json!({
+                "id": "cop:gpt-5.1",
+                "object": "model"
+            }),
+            "cop",
+        )
+        .unwrap();
+
+        assert_eq!(model["id"], "cop:gpt-5.1");
+        assert_eq!(model["upstream_model"], "gpt-5.1");
+        assert_eq!(model["provider_prefix"], "cop");
+    }
+
+    #[test]
+    fn split_provider_prefixed_model_id_accepts_only_supported_prefixes() {
+        assert_eq!(
+            split_provider_prefixed_model_id("min:MiniMax-M3"),
+            Some(("min", "MiniMax-M3"))
+        );
+        assert_eq!(split_provider_prefixed_model_id("openai:gpt-5.4"), None);
+        assert_eq!(
+            split_provider_prefixed_model_id("gem: gemini-2.5-pro"),
+            None
+        );
+    }
+
+    #[test]
+    fn raw_model_retrieve_fallback_uses_default_provider_route() {
+        let antigravity = serde_json::json!({
+            "id": "agw:gemini-2.5-pro",
+            "provider_prefix": "agw",
+            "upstream_model": "gemini-2.5-pro"
+        });
+        let gemini = serde_json::json!({
+            "id": "gem:gemini-2.5-pro",
+            "provider_prefix": "gem",
+            "upstream_model": "gemini-2.5-pro"
+        });
+
+        assert!(!model_entry_matches_id(&antigravity, "gemini-2.5-pro"));
+        assert!(model_entry_matches_id(&gemini, "gemini-2.5-pro"));
+        assert!(model_entry_matches_id(&antigravity, "agw:gemini-2.5-pro"));
+    }
 }
 
 fn has_enabled_grok_account(state: &AppState) -> bool {
@@ -7785,7 +7976,7 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
         .any(|account| account.enabled)
     {
         models.push(codex_provider_model(
-            "deepseek-v4-pro",
+            "dsk:deepseek-v4-pro",
             "DeepSeek V4 Pro",
             "DeepSeek model routed through the configured DeepSeek account.",
             64_000,
@@ -7793,7 +7984,7 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             true,
         ));
         models.push(codex_provider_model(
-            "deepseek-v4-flash",
+            "dsk:deepseek-v4-flash",
             "DeepSeek V4 Flash",
             "Fast DeepSeek model routed through the configured DeepSeek account.",
             64_000,
@@ -7809,7 +8000,7 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
         .any(|account| account.enabled)
     {
         models.push(codex_provider_model(
-            "gemini-2.5-pro",
+            "gem:gemini-2.5-pro",
             "Gemini 2.5 Pro",
             "Gemini model routed through the configured Gemini account.",
             1_048_576,
@@ -7817,7 +8008,7 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             true,
         ));
         models.push(codex_provider_model(
-            "gemini-2.5-flash",
+            "gem:gemini-2.5-flash",
             "Gemini 2.5 Flash",
             "Fast Gemini model routed through the configured Gemini account.",
             1_048_576,
@@ -7825,7 +8016,7 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             true,
         ));
         models.push(codex_provider_model(
-            "gemini-3-pro",
+            "gem:gemini-3-pro",
             "Gemini 3 Pro",
             "Gemini model routed through the configured Gemini account.",
             1_048_576,
@@ -7841,7 +8032,7 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
         .any(|account| account.enabled)
     {
         models.push(codex_provider_model(
-            "grok-4.3",
+            "grk:grok-4.3",
             "Grok 4.3",
             "Grok model routed through the configured xAI account.",
             256_000,
@@ -7849,7 +8040,7 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             true,
         ));
         models.push(codex_provider_model(
-            "grok-4.1",
+            "grk:grok-4.1",
             "Grok 4.1",
             "Grok model routed through the configured xAI account.",
             256_000,
@@ -7857,7 +8048,7 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             true,
         ));
         models.push(codex_provider_model(
-            "grok-3",
+            "grk:grok-3",
             "Grok 3",
             "Grok model routed through the configured xAI account.",
             131_072,
@@ -7873,7 +8064,7 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
         .any(|account| account.enabled)
     {
         models.push(codex_provider_model(
-            "MiniMax-M3",
+            "min:MiniMax-M3",
             "MiniMax M3",
             "MiniMax model routed through the configured MiniMax account.",
             512_000,
@@ -7881,7 +8072,7 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             true,
         ));
         models.push(codex_provider_model(
-            "MiniMax-M2.7",
+            "min:MiniMax-M2.7",
             "MiniMax M2.7",
             "MiniMax model routed through the configured MiniMax account.",
             512_000,
@@ -7889,7 +8080,7 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             false,
         ));
         models.push(codex_provider_model(
-            "MiniMax-M2.7-highspeed",
+            "min:MiniMax-M2.7-highspeed",
             "MiniMax M2.7 Highspeed",
             "Fast MiniMax model routed through the configured MiniMax account.",
             512_000,
