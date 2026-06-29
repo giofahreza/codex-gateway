@@ -44,6 +44,7 @@ struct AppState {
     deepseek_rr: Arc<Mutex<usize>>,
     minimax_rr: Arc<Mutex<usize>>,
     grok_rr: Arc<Mutex<usize>>,
+    copilot_rr: Arc<Mutex<usize>>,
     client: reqwest::Client,
     tokens: Arc<Mutex<Vec<UpstreamToken>>>,
     agw_accounts: Arc<Mutex<Vec<target::antigravity::accounts::AntigravityAccount>>>,
@@ -52,6 +53,7 @@ struct AppState {
     deepseek_accounts: Arc<Mutex<Vec<target::deepseek::accounts::DeepSeekAccount>>>,
     minimax_accounts: Arc<Mutex<Vec<target::minimax::accounts::MiniMaxAccount>>>,
     grok_accounts: Arc<Mutex<Vec<target::grok::accounts::GrokAccount>>>,
+    copilot_accounts: Arc<Mutex<Vec<target::copilot::accounts::CopilotAccount>>>,
     stats: Arc<Mutex<UsageStats>>,
     persisted_stats: Arc<Mutex<StatsStore>>,
     quota_cache: Arc<Mutex<Vec<Option<QuotaCacheEntry>>>>,
@@ -65,6 +67,7 @@ struct AppState {
     gemini_oauth_pending: Arc<Mutex<HashSet<String>>>,
     qwen_oauth_pending: Arc<Mutex<HashMap<String, target::qwen::auth::PendingOAuth>>>,
     grok_oauth_pending: Arc<Mutex<HashMap<String, target::grok::auth::PendingOAuth>>>,
+    copilot_oauth_pending: Arc<Mutex<HashMap<String, target::copilot::auth::PendingDevice>>>,
     admin_sessions: Arc<Mutex<HashMap<String, admin_auth::AdminSession>>>,
     disabled: Arc<Mutex<HashSet<String>>>,
     usage_history_lock: Arc<Mutex<()>>,
@@ -106,6 +109,7 @@ struct UsageStats {
     deepseek_accounts: Vec<AccountUsage>,
     minimax_accounts: Vec<AccountUsage>,
     grok_accounts: Vec<AccountUsage>,
+    copilot_accounts: Vec<AccountUsage>,
     total_requests: u64,
     total_errors: u64,
     total_prompt_total: u64,
@@ -202,6 +206,7 @@ async fn main() {
     let deepseek_accounts = target::deepseek::accounts::load_accounts(&cfg, &disabled);
     let grok_accounts = target::grok::accounts::load_accounts(&cfg, &disabled);
     let minimax_accounts = target::minimax::accounts::load_accounts(&cfg, &disabled);
+    let copilot_accounts = target::copilot::accounts::load_accounts(&cfg, &disabled);
     let persisted_stats = stats_store::load(&cfg);
     let admin_sessions = admin_auth::load_sessions(&admin_session_path(&cfg));
     let stats = build_usage_stats(
@@ -212,6 +217,7 @@ async fn main() {
         &deepseek_accounts,
         &grok_accounts,
         &minimax_accounts,
+        &copilot_accounts,
         &persisted_stats,
     );
     let quota_cache = vec![None; tokens.len()];
@@ -236,6 +242,7 @@ async fn main() {
         deepseek_rr: Arc::new(Mutex::new(0)),
         grok_rr: Arc::new(Mutex::new(0)),
         minimax_rr: Arc::new(Mutex::new(0)),
+        copilot_rr: Arc::new(Mutex::new(0)),
         client,
         tokens: Arc::new(Mutex::new(tokens)),
         agw_accounts: Arc::new(Mutex::new(agw_accounts)),
@@ -244,6 +251,7 @@ async fn main() {
         deepseek_accounts: Arc::new(Mutex::new(deepseek_accounts)),
         grok_accounts: Arc::new(Mutex::new(grok_accounts)),
         minimax_accounts: Arc::new(Mutex::new(minimax_accounts)),
+        copilot_accounts: Arc::new(Mutex::new(copilot_accounts)),
         stats: Arc::new(Mutex::new(stats)),
         persisted_stats: Arc::new(Mutex::new(persisted_stats)),
         quota_cache: Arc::new(Mutex::new(quota_cache)),
@@ -257,6 +265,7 @@ async fn main() {
         gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),
         qwen_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         grok_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
+        copilot_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         admin_sessions: Arc::new(Mutex::new(admin_sessions)),
         disabled: Arc::new(Mutex::new(disabled)),
         usage_history_lock: Arc::new(Mutex::new(())),
@@ -267,6 +276,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", any(health))
+        .route("/favicon.ico", any(favicon_route))
         .route("/", any(dashboard_root))
         .route("/dashboard", any(dashboard))
         .route("/admin/session", any(admin_session_route))
@@ -303,6 +313,10 @@ async fn main() {
         .route("/login/grok/status", any(grok_login_status_route))
         .route("/minimax/accounts.json", any(minimax_accounts_route))
         .route("/login/minimax/start", any(minimax_login_start_route))
+        .route("/copilot/accounts.json", any(copilot_accounts_route))
+        .route("/copilot/quota.json", any(copilot_quota_json_route))
+        .route("/login/copilot/start", any(copilot_login_start_route))
+        .route("/login/copilot/submit", any(copilot_login_submit_route))
         .route("/usage/summary.json", any(usage_summary_route))
         .route("/usage/history.json", any(usage_history_route))
         .route("/usage/context-history.json", any(context_history_route))
@@ -329,6 +343,10 @@ async fn main() {
 )]
 async fn health() -> impl IntoResponse {
     (StatusCode::OK, "ok")
+}
+
+async fn favicon_route() -> impl IntoResponse {
+    StatusCode::NO_CONTENT
 }
 
 /// Serves the HTML dashboard at the root path.
@@ -458,6 +476,14 @@ async fn dashboard() -> impl IntoResponse {
       }
       button:hover {
         background: var(--button-hover);
+      }
+      button:disabled,
+      button:disabled:hover {
+        background: var(--secondary-bg);
+        color: var(--muted);
+        border-color: var(--border);
+        cursor: not-allowed;
+        opacity: 0.7;
       }
       input, textarea, select {
         width: min(100%, 560px);
@@ -1461,6 +1487,7 @@ async fn dashboard() -> impl IntoResponse {
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="deepseek">DeepSeek</button>
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="minimax">MiniMax</button>
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="grok">Grok (xAI)</button>
+              <button type="button" class="provider-menu-item" role="menuitem" data-provider="copilot">GitHub Copilot</button>
             </div>
           </div>
         </div>
@@ -1580,6 +1607,13 @@ async fn dashboard() -> impl IntoResponse {
         </div>
         <div id="grokCards"></div>
       </section>
+      <section class="provider-section" aria-labelledby="copilotProviderTitle">
+        <div class="provider-badge">
+          <span id="copilotProviderTitle">GitHub Copilot</span>
+          <span class="provider-badge-count" id="copilotBadgeCount">0 accounts</span>
+        </div>
+        <div id="copilotCards"></div>
+      </section>
       </div>
     </main>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
@@ -1602,6 +1636,7 @@ async fn dashboard() -> impl IntoResponse {
       let lastAgwQuota = new Map();
       let lastGeminiQuota = new Map();
       let lastQwenQuota = new Map();
+      let lastCopilotQuota = new Map();
       let openAgwRows = new Set();
       let openGeminiRows = new Set();
       let openQwenRows = new Set();
@@ -1622,6 +1657,7 @@ async fn dashboard() -> impl IntoResponse {
         'addDeepSeekModal',
         'addMiniMaxModal',
         'addGrokModal',
+        'addCopilotModal',
         'confirmActionModal'
       ];
       const dashboardState = {
@@ -1634,7 +1670,8 @@ async fn dashboard() -> impl IntoResponse {
           qwen: [],
           deepseek: [],
           minimax: [],
-          grok: []
+          grok: [],
+          copilot: []
         },
         quotas: {
           codex: new Map(),
@@ -1643,7 +1680,8 @@ async fn dashboard() -> impl IntoResponse {
           qwen: new Map(),
           deepseek: new Map(),
           minimax: new Map(),
-          grok: new Map()
+          grok: new Map(),
+          copilot: new Map()
         }
       };
       const providerLabels = {
@@ -1653,7 +1691,8 @@ async fn dashboard() -> impl IntoResponse {
         qwen: 'Qwen',
         deepseek: 'DeepSeek',
         minimax: 'MiniMax',
-        grok: 'Grok'
+        grok: 'Grok',
+        copilot: 'GitHub Copilot'
       };
       function formatNumber(value) {
         return Number(value || 0).toLocaleString();
@@ -1829,6 +1868,8 @@ async fn dashboard() -> impl IntoResponse {
         refreshGrokQuota().then(() => refreshGrokAccounts());
         refreshMiniMaxAccounts();
         refreshMiniMaxQuota();
+        refreshCopilotQuota();
+        refreshCopilotAccounts();
       }
       function accountActionMenuId(fileName) {
         var value = String(fileName || '');
@@ -2400,11 +2441,14 @@ async fn dashboard() -> impl IntoResponse {
         rows.push(renderMetaLine('provider', label, false));
         rows.push(renderMetaLine('credential file', firstPresent(a, ['file_name']), true));
         rows.push(renderMetaLine('label', firstPresent(a, ['label', 'name']), false));
+        rows.push(renderMetaLine('login', firstPresent(a, ['login']), false));
         rows.push(renderMetaLine('email', firstPresent(a, ['email']), false));
         rows.push(renderMetaLine('account id', firstPresent(a, ['account_id', 'subject']), true));
+        rows.push(renderMetaLine('account type', firstPresent(a, ['account_type']), false));
         rows.push(renderMetaLine('project id', firstPresent(a, ['project_id']), true));
         rows.push(renderMetaLine('resource URL', firstPresent(a, ['resource_url', 'base_url', 'api_base_url']), true));
         rows.push(renderMetaLine('saved token expiry', firstPresent(a, ['expired_at']), false));
+        rows.push(renderMetaLine('copilot token expiry', firstPresent(a, ['copilot_expires_at']), false));
         rows.push(renderMetaLine('last success', firstPresent(a, ['last_success_at']), false));
         rows.push(renderMetaLine('last error', firstPresent(a, ['last_error_at']), false));
         rows.push(renderMetaLine('user id', firstPresent(a, ['user_id']), true));
@@ -2707,6 +2751,56 @@ async fn dashboard() -> impl IntoResponse {
         dashboardState.quotas.minimax = quotaMap;
         updateOverview();
         refreshMiniMaxAccounts();
+      }
+      function buildCopilotCard(a, quota) {
+        var usage = '';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.prompt_total || 0) + '</span><span class="stat-pill-label">prompt</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.input_tokens || 0) + '</span><span class="stat-pill-label">in tok</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.output_tokens || 0) + '</span><span class="stat-pill-label">out tok</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.total_tokens || 0) + '</span><span class="stat-pill-label">total tok</span></span>';
+        if (a.login) {
+          usage += '<span class="stat-pill"><span class="stat-pill-label">login</span><span class="stat-pill-value">' + escapeHtml(a.login) + '</span></span>';
+        }
+        if (a.account_type) {
+          usage += '<span class="stat-pill"><span class="stat-pill-label">type</span><span class="stat-pill-value">' + escapeHtml(a.account_type) + '</span></span>';
+        }
+        return '<div class="card">'
+          + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.login || a.account_id || 'GitHub Copilot') + '</span>' + renderAccountState(a) + renderAttentionBadge('copilot', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
+          + '<div class="stat-pills">' + usage + '</div>'
+          + renderQuotaBars(quota, { provider: 'copilot', key: a.file_name || a.label || a.login || a.account_id || '' })
+          + renderAccountModels(a, quota, 'copilot', a.file_name || a.label || a.login || a.account_id || '')
+          + renderMetaDetails(connectionRows('copilot', a), 'Connection details', 'copilot', a, a.file_name || a.label || a.login || a.account_id || '')
+          + '</div>';
+      }
+      async function refreshCopilotAccounts() {
+        var res = await adminFetch('/copilot/accounts.json');
+        if (!res) return;
+        var data = await res.json();
+        var accounts = data.accounts || [];
+        dashboardState.providers.copilot = accounts;
+        var cards = accounts.map(function(a) {
+          return buildCopilotCard(a, lastCopilotQuota.get(a.file_name || a.label) || lastCopilotQuota.get(a.login) || null);
+        }).join('');
+        document.getElementById('copilotCards').innerHTML = cards || '<div class="empty-state">No GitHub Copilot accounts</div>';
+        document.getElementById('copilotBadgeCount').textContent = accounts.length + ' accounts';
+        updateOverview();
+      }
+      async function refreshCopilotQuota() {
+        const res = await adminFetch('/copilot/quota.json');
+        if (!res) return;
+        const quota = await res.json();
+        const quotaMap = new Map();
+        (quota.accounts || []).forEach(q => {
+          if (q.file_name || q.label) quotaMap.set(q.file_name || q.label, q);
+          if (q.label) quotaMap.set(q.label, q);
+          if (q.login) quotaMap.set(q.login, q);
+        });
+        lastCopilotQuota = quotaMap;
+        dashboardState.quotas.copilot = quotaMap;
+        updateOverview();
+        refreshCopilotAccounts();
       }
       let lastGrokQuota = new Map();
       // Pick a stable key that matches whatever the accounts card uses first.
@@ -3202,6 +3296,36 @@ async fn dashboard() -> impl IntoResponse {
         </form>
       </div>
     </div>
+    <div id="addCopilotModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addCopilotTitle" aria-hidden="true" style="display:none;">
+      <div class="modal-card">
+        <h2 id="addCopilotTitle" style="margin-top:0;">Add GitHub Copilot Account</h2>
+        <p>Use GitHub device login, then submit after GitHub confirms the code. Direct token paste is available as a fallback.</p>
+        <label for="copilotLabelInput" style="margin-top:12px;">Label</label>
+        <input id="copilotLabelInput" placeholder="optional label">
+        <label for="copilotAccountTypeInput" style="margin-top:12px;">Account Type</label>
+        <select id="copilotAccountTypeInput">
+          <option value="individual">Individual</option>
+          <option value="business">Business</option>
+          <option value="enterprise">Enterprise</option>
+        </select>
+        <button type="button" onclick="startCopilotLogin()" style="margin-top:12px;">Start Device Login</button>
+        <div id="copilotStatus" class="muted" style="margin-top:8px;"></div>
+        <pre id="copilotDeviceInfo" class="auth-url"></pre>
+        <form id="copilotDeviceForm" style="margin-top:16px;">
+          <input type="hidden" name="device_code" value="">
+          <div class="modal-actions" style="margin-top:8px;">
+            <button type="submit" id="copilotDeviceSubmitBtn" disabled>Submit Authorized Device</button>
+          </div>
+        </form>
+        <p class="muted" style="margin-top:16px;">Direct fallback: paste a GitHub token that can fetch <code>/copilot_internal/v2/token</code>.</p>
+        <label for="copilotTokenInput" style="margin-top:12px;">GitHub Token</label>
+        <textarea id="copilotTokenInput" rows="5" placeholder="Paste GitHub token here"></textarea>
+        <button type="button" onclick="submitCopilotToken()" style="margin-top:12px;">Save Token</button>
+        <div class="modal-actions" style="margin-top:16px;">
+          <button type="button" id="closeCopilotModalBtn" class="secondary-button">Close</button>
+        </div>
+      </div>
+    </div>
     <script>
       async function startLogin() {
         const res = await adminFetch('/login/codex/start');
@@ -3257,6 +3381,7 @@ async fn dashboard() -> impl IntoResponse {
           else if (provider === 'deepseek') openModal('addDeepSeekModal');
           else if (provider === 'minimax') openModal('addMiniMaxModal');
           else if (provider === 'grok') openModal('addGrokModal');
+          else if (provider === 'copilot') openModal('addCopilotModal');
         });
       });
       document.getElementById('confirmActionApproveBtn').addEventListener('click', approveCredentialAction);
@@ -3497,6 +3622,107 @@ async fn dashboard() -> impl IntoResponse {
           refreshMiniMaxAccounts();
         }
       });
+      function closeCopilotModal() {
+        closeModal('addCopilotModal');
+        const form = document.getElementById('copilotDeviceForm');
+        form.querySelector('input[name="device_code"]').value = '';
+        document.getElementById('copilotDeviceSubmitBtn').disabled = true;
+        document.getElementById('copilotTokenInput').value = '';
+        document.getElementById('copilotDeviceInfo').textContent = '';
+        document.getElementById('copilotDeviceInfo').style.display = 'none';
+      }
+      async function startCopilotLogin() {
+        const label = document.getElementById('copilotLabelInput').value.trim();
+        const accountType = document.getElementById('copilotAccountTypeInput').value || 'individual';
+        document.getElementById('copilotStatus').textContent = 'Starting GitHub device login...';
+        const res = await adminFetch('/login/copilot/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ label: label || undefined, account_type: accountType })
+        });
+        if (!res) return;
+        const data = await res.json();
+        if (!data.ok) {
+          document.getElementById('copilotStatus').textContent = data.message || 'Failed to start Copilot login';
+          return;
+        }
+        const form = document.getElementById('copilotDeviceForm');
+        form.querySelector('input[name="device_code"]').value = data.device_code || '';
+        document.getElementById('copilotDeviceSubmitBtn').disabled = !data.device_code;
+        if (data.verification_uri) {
+          window.open(data.verification_uri, '_blank');
+        }
+        document.getElementById('copilotStatus').textContent = 'Enter the GitHub code, approve access, then submit the authorized device.';
+        const pre = document.getElementById('copilotDeviceInfo');
+        pre.textContent = 'Open: ' + (data.verification_uri || 'https://github.com/login/device') + '\nCode: ' + (data.user_code || '') + '\nDevice code: ' + (data.device_code || '');
+        pre.style.display = 'block';
+      }
+      async function submitCopilotToken() {
+        const githubToken = document.getElementById('copilotTokenInput').value.trim();
+        const label = document.getElementById('copilotLabelInput').value.trim();
+        const accountType = document.getElementById('copilotAccountTypeInput').value || 'individual';
+        if (!githubToken) {
+          document.getElementById('copilotStatus').textContent = 'Paste a GitHub token first.';
+          return;
+        }
+        document.getElementById('copilotStatus').textContent = 'Validating GitHub token...';
+        const res = await adminFetch('/login/copilot/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            github_token: githubToken,
+            label: label || undefined,
+            account_type: accountType
+          })
+        });
+        if (!res) return;
+        const data = await res.json();
+        document.getElementById('copilotStatus').textContent = data.message || 'Failed to save Copilot token';
+        if (data.ok) {
+          document.getElementById('copilotTokenInput').value = '';
+          refreshCopilotQuota();
+          refreshCopilotAccounts();
+        }
+      }
+      document.getElementById('closeCopilotModalBtn').addEventListener('click', () => {
+        closeCopilotModal();
+      });
+      document.getElementById('addCopilotModal').addEventListener('click', (e) => {
+        if (e.target.id === 'addCopilotModal') {
+          closeCopilotModal();
+        }
+      });
+      document.getElementById('copilotDeviceForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const label = document.getElementById('copilotLabelInput').value.trim();
+        const accountType = document.getElementById('copilotAccountTypeInput').value || 'individual';
+        const deviceCode = e.target.querySelector('input[name="device_code"]').value.trim();
+        if (!deviceCode) {
+          document.getElementById('copilotStatus').textContent = 'Start device login first.';
+          return;
+        }
+        document.getElementById('copilotStatus').textContent = 'Checking GitHub authorization...';
+        const res = await adminFetch('/login/copilot/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            device_code: deviceCode,
+            label: label,
+            account_type: accountType
+          })
+        });
+        if (!res) return;
+        const data = await res.json();
+        document.getElementById('copilotStatus').textContent = data.message || 'Login completed.';
+        if (data.ok) {
+          e.target.querySelector('input[name="device_code"]').value = '';
+          document.getElementById('copilotDeviceSubmitBtn').disabled = true;
+          document.getElementById('copilotDeviceInfo').textContent = '';
+          document.getElementById('copilotDeviceInfo').style.display = 'none';
+          refreshCopilotQuota();
+          refreshCopilotAccounts();
+        }
+      });
       document.getElementById('loginForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         const form = e.target;
@@ -3623,6 +3849,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshGrokQuota().then(() => refreshGrokAccounts());
         refreshMiniMaxAccounts();
         refreshMiniMaxQuota();
+        refreshCopilotQuota().then(() => refreshCopilotAccounts());
         if (dashboardIntervalsStarted) {
           return;
         }
@@ -3635,12 +3862,14 @@ async fn dashboard() -> impl IntoResponse {
         setInterval(() => { if (adminAuthenticated) refreshDeepSeekQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshGrokQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshMiniMaxQuota(); }, 60000);
+        setInterval(() => { if (adminAuthenticated) refreshCopilotQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshAgwAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshGeminiAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshQwenAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshDeepSeekAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshMiniMaxAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshGrokAccounts(); }, 10000);
+        setInterval(() => { if (adminAuthenticated) refreshCopilotAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshContextChart(); }, 60000);
       }
       document.getElementById('adminLoginForm').addEventListener('submit', async (e) => {
@@ -4105,6 +4334,51 @@ async fn minimax_login_start_route(
         return response;
     }
     target::minimax::admin::login_start(State(state), method, body)
+        .await
+        .into_response()
+}
+
+async fn copilot_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::copilot::admin::accounts_json(State(state))
+        .await
+        .into_response()
+}
+
+async fn copilot_quota_json_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::copilot::admin::quota_json(State(state))
+        .await
+        .into_response()
+}
+
+async fn copilot_login_start_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    method: Method,
+    body: Bytes,
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::copilot::admin::login_start(State(state), method, body)
+        .await
+        .into_response()
+}
+
+async fn copilot_login_submit_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<target::copilot::admin::LoginSubmitForm>,
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::copilot::admin::login_submit(State(state), Form(form))
         .await
         .into_response()
 }
@@ -4946,6 +5220,18 @@ async fn proxy(
                 .into_response(),
             };
         }
+        TargetModel::Copilot => {
+            return match routed.upstream_path.as_str() {
+                "anthropic/v1/messages" => {
+                    target::copilot::api::messages(State(state), headers, routed.upstream_body)
+                        .await
+                        .into_response()
+                }
+                _ => target::copilot::api::responses(State(state), headers, routed.upstream_body)
+                    .await
+                    .into_response(),
+            };
+        }
         TargetModel::Codex => {}
     }
     let upstream = match routed.target {
@@ -4960,6 +5246,7 @@ async fn proxy(
         | TargetModel::DeepSeek
         | TargetModel::Grok
         | TargetModel::MiniMax
+        | TargetModel::Copilot
         | TargetModel::CodexModels
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
@@ -5011,6 +5298,7 @@ async fn proxy(
         | TargetModel::DeepSeek
         | TargetModel::Grok
         | TargetModel::MiniMax
+        | TargetModel::Copilot
         | TargetModel::CodexModels
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
@@ -5040,6 +5328,7 @@ async fn proxy(
         | TargetModel::DeepSeek
         | TargetModel::Grok
         | TargetModel::MiniMax
+        | TargetModel::Copilot
         | TargetModel::CodexModels
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
@@ -5447,6 +5736,18 @@ async fn collect_unified_v1_models(
         })
         .await,
     );
+    append_unique_models(
+        &mut models,
+        &mut seen,
+        fetch_openai_models_from_response(if has_enabled_copilot_account(state) {
+            target::copilot::api::models(State(state.clone()), headers.clone())
+                .await
+                .into_response()
+        } else {
+            (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
+        })
+        .await,
+    );
 
     models
 }
@@ -5463,6 +5764,15 @@ fn has_enabled_grok_account(state: &AppState) -> bool {
 fn has_enabled_minimax_account(state: &AppState) -> bool {
     state
         .minimax_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|account| account.enabled)
+}
+
+fn has_enabled_copilot_account(state: &AppState) -> bool {
+    state
+        .copilot_accounts
         .lock()
         .unwrap()
         .iter()
@@ -5845,6 +6155,7 @@ fn build_usage_stats(
     deepseek_accounts: &[target::deepseek::accounts::DeepSeekAccount],
     grok_accounts: &[target::grok::accounts::GrokAccount],
     minimax_accounts: &[target::minimax::accounts::MiniMaxAccount],
+    copilot_accounts: &[target::copilot::accounts::CopilotAccount],
     persisted_stats: &StatsStore,
 ) -> UsageStats {
     let codex_accounts = tokens
@@ -6054,6 +6365,35 @@ fn build_usage_stats(
         })
         .collect();
 
+    let copilot_accounts = copilot_accounts
+        .iter()
+        .map(|account| {
+            let key = copilot_stats_key(account);
+            let stored = persisted_stats
+                .account_usage(Provider::Copilot, &key)
+                .cloned()
+                .unwrap_or_default();
+            AccountUsage {
+                key,
+                label: account.label.clone(),
+                account_id: account.account_id.clone(),
+                requests: stored.requests,
+                errors: stored.errors,
+                prompt_total: stored.prompt_total,
+                prompt_error_total: stored.prompt_error_total,
+                input_tokens: stored.input_tokens,
+                output_tokens: stored.output_tokens,
+                total_tokens: stored.total_tokens,
+                cache_tokens: stored.cache_tokens,
+                reasoning_tokens: stored.reasoning_tokens,
+                first_seen_at: stored.first_seen_at,
+                last_seen_at: stored.last_seen_at,
+                last_success_at: stored.last_success_at,
+                last_error_at: stored.last_error_at,
+            }
+        })
+        .collect();
+
     UsageStats {
         codex_accounts,
         agw_accounts,
@@ -6062,6 +6402,7 @@ fn build_usage_stats(
         deepseek_accounts,
         grok_accounts,
         minimax_accounts,
+        copilot_accounts,
         total_requests: persisted_stats.total_requests,
         total_errors: persisted_stats.total_errors,
         total_prompt_total: persisted_stats.total_prompt_total,
@@ -6084,6 +6425,7 @@ pub(crate) fn sync_usage_stats(state: &AppState) {
     let deepseek_accounts = state.deepseek_accounts.lock().unwrap().clone();
     let grok_accounts = state.grok_accounts.lock().unwrap().clone();
     let minimax_accounts = state.minimax_accounts.lock().unwrap().clone();
+    let copilot_accounts = state.copilot_accounts.lock().unwrap().clone();
     let persisted_stats = state.persisted_stats.lock().unwrap().clone();
     let mut stats = state.stats.lock().unwrap();
     *stats = build_usage_stats(
@@ -6094,6 +6436,7 @@ pub(crate) fn sync_usage_stats(state: &AppState) {
         &deepseek_accounts,
         &grok_accounts,
         &minimax_accounts,
+        &copilot_accounts,
         &persisted_stats,
     );
 }
@@ -6307,6 +6650,19 @@ pub(crate) fn minimax_stats_key(account: &target::minimax::accounts::MiniMaxAcco
         return format!("minimax:file:{}", file_name);
     }
     format!("minimax:label:{}", account.label)
+}
+
+pub(crate) fn copilot_stats_key(account: &target::copilot::accounts::CopilotAccount) -> String {
+    if !account.account_id.trim().is_empty() {
+        return format!("copilot:account_id:{}", account.account_id);
+    }
+    if !account.login.trim().is_empty() {
+        return format!("copilot:login:{}", account.login);
+    }
+    if let Some(file_name) = account.file_name.as_ref().filter(|s| !s.trim().is_empty()) {
+        return format!("copilot:file:{}", file_name);
+    }
+    format!("copilot:label:{}", account.label)
 }
 
 const ACCOUNT_SELECTION_QUOTA_EPSILON: f64 = 0.01;
@@ -6566,6 +6922,13 @@ pub(crate) fn grok_account_selection_score(
         grok_stats_key(account),
         grok_rate_limit_pressure(&account.rate_limits),
     )
+}
+
+pub(crate) fn copilot_account_selection_score(
+    state: &AppState,
+    account: &target::copilot::accounts::CopilotAccount,
+) -> AccountSelectionScore {
+    usage_backed_selection_score(state, Provider::Copilot, copilot_stats_key(account), None)
 }
 
 fn codex_quota_pressure(summary: &target::codex::quota::QuotaSummary) -> Option<f64> {
@@ -6914,6 +7277,25 @@ pub(crate) fn grok_usage_context(
             .clone()
             .or_else(|| account.email.clone())
             .unwrap_or_default(),
+        credential_file: account.file_name.clone(),
+        model,
+        request_path: request_path.into(),
+        prompt,
+    }
+}
+
+pub(crate) fn copilot_usage_context(
+    account: &target::copilot::accounts::CopilotAccount,
+    model: Option<String>,
+    request_path: impl Into<String>,
+    prompt: PromptMetrics,
+) -> UsageContext {
+    UsageContext {
+        provider: Provider::Copilot,
+        provider_name: "copilot",
+        key: copilot_stats_key(account),
+        label: account.label.clone(),
+        account_id: account.account_id.clone(),
         credential_file: account.file_name.clone(),
         model,
         request_path: request_path.into(),
@@ -7324,6 +7706,26 @@ pub(crate) fn record_minimax_success(
     record_usage_success(state, context, metrics);
 }
 
+pub(crate) fn record_copilot_request(state: &AppState, context: &UsageContext) {
+    record_request_started(state, context);
+}
+
+pub(crate) fn record_copilot_error(
+    state: &AppState,
+    context: &UsageContext,
+    message: impl Into<String>,
+) {
+    record_request_error(state, context, message);
+}
+
+pub(crate) fn record_copilot_success(
+    state: &AppState,
+    context: &UsageContext,
+    metrics: &UsageMetrics,
+) {
+    record_usage_success(state, context, metrics);
+}
+
 fn is_hop_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -7493,6 +7895,54 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             512_000,
             true,
             false,
+        ));
+    }
+    if state
+        .copilot_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|account| account.enabled)
+    {
+        models.push(codex_provider_model(
+            "cop:gpt-5.1",
+            "GitHub Copilot GPT-5.1",
+            "GitHub Copilot model routed through the configured Copilot account.",
+            200_000,
+            true,
+            true,
+        ));
+        models.push(codex_provider_model(
+            "cop:gpt-5",
+            "GitHub Copilot GPT-5",
+            "GitHub Copilot model routed through the configured Copilot account.",
+            200_000,
+            true,
+            true,
+        ));
+        models.push(codex_provider_model(
+            "cop:claude-sonnet-4",
+            "GitHub Copilot Claude Sonnet 4",
+            "GitHub Copilot Claude model routed through the configured Copilot account.",
+            200_000,
+            true,
+            true,
+        ));
+        models.push(codex_provider_model(
+            "cop:claude-sonnet-4.5",
+            "GitHub Copilot Claude Sonnet 4.5",
+            "GitHub Copilot Claude model routed through the configured Copilot account.",
+            200_000,
+            true,
+            true,
+        ));
+        models.push(codex_provider_model(
+            "cop:claude-opus-4.6-1m",
+            "GitHub Copilot Claude Opus 4.6 1M",
+            "GitHub Copilot Claude model routed through the configured Copilot account.",
+            1_000_000,
+            true,
+            true,
         ));
     }
     models

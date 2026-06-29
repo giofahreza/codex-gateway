@@ -241,7 +241,7 @@ Provider prefixes can force a specific target while keeping the upstream model i
 
 - `agw:gemini-2.5-pro` routes to Antigravity with upstream model `gemini-2.5-pro`.
 - `gem:gemini-2.5-pro` routes to the native Gemini target with upstream model `gemini-2.5-pro`.
-- Supported prefixes: `agw` Antigravity, `gem` Gemini, `qwn` Qwen, `dsk` DeepSeek, `grk` Grok, `min` MiniMax, `cod` Codex/OpenAI.
+- Supported prefixes: `agw` Antigravity, `gem` Gemini, `qwn` Qwen, `dsk` DeepSeek, `grk` Grok, `min` MiniMax, `cop` GitHub Copilot, `cod` Codex/OpenAI.
 - Old unprefixed model names still work exactly as before.
 
 Generate an image through Antigravity using the unified `/v1/responses` endpoint:
@@ -494,6 +494,71 @@ The gateway can also stand in for MiniMax's Anthropic endpoint from the official
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "MiniMax-M3[1m]",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "MiniMax-M3[1m]",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "MiniMax-M3[1m]"
+  }
+}
+```
+
+## GitHub Copilot provider
+
+GitHub Copilot is exposed as an OpenAI Responses target and as an Anthropic Messages bridge for Claude Code. Add a Copilot account from the dashboard, or start the device-code flow with:
+
+```bash
+curl -X POST http://127.0.0.1:8319/login/copilot/start \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"account_type":"individual"}'
+```
+
+Open the returned GitHub verification URL, enter the user code, then submit the returned `device_code`:
+
+```bash
+curl -X POST http://127.0.0.1:8319/login/copilot/submit \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d 'device_code=DEVICE_CODE'
+```
+
+Public routing:
+
+- Use the `cop:` prefix so Copilot GPT models do not collide with the native Codex target. The gateway strips the prefix before calling Copilot.
+- `POST /v1/responses` and `POST /codex/responses` forward the Responses body to Copilot `/responses`.
+- `POST /claude/v1/messages` and `POST /claude/messages` translate Claude Messages to Copilot Responses and return Anthropic-compatible output.
+- `GET /v1/models` and `GET /codex/models` include Copilot models when a Copilot account is enabled.
+- Copilot does not expose quota/reset counters through this token path; the dashboard shows account usage and available models instead.
+
+Example:
+
+```bash
+curl http://127.0.0.1:8319/v1/responses \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"cop:gpt-5.1","input":"say hi in one word"}'
+```
+
+### Using GitHub Copilot with the Codex CLI
+
+```toml
+[model_providers.copilot_via_gateway]
+name = "GitHub Copilot via codex-gateway"
+base_url = "http://127.0.0.1:8319/v1"
+experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+wire_api = "responses"
+
+[profiles.copilot]
+model = "cop:gpt-5.1"
+model_provider = "copilot_via_gateway"
+model_reasoning_effort = "high"
+```
+
+### Using GitHub Copilot with Claude Code
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8319/claude",
+    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
+    "ANTHROPIC_MODEL": "cop:claude-sonnet-4",
+    "ANTHROPIC_SMALL_FAST_MODEL": "cop:claude-sonnet-4"
   }
 }
 ```

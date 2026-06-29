@@ -1,5 +1,6 @@
 pub mod antigravity;
 pub mod codex;
+pub mod copilot;
 pub mod deepseek;
 pub mod gemini;
 pub mod grok;

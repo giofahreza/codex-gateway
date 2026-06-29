@@ -27,6 +27,17 @@ pub fn route_to_target(
                 response_mode: ResponseMode::Passthrough,
             });
         }
+        if crate::source::v1::provider::target_from_request_body(&body)
+            == Some(TargetModel::Copilot)
+        {
+            return Ok(RoutedRequest {
+                target: TargetModel::Copilot,
+                upstream_path: "anthropic/v1/messages".to_string(),
+                upstream_query: uri.query().map(|value| value.to_string()),
+                upstream_body: crate::source::v1::provider::strip_provider_prefix_from_body(body),
+                response_mode: ResponseMode::Passthrough,
+            });
+        }
 
         // Legacy bridge: Claude-style messages endpoint to Codex responses target.
         return Ok(codex::convert(
@@ -44,6 +55,16 @@ pub fn route_to_target(
         {
             return Ok(crate::source::v1::provider::convert(
                 TargetModel::MiniMax,
+                upstream_path,
+                uri,
+                body,
+            ));
+        }
+        if crate::source::v1::provider::target_from_request_body(&body)
+            == Some(TargetModel::Copilot)
+        {
+            return Ok(crate::source::v1::provider::convert(
+                TargetModel::Copilot,
                 upstream_path,
                 uri,
                 body,
@@ -78,6 +99,24 @@ mod tests {
         assert_eq!(routed.upstream_path, "anthropic/v1/messages");
         let body: serde_json::Value = serde_json::from_slice(&routed.upstream_body).unwrap();
         assert_eq!(body["model"], "MiniMax-M3[1m]");
+    }
+
+    #[test]
+    fn claude_v1_messages_routes_copilot_to_anthropic_bridge() {
+        let uri: Uri = "/claude/v1/messages".parse().unwrap();
+        let routed = route_to_target(
+            "/claude/v1/messages",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"cop:claude-sonnet-4.5","messages":[]}"#),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::Copilot);
+        assert_eq!(routed.upstream_path, "anthropic/v1/messages");
+        let body: serde_json::Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "claude-sonnet-4.5");
     }
 
     #[test]

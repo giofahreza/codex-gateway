@@ -15,6 +15,7 @@ pub enum TargetModel {
     DeepSeek,
     Grok,
     MiniMax,
+    Copilot,
     CodexModels,
     UnifiedV1Models,
 }

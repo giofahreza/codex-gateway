@@ -10,6 +10,7 @@ pub enum Provider {
     DeepSeek,
     Grok,
     MiniMax,
+    Copilot,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -82,6 +83,8 @@ pub struct StatsStore {
     pub grok: HashMap<String, StoredAccountUsage>,
     #[serde(default)]
     pub minimax: HashMap<String, StoredAccountUsage>,
+    #[serde(default)]
+    pub copilot: HashMap<String, StoredAccountUsage>,
 }
 
 impl Default for StatsStore {
@@ -106,6 +109,7 @@ impl Default for StatsStore {
             deepseek: HashMap::new(),
             grok: HashMap::new(),
             minimax: HashMap::new(),
+            copilot: HashMap::new(),
         }
     }
 }
@@ -120,6 +124,7 @@ impl StatsStore {
             Provider::DeepSeek => self.deepseek.get(key),
             Provider::Grok => self.grok.get(key),
             Provider::MiniMax => self.minimax.get(key),
+            Provider::Copilot => self.copilot.get(key),
         }
     }
 
@@ -136,6 +141,7 @@ impl StatsStore {
             Provider::DeepSeek => self.deepseek.entry(key).or_default(),
             Provider::Grok => self.grok.entry(key).or_default(),
             Provider::MiniMax => self.minimax.entry(key).or_default(),
+            Provider::Copilot => self.copilot.entry(key).or_default(),
         }
     }
 }
