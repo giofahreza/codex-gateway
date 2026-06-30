@@ -10,6 +10,31 @@ pub struct CopilotModelInfo {
     pub vendor: Option<String>,
     #[serde(default)]
     pub preview: Option<bool>,
+    #[serde(default)]
+    pub model_picker_category: Option<String>,
+    #[serde(default)]
+    pub policy_state: Option<String>,
+}
+
+pub fn model_billing_tier(model_picker_category: Option<&str>) -> &'static str {
+    match model_picker_category
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "powerful" | "versatile" => "premium",
+        "lightweight" => "non_premium",
+        _ => "unknown",
+    }
+}
+
+pub fn model_is_premium(model_picker_category: Option<&str>) -> Option<bool> {
+    match model_billing_tier(model_picker_category) {
+        "premium" => Some(true),
+        "non_premium" => Some(false),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -192,4 +217,20 @@ pub fn first_enabled(state: &crate::AppState) -> Option<CopilotAccount> {
         .iter()
         .find(|account| account.enabled)
         .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_billing_tier_follows_copilot_picker_category() {
+        assert_eq!(model_billing_tier(Some("powerful")), "premium");
+        assert_eq!(model_billing_tier(Some("versatile")), "premium");
+        assert_eq!(model_billing_tier(Some("lightweight")), "non_premium");
+        assert_eq!(model_billing_tier(None), "unknown");
+        assert_eq!(model_is_premium(Some("powerful")), Some(true));
+        assert_eq!(model_is_premium(Some("lightweight")), Some(false));
+        assert_eq!(model_is_premium(None), None);
+    }
 }

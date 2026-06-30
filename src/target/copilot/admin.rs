@@ -51,7 +51,11 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
                     "display_name": model.name.as_deref().unwrap_or(&model.id),
                     "upstream_model": model.id,
                     "vendor": model.vendor,
-                    "preview": model.preview
+                    "preview": model.preview,
+                    "model_picker_category": model.model_picker_category,
+                    "policy_state": model.policy_state,
+                    "billing_tier": super::accounts::model_billing_tier(model.model_picker_category.as_deref()),
+                    "premium": super::accounts::model_is_premium(model.model_picker_category.as_deref())
                 })).collect::<Vec<_>>(),
                 "requests": usage.requests,
                 "errors": usage.errors,
@@ -164,7 +168,11 @@ fn model_entries(models: &[super::accounts::CopilotModelInfo]) -> Vec<serde_json
                 "display_name": model.name.as_deref().unwrap_or(&model.id),
                 "upstream_model": model.id,
                 "vendor": model.vendor,
-                "preview": model.preview
+                "preview": model.preview,
+                "model_picker_category": model.model_picker_category,
+                "policy_state": model.policy_state,
+                "billing_tier": super::accounts::model_billing_tier(model.model_picker_category.as_deref()),
+                "premium": super::accounts::model_is_premium(model.model_picker_category.as_deref())
             })
         })
         .collect()

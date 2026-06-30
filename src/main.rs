@@ -1242,6 +1242,69 @@ async fn dashboard() -> impl IntoResponse {
         overflow-wrap: anywhere;
         word-break: break-word;
       }
+      .account-models .model-list-grouped {
+        display: grid;
+        gap: 10px;
+      }
+      .model-group {
+        display: grid;
+        gap: 6px;
+      }
+      .model-group-title {
+        color: var(--secondary-text);
+        font-size: 12px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+      .model-chip-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .model-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        max-width: 100%;
+        padding: 4px 7px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface);
+        color: var(--text);
+        font-size: 12px;
+        line-height: 1.3;
+      }
+      .model-chip-name {
+        overflow-wrap: anywhere;
+      }
+      .model-badge {
+        flex: 0 0 auto;
+        padding: 1px 5px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+      .model-badge-premium {
+        border-color: rgba(217,119,6,0.45);
+        background: rgba(217,119,6,0.12);
+        color: #f59e0b;
+      }
+      .model-badge-non-premium {
+        border-color: rgba(34,197,94,0.35);
+        background: rgba(34,197,94,0.10);
+        color: #22c55e;
+      }
+      .model-badge-unknown {
+        border-color: rgba(148,163,184,0.35);
+        background: rgba(148,163,184,0.10);
+      }
+      .model-badge-category,
+      .model-badge-policy {
+        text-transform: none;
+      }
       .model-count {
         color: var(--muted);
         font-weight: 600;
@@ -2678,25 +2741,109 @@ async fn dashboard() -> impl IntoResponse {
         var id = model.model_id || model.id || model.slug || model.model || model.model_name || model.name || '';
         return String(id).trim();
       }
-      function appendModelLabels(out, seen, models) {
+      function modelEntry(model) {
+        var label = modelLabel(model);
+        if (!label) return null;
+        if (typeof model === 'string') {
+          return { label: label };
+        }
+        return {
+          label: label,
+          displayName: model.display_name || model.name || label,
+          vendor: model.vendor || '',
+          preview: model.preview === true,
+          billingTier: String(model.billing_tier || model.billing_class || '').trim(),
+          premium: typeof model.premium === 'boolean' ? model.premium : null,
+          category: String(model.model_picker_category || '').trim(),
+          policyState: String(model.policy_state || '').trim()
+        };
+      }
+      function appendModelEntries(out, seen, models) {
         if (!models || !models.length) return;
         models.forEach(function(model) {
-          var label = modelLabel(model);
-          if (!label || seen.has(label)) return;
-          seen.add(label);
-          out.push(label);
+          var entry = modelEntry(model);
+          if (!entry || seen.has(entry.label)) return;
+          seen.add(entry.label);
+          out.push(entry);
         });
       }
+      function copilotModelGroup(entry) {
+        var tier = String(entry.billingTier || '').toLowerCase();
+        if (tier === 'premium' || entry.premium === true) return 'premium';
+        if (tier === 'non_premium' || tier === 'non-premium' || entry.premium === false) return 'non_premium';
+        return 'unknown';
+      }
+      function renderModelBadge(text, cls) {
+        return text ? '<span class="model-badge ' + cls + '">' + escapeHtml(text) + '</span>' : '';
+      }
+      function renderCopilotModelChip(entry) {
+        var group = copilotModelGroup(entry);
+        var titleParts = [];
+        if (entry.displayName && entry.displayName !== entry.label) titleParts.push(entry.displayName);
+        if (entry.vendor) titleParts.push(entry.vendor);
+        if (entry.category) titleParts.push(entry.category);
+        if (entry.policyState) titleParts.push('policy ' + entry.policyState);
+        var badge = group === 'premium'
+          ? renderModelBadge('premium', 'model-badge-premium')
+          : group === 'non_premium'
+            ? renderModelBadge('non-premium', 'model-badge-non-premium')
+            : renderModelBadge('unclassified', 'model-badge-unknown');
+        if (entry.category) badge += renderModelBadge(entry.category, 'model-badge-category');
+        if (entry.policyState) badge += renderModelBadge(entry.policyState, 'model-badge-policy');
+        if (entry.preview) badge += renderModelBadge('preview', 'model-badge-category');
+        return '<span class="model-chip" title="' + escapeHtml(titleParts.join(' | ')) + '"><span class="model-chip-name">' + escapeHtml(entry.label) + '</span>' + badge + '</span>';
+      }
+      function renderCopilotModelGroups(entries) {
+        var groups = [
+          { key: 'premium', title: 'Premium' },
+          { key: 'non_premium', title: 'Non-premium' },
+          { key: 'unknown', title: 'Unclassified' }
+        ];
+        var html = '<div class="model-list model-list-grouped">';
+        groups.forEach(function(group) {
+          var items = entries.filter(function(entry) { return copilotModelGroup(entry) === group.key; });
+          if (!items.length) return;
+          html += '<div class="model-group"><div class="model-group-title">' + group.title + ' (' + items.length + ')</div><div class="model-chip-list">'
+            + items.map(renderCopilotModelChip).join('')
+            + '</div></div>';
+        });
+        return html + '</div>';
+      }
+      function modelSummaryCounts(entries, provider) {
+        if (provider !== 'copilot') return '';
+        var premium = 0;
+        var nonPremium = 0;
+        var unknown = 0;
+        entries.forEach(function(entry) {
+          var group = copilotModelGroup(entry);
+          if (group === 'premium') premium += 1;
+          else if (group === 'non_premium') nonPremium += 1;
+          else unknown += 1;
+        });
+        var parts = [];
+        if (premium) parts.push(premium + ' premium');
+        if (nonPremium) parts.push(nonPremium + ' non-premium');
+        if (unknown) parts.push(unknown + ' unclassified');
+        return parts.length ? ' - ' + parts.join(', ') : '';
+      }
+      function renderModelList(entries, provider) {
+        if (provider === 'copilot') {
+          return renderCopilotModelGroups(entries);
+        }
+        return '<span class="model-list">' + entries.map(function(entry) {
+          return escapeHtml(entry.label);
+        }).join(' | ') + '</span>';
+      }
       function renderAccountModels(a, quota, provider, fallbackKey) {
-        var labels = [];
+        var entries = [];
         var seen = new Set();
-        appendModelLabels(labels, seen, a && a.models);
-        appendModelLabels(labels, seen, quota && quota.available_models);
-        appendModelLabels(labels, seen, quota && quota.models);
-        appendModelLabels(labels, seen, quota && quota.data);
+        appendModelEntries(entries, seen, a && a.models);
+        appendModelEntries(entries, seen, quota && quota.available_models);
+        appendModelEntries(entries, seen, quota && quota.models);
+        appendModelEntries(entries, seen, quota && quota.data);
         var key = accountDetailStateKey(provider || 'account', a, fallbackKey);
-        return labels.length
-          ? '<details class="muted account-models"' + detailToggleAttrs('models', key) + '><summary>Models <span class="model-count">(' + labels.length + ')</span></summary><span class="model-list">' + labels.map(escapeHtml).join(' | ') + '</span></details>'
+        return entries.length
+          ? '<details class="muted account-models"' + detailToggleAttrs('models', key) + '><summary>Models <span class="model-count">(' + entries.length + modelSummaryCounts(entries, provider) + ')</span></summary>' + renderModelList(entries, provider) + '</details>'
           : '';
       }
       function buildCard(a, quota) {

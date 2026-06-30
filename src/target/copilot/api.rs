@@ -82,6 +82,8 @@ pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) ->
                 name: Some((*name).to_string()),
                 vendor: Some("copilot".to_string()),
                 preview: None,
+                model_picker_category: None,
+                policy_state: None,
             })
             .collect(),
     };
@@ -480,6 +482,15 @@ pub async fn fetch_models(
                     .and_then(|value| value.as_str())
                     .map(|value| value.to_string()),
                 preview: item.get("preview").and_then(|value| value.as_bool()),
+                model_picker_category: item
+                    .get("model_picker_category")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string()),
+                policy_state: item
+                    .get("policy")
+                    .and_then(|value| value.get("state"))
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string()),
             })
         })
         .collect())
@@ -497,7 +508,11 @@ fn models_to_openai_entries(models: &[CopilotModelInfo]) -> Vec<Value> {
                 "display_name": model.name.as_deref().unwrap_or(&model.id),
                 "upstream_model": model.id,
                 "vendor": model.vendor,
-                "preview": model.preview
+                "preview": model.preview,
+                "model_picker_category": model.model_picker_category,
+                "policy_state": model.policy_state,
+                "billing_tier": super::accounts::model_billing_tier(model.model_picker_category.as_deref()),
+                "premium": super::accounts::model_is_premium(model.model_picker_category.as_deref())
             })
         })
         .collect()
@@ -1095,11 +1110,15 @@ mod tests {
             name: Some("GPT-5.1".to_string()),
             vendor: Some("openai".to_string()),
             preview: Some(false),
+            model_picker_category: Some("powerful".to_string()),
+            policy_state: Some("enabled".to_string()),
         }];
 
         let entries = models_to_openai_entries(&models);
         assert_eq!(entries[0]["id"], "cop:gpt-5.1");
         assert_eq!(entries[0]["upstream_model"], "gpt-5.1");
+        assert_eq!(entries[0]["billing_tier"], "premium");
+        assert_eq!(entries[0]["premium"], true);
     }
 
     #[test]
