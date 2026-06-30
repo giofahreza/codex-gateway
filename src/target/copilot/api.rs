@@ -152,6 +152,18 @@ pub async fn responses(
                 .into_response()
         }
     };
+    if !super::accounts::is_app_accessible_model(&model) {
+        return (
+            StatusCode::NOT_FOUND,
+            [("Content-Type", "application/json")],
+            crate::source::v1::response::openai_error_body(
+                &format!("The model '{}' does not exist", model),
+                "invalid_request_error",
+                Some("model_not_found"),
+            ),
+        )
+            .into_response();
+    }
     sanitize_responses_payload(&mut raw);
     let account = match super::accounts::pick_account(&state) {
         Some(account) => account,
@@ -368,6 +380,17 @@ pub async fn messages(
                 .into_response()
         }
     };
+    if !super::accounts::is_app_accessible_model(&model) {
+        return (
+            StatusCode::NOT_FOUND,
+            [("Content-Type", "application/json")],
+            anthropic_error_body(
+                "not_found_error",
+                &format!("The model '{}' does not exist", model),
+            ),
+        )
+            .into_response();
+    }
     let account = match super::accounts::pick_account(&state) {
         Some(account) => account,
         None => {
