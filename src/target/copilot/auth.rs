@@ -12,7 +12,7 @@ const GITHUB_APP_SCOPES: &str = "read:user";
 
 const COPILOT_VERSION: &str = "0.43.0";
 const VSCODE_VERSION: &str = "1.114.0";
-const API_VERSION: &str = "2025-04-01";
+const API_VERSION: &str = "2026-03-10";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DeviceCodeResponse {
