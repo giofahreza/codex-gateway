@@ -153,9 +153,7 @@ pub async fn get_github_user(
 ) -> Result<GitHubUser, String> {
     let resp = client
         .get(format!("{}/user", GITHUB_API_BASE_URL))
-        .header("Authorization", format!("token {}", github_token.trim()))
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/json")
+        .headers(github_headers(github_token))
         .timeout(Duration::from_secs(30))
         .send()
         .await
@@ -364,7 +362,7 @@ fn github_headers(github_token: &str) -> HeaderMap {
     insert_header(
         &mut headers,
         "Authorization",
-        &format!("token {}", github_token),
+        &format!("token {}", github_token.trim()),
     );
     insert_header(&mut headers, "Content-Type", "application/json");
     insert_header(&mut headers, "Accept", "application/json");
