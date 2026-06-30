@@ -588,7 +588,7 @@ Public routing:
 - `POST /v1/responses` and `POST /codex/responses` forward the Responses body to Copilot `/responses`.
 - `POST /claude/v1/messages` and `POST /claude/messages` translate Claude Messages to Copilot Responses and return Anthropic-compatible output.
 - `GET /v1/models` and `GET /codex/models` include Copilot models when a Copilot account is enabled.
-- Copilot does not expose quota/reset counters through this token path; the dashboard shows account usage and available models instead.
+- The dashboard reads Copilot quota snapshots from GitHub's Copilot user metadata and live model availability from the Copilot `/models` endpoint.
 
 Example:
 

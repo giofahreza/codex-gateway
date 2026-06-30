@@ -72,30 +72,189 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
 }
 
 pub async fn quota_json(State(state): State<crate::AppState>) -> impl IntoResponse {
-    let accounts = state
-        .copilot_accounts
-        .lock()
-        .unwrap()
+    let accounts = state.copilot_accounts.lock().unwrap().clone();
+    let mut out = Vec::with_capacity(accounts.len());
+    for account in accounts {
+        let mut status = Vec::new();
+        let mut models = model_entries(&account.models);
+        let mut limits = Vec::new();
+        let mut raw_usage = serde_json::Value::Null;
+        let mut chat_enabled = serde_json::Value::Null;
+        let mut copilot_plan = serde_json::Value::Null;
+        let mut access_type_sku = serde_json::Value::Null;
+        let mut quota_reset_date = serde_json::Value::Null;
+
+        if account.enabled {
+            match super::auth::ensure_copilot_token(&state, &account).await {
+                Ok(copilot_token) => {
+                    match super::api::fetch_models(
+                        &state.client,
+                        &account.account_type,
+                        &copilot_token,
+                    )
+                    .await
+                    {
+                        Ok(live_models) if !live_models.is_empty() => {
+                            models = model_entries(&live_models);
+                        }
+                        Ok(_) => status.push("Copilot model endpoint returned no models".to_string()),
+                        Err(err) => status.push(err),
+                    }
+                    match super::auth::fetch_copilot_user(&state.client, &account.github_token).await
+                    {
+                        Ok(usage) => {
+                            chat_enabled = usage
+                                .get("chat_enabled")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            copilot_plan = usage
+                                .get("copilot_plan")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            access_type_sku = usage
+                                .get("access_type_sku")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            quota_reset_date = usage
+                                .get("quota_reset_date")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            limits = quota_limits_from_usage(&usage);
+                            raw_usage = usage;
+                        }
+                        Err(err) => status.push(err),
+                    }
+                }
+                Err(err) => status.push(err),
+            }
+        } else {
+            status.push("Account is disabled".to_string());
+        }
+
+        out.push(serde_json::json!({
+            "label": account.label,
+            "login": account.login,
+            "file_name": account.file_name,
+            "account_type": account.account_type,
+            "is_available": account.enabled && status.is_empty(),
+            "status_msg": if status.is_empty() {
+                "GitHub Copilot quota and models loaded from live account metadata.".to_string()
+            } else {
+                status.join(" | ")
+            },
+            "available_models": models,
+            "limits": limits,
+            "chat_enabled": chat_enabled,
+            "copilot_plan": copilot_plan,
+            "access_type_sku": access_type_sku,
+            "quota_reset_date": quota_reset_date,
+            "raw_usage": raw_usage
+        }));
+    }
+    let accounts = out;
+    axum::Json(serde_json::json!({ "accounts": accounts }))
+}
+
+fn model_entries(models: &[super::accounts::CopilotModelInfo]) -> Vec<serde_json::Value> {
+    models
         .iter()
-        .map(|account| {
+        .map(|model| {
             serde_json::json!({
-                "label": account.label,
-                "login": account.login,
-                "file_name": account.file_name,
-                "account_type": account.account_type,
-                "is_available": account.enabled,
-                "status_msg": "GitHub Copilot does not expose quota or reset counters through this token endpoint.",
-                "available_models": account.models.iter().map(|model| serde_json::json!({
-                    "model_id": format!("cop:{}", model.id),
-                    "display_name": model.name.as_deref().unwrap_or(&model.id),
-                    "upstream_model": model.id,
-                    "vendor": model.vendor,
-                    "preview": model.preview
-                })).collect::<Vec<_>>()
+                "model_id": format!("cop:{}", model.id),
+                "display_name": model.name.as_deref().unwrap_or(&model.id),
+                "upstream_model": model.id,
+                "vendor": model.vendor,
+                "preview": model.preview
             })
         })
-        .collect::<Vec<_>>();
-    axum::Json(serde_json::json!({ "accounts": accounts }))
+        .collect()
+}
+
+fn quota_limits_from_usage(usage: &serde_json::Value) -> Vec<serde_json::Value> {
+    let reset_label = usage
+        .get("quota_reset_date")
+        .and_then(|value| value.as_str())
+        .map(|value| format!("resets {}", value))
+        .unwrap_or_default();
+    let Some(snapshots) = usage.get("quota_snapshots").and_then(|value| value.as_object()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for key in ["chat", "completions", "premium_interactions"] {
+        let Some(snapshot) = snapshots.get(key) else {
+            continue;
+        };
+        out.push(quota_limit_from_snapshot(key, snapshot, &reset_label));
+    }
+    out
+}
+
+fn quota_limit_from_snapshot(
+    key: &str,
+    snapshot: &serde_json::Value,
+    reset_label: &str,
+) -> serde_json::Value {
+    let label = match key {
+        "chat" => "Chat",
+        "completions" => "Completions",
+        "premium_interactions" => "Premium interactions",
+        _ => key,
+    };
+    let unlimited = snapshot
+        .get("unlimited")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let remaining = number_field(snapshot, &["remaining", "quota_remaining"]);
+    let entitlement = number_field(snapshot, &["entitlement", "overage_entitlement"]);
+    let percent_remaining = number_field(snapshot, &["percent_remaining"]);
+    let used_percent = if unlimited {
+        0.0
+    } else {
+        percent_remaining
+            .map(|value| (100.0 - value).clamp(0.0, 100.0))
+            .unwrap_or_else(|| {
+                entitlement
+                    .filter(|value| *value > 0.0)
+                    .map(|limit| {
+                        let used = limit - remaining.unwrap_or(limit);
+                        ((used.max(0.0) / limit) * 100.0).clamp(0.0, 100.0)
+                    })
+                    .unwrap_or(0.0)
+            })
+    };
+    let used = entitlement
+        .zip(remaining)
+        .map(|(limit, rem)| (limit - rem).max(0.0));
+
+    serde_json::json!({
+        "label": label,
+        "scope": key,
+        "used_percent": used_percent,
+        "used": used,
+        "limit": entitlement,
+        "remaining": remaining,
+        "used_text": if unlimited { "unlimited".to_string() } else { compact_number(used) },
+        "limit_text": if unlimited { "unlimited".to_string() } else { compact_number(entitlement) },
+        "remaining_text": if unlimited { "unlimited".to_string() } else { compact_number(remaining) },
+        "reset_label": reset_label,
+        "unlimited": unlimited
+    })
+}
+
+fn number_field(value: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(|value| value.as_f64()))
+}
+
+fn compact_number(value: Option<f64>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    if (value.fract()).abs() < f64::EPSILON {
+        format!("{}", value as i64)
+    } else {
+        format!("{:.1}", value)
+    }
 }
 
 fn unix_to_rfc3339(value: Option<i64>) -> Option<String> {

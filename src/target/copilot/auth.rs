@@ -12,7 +12,8 @@ const GITHUB_APP_SCOPES: &str = "read:user";
 
 const COPILOT_VERSION: &str = "0.43.0";
 const VSCODE_VERSION: &str = "1.114.0";
-const API_VERSION: &str = "2026-03-10";
+const GITHUB_API_VERSION: &str = "2026-03-10";
+const COPILOT_API_VERSION: &str = "2025-04-01";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DeviceCodeResponse {
@@ -197,6 +198,31 @@ pub async fn fetch_copilot_token(
         .map_err(|err| format!("Copilot token JSON parse failed: {}", err))
 }
 
+pub async fn fetch_copilot_user(
+    client: &reqwest::Client,
+    github_token: &str,
+) -> Result<serde_json::Value, String> {
+    let resp = client
+        .get(format!("{}/copilot_internal/user", GITHUB_API_BASE_URL))
+        .headers(github_headers(github_token))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|err| format!("Copilot user request failed: {}", err))?;
+
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|err| format!("Copilot user body read failed: {}", err))?;
+    if !status.is_success() {
+        return Err(format!("Copilot user returned {}: {}", status, text));
+    }
+
+    serde_json::from_str::<serde_json::Value>(&text)
+        .map_err(|err| format!("Copilot user JSON parse failed: {}", err))
+}
+
 pub async fn ensure_copilot_token(
     state: &crate::AppState,
     account: &CopilotAccount,
@@ -238,7 +264,7 @@ pub fn copilot_headers(copilot_token: &str, vision: bool, initiator: &str) -> He
         &format!("GitHubCopilotChat/{}", COPILOT_VERSION),
     );
     insert_header(&mut headers, "openai-intent", "conversation-panel");
-    insert_header(&mut headers, "x-github-api-version", API_VERSION);
+    insert_header(&mut headers, "x-github-api-version", COPILOT_API_VERSION);
     insert_header(&mut headers, "x-request-id", &Uuid::new_v4().to_string());
     insert_header(
         &mut headers,
@@ -381,7 +407,7 @@ fn github_headers(github_token: &str) -> HeaderMap {
         "User-Agent",
         &format!("GitHubCopilotChat/{}", COPILOT_VERSION),
     );
-    insert_header(&mut headers, "x-github-api-version", API_VERSION);
+    insert_header(&mut headers, "x-github-api-version", GITHUB_API_VERSION);
     insert_header(
         &mut headers,
         "x-vscode-user-agent-library-version",
