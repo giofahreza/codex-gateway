@@ -13,11 +13,17 @@ use super::accounts::{CopilotAccount, CopilotModelInfo};
 
 const REQUEST_TIMEOUT_SECS: u64 = 180;
 const MODEL_FALLBACKS: &[(&str, &str)] = &[
-    ("gpt-5.1", "GPT-5.1"),
-    ("gpt-5", "GPT-5"),
+    ("gpt-3.5-turbo", "GPT 3.5 Turbo"),
+    ("gpt-3.5-turbo-0613", "GPT 3.5 Turbo"),
+    ("gpt-4-o-preview", "GPT-4o"),
     ("gpt-4.1", "GPT-4.1"),
-    ("claude-sonnet-4.5", "Claude Sonnet 4.5"),
-    ("claude-opus-4.6-1m", "Claude Opus 4.6 1M"),
+    ("gpt-4.1-2025-04-14", "GPT-4.1"),
+    ("gpt-4o", "GPT-4o"),
+    ("gpt-4o-2024-05-13", "GPT-4o"),
+    ("gpt-4o-2024-08-06", "GPT-4o"),
+    ("gpt-4o-2024-11-20", "GPT-4o"),
+    ("gpt-4o-mini", "GPT-4o mini"),
+    ("gpt-4o-mini-2024-07-18", "GPT-4o mini"),
 ];
 
 pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -228,6 +234,47 @@ pub async fn responses(
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
         let message = format!("Copilot returned {}: {}", status, text);
+        if should_try_chat_completions_fallback(status, &text, wants_stream, &raw) {
+            match chat_completions_fallback_response(
+                &state.client,
+                &account,
+                &copilot_token,
+                &raw,
+                &model,
+                responses_payload_has_images(&raw),
+            )
+            .await
+            {
+                Ok(value) => {
+                    let usage = crate::usage_metrics_from_response_value(&value);
+                    crate::record_copilot_success(&state, &context, &usage);
+                    return (
+                        StatusCode::OK,
+                        [("Content-Type", "application/json")],
+                        serde_json::to_vec(&value).unwrap_or_default(),
+                    )
+                        .into_response();
+                }
+                Err(fallback_message) => {
+                    let combined = format!("{} | chat fallback: {}", message, fallback_message);
+                    crate::record_copilot_error(&state, &context, &combined);
+                    return (
+                        status,
+                        [("Content-Type", "application/json")],
+                        crate::source::v1::response::openai_error_body(
+                            &combined,
+                            if status.is_client_error() {
+                                "invalid_request_error"
+                            } else {
+                                "server_error"
+                            },
+                            None,
+                        ),
+                    )
+                        .into_response();
+                }
+            }
+        }
         crate::record_copilot_error(&state, &context, &message);
         return (
             status,
@@ -471,6 +518,9 @@ pub async fn fetch_models(
             if id.is_empty() {
                 return None;
             }
+            if !super::accounts::is_app_accessible_model(id) {
+                return None;
+            }
             Some(CopilotModelInfo {
                 id: id.to_string(),
                 name: item
@@ -499,6 +549,7 @@ pub async fn fetch_models(
 fn models_to_openai_entries(models: &[CopilotModelInfo]) -> Vec<Value> {
     models
         .iter()
+        .filter(|model| super::accounts::is_app_accessible_model(&model.id))
         .map(|model| {
             json!({
                 "id": prefixed_model_id(&model.id),
@@ -513,7 +564,8 @@ fn models_to_openai_entries(models: &[CopilotModelInfo]) -> Vec<Value> {
                 "policy_state": model.policy_state,
                 "billing_tier": super::accounts::model_billing_tier(&model.id, model.model_picker_category.as_deref()),
                 "premium": super::accounts::model_is_premium(&model.id, model.model_picker_category.as_deref()),
-                "utility_model": super::accounts::is_utility_model(&model.id)
+                "utility_model": super::accounts::is_utility_model(&model.id),
+                "app_accessible": super::accounts::is_app_accessible_model(&model.id)
             })
         })
         .collect()
@@ -578,6 +630,247 @@ async fn post_copilot_responses(
         .send()
         .await
         .map_err(|err| format!("Copilot responses request failed: {}", err))
+}
+
+async fn chat_completions_fallback_response(
+    client: &reqwest::Client,
+    account: &CopilotAccount,
+    copilot_token: &str,
+    raw: &Value,
+    model: &str,
+    vision: bool,
+) -> Result<Value, String> {
+    let chat_payload = responses_to_chat_completions_payload(raw, model)?;
+    let chat_body = Bytes::from(
+        serde_json::to_vec(&chat_payload)
+            .map_err(|err| format!("Copilot chat payload serialize failed: {}", err))?,
+    );
+    let resp = post_copilot_chat_completions(client, account, copilot_token, &chat_body, vision)
+        .await?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|err| format!("Copilot chat body read failed: {}", err))?;
+    if !status.is_success() {
+        return Err(format!("Copilot chat returned {}: {}", status, text));
+    }
+    let chat: Value = serde_json::from_str(&text)
+        .map_err(|err| format!("invalid Copilot chat response: {}", err))?;
+    Ok(chat_completion_to_response(&chat, model))
+}
+
+async fn post_copilot_chat_completions(
+    client: &reqwest::Client,
+    account: &CopilotAccount,
+    copilot_token: &str,
+    body: &Bytes,
+    vision: bool,
+) -> Result<reqwest::Response, String> {
+    let url = format!(
+        "{}/chat/completions",
+        super::auth::copilot_base_url(&account.account_type)
+    );
+    client
+        .post(url)
+        .headers(super::auth::copilot_headers(copilot_token, vision, "user"))
+        .header("Accept", "application/json")
+        .header("Accept-Encoding", "identity")
+        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .body(body.clone())
+        .send()
+        .await
+        .map_err(|err| format!("Copilot chat request failed: {}", err))
+}
+
+fn should_try_chat_completions_fallback(
+    status: StatusCode,
+    body: &str,
+    wants_stream: bool,
+    raw: &Value,
+) -> bool {
+    if wants_stream || !status.is_client_error() || responses_payload_has_images(raw) {
+        return false;
+    }
+    if raw.get("tools").is_some() {
+        return false;
+    }
+    body.contains("unsupported_api_for_model") || body.contains("model_not_supported")
+}
+
+fn responses_to_chat_completions_payload(raw: &Value, model: &str) -> Result<Value, String> {
+    let mut messages = Vec::new();
+    if let Some(instructions) = raw.get("instructions").and_then(|value| value.as_str()) {
+        if !instructions.trim().is_empty() {
+            messages.push(json!({"role": "system", "content": instructions}));
+        }
+    }
+    if let Some(input_messages) = raw.get("messages").and_then(|value| value.as_array()) {
+        for message in input_messages {
+            append_chat_message(&mut messages, message);
+        }
+    } else if let Some(input) = raw.get("input") {
+        append_responses_input_as_chat(&mut messages, input);
+    }
+    if messages.is_empty() {
+        return Err("input is required for chat fallback".to_string());
+    }
+
+    let mut out = Map::new();
+    out.insert("model".to_string(), Value::String(model.to_string()));
+    out.insert("messages".to_string(), Value::Array(messages));
+    if let Some(value) = raw.get("max_output_tokens").or_else(|| raw.get("max_tokens")) {
+        out.insert("max_tokens".to_string(), value.clone());
+    }
+    copy_if_present(raw, &mut out, "temperature");
+    copy_if_present(raw, &mut out, "top_p");
+    copy_if_present(raw, &mut out, "stop");
+    out.insert("stream".to_string(), Value::Bool(false));
+    Ok(Value::Object(out))
+}
+
+fn append_responses_input_as_chat(messages: &mut Vec<Value>, input: &Value) {
+    match input {
+        Value::String(text) => {
+            if !text.trim().is_empty() {
+                messages.push(json!({"role": "user", "content": text}));
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                append_chat_message(messages, item);
+            }
+        }
+        Value::Object(_) => append_chat_message(messages, input),
+        _ => {}
+    }
+}
+
+fn append_chat_message(messages: &mut Vec<Value>, message: &Value) {
+    let role = message
+        .get("role")
+        .and_then(|value| value.as_str())
+        .unwrap_or("user");
+    let content = message
+        .get("content")
+        .or_else(|| message.get("text"))
+        .or_else(|| message.get("input_text"))
+        .or_else(|| message.get("output_text"));
+    let Some(content) = content else {
+        return;
+    };
+    let content = chat_content_from_value(content);
+    if content_is_empty(&content) {
+        return;
+    }
+    messages.push(json!({
+        "role": if role == "assistant" || role == "system" { role } else { "user" },
+        "content": content
+    }));
+}
+
+fn chat_content_from_value(value: &Value) -> Value {
+    match value {
+        Value::String(_) => value.clone(),
+        Value::Array(parts) => {
+            let mut text_parts = Vec::new();
+            for part in parts {
+                if let Some(text) = part
+                    .get("text")
+                    .or_else(|| part.get("input_text"))
+                    .or_else(|| part.get("output_text"))
+                    .and_then(|value| value.as_str())
+                {
+                    if !text.trim().is_empty() {
+                        text_parts.push(text);
+                    }
+                }
+            }
+            Value::String(text_parts.join("\n\n"))
+        }
+        _ => Value::String(value.to_string()),
+    }
+}
+
+fn content_is_empty(value: &Value) -> bool {
+    value
+        .as_str()
+        .map(|text| text.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn chat_completion_to_response(chat: &Value, model: &str) -> Value {
+    let output_text = chat_output_text(chat);
+    let usage = chat_usage_to_responses_usage(chat.get("usage"));
+    json!({
+        "id": chat.get("id").and_then(|value| value.as_str()).unwrap_or("resp_copilot_chat"),
+        "object": "response",
+        "created_at": chat.get("created").and_then(|value| value.as_i64()).unwrap_or_else(|| chrono::Utc::now().timestamp()),
+        "status": "completed",
+        "model": model,
+        "output": [{
+            "id": "msg_copilot_chat",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": output_text
+            }]
+        }],
+        "output_text": output_text,
+        "usage": usage
+    })
+}
+
+fn chat_output_text(chat: &Value) -> String {
+    let Some(choices) = chat.get("choices").and_then(|value| value.as_array()) else {
+        return String::new();
+    };
+    choices
+        .iter()
+        .filter_map(|choice| choice.get("message"))
+        .filter_map(|message| message.get("content"))
+        .filter_map(|content| {
+            if let Some(text) = content.as_str() {
+                Some(text.to_string())
+            } else if let Some(parts) = content.as_array() {
+                Some(
+                    parts
+                        .iter()
+                        .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n\n"),
+                )
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
+    let usage = usage.unwrap_or(&Value::Null);
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(input_tokens + output_tokens);
+    json!({
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens
+    })
 }
 
 async fn stream_native_responses(
@@ -1107,20 +1400,21 @@ mod tests {
     #[test]
     fn models_are_exposed_with_copilot_prefix() {
         let models = vec![CopilotModelInfo {
-            id: "gpt-5.1".to_string(),
-            name: Some("GPT-5.1".to_string()),
+            id: "gpt-4.1".to_string(),
+            name: Some("GPT-4.1".to_string()),
             vendor: Some("openai".to_string()),
             preview: Some(false),
-            model_picker_category: Some("powerful".to_string()),
+            model_picker_category: Some("versatile".to_string()),
             policy_state: Some("enabled".to_string()),
         }];
 
         let entries = models_to_openai_entries(&models);
-        assert_eq!(entries[0]["id"], "cop:gpt-5.1");
-        assert_eq!(entries[0]["upstream_model"], "gpt-5.1");
-        assert_eq!(entries[0]["billing_tier"], "premium");
-        assert_eq!(entries[0]["premium"], true);
-        assert_eq!(entries[0]["utility_model"], false);
+        assert_eq!(entries[0]["id"], "cop:gpt-4.1");
+        assert_eq!(entries[0]["upstream_model"], "gpt-4.1");
+        assert_eq!(entries[0]["billing_tier"], "non_premium");
+        assert_eq!(entries[0]["premium"], false);
+        assert_eq!(entries[0]["utility_model"], true);
+        assert_eq!(entries[0]["app_accessible"], true);
     }
 
     #[test]
@@ -1179,5 +1473,48 @@ mod tests {
         assert!(payload.get("service_tier").is_none());
         assert_eq!(payload["tools"].as_array().unwrap().len(), 1);
         assert_eq!(payload["tools"][0]["type"], "function");
+    }
+
+    #[test]
+    fn responses_to_chat_payload_maps_simple_input() {
+        let payload = json!({
+            "model": "gpt-4.1",
+            "instructions": "Be terse.",
+            "input": "Reply pong.",
+            "max_output_tokens": 16
+        });
+
+        let chat = responses_to_chat_completions_payload(&payload, "gpt-4.1").unwrap();
+        assert_eq!(chat["model"], "gpt-4.1");
+        assert_eq!(chat["max_tokens"], 16);
+        assert_eq!(chat["messages"][0]["role"], "system");
+        assert_eq!(chat["messages"][1]["role"], "user");
+        assert_eq!(chat["messages"][1]["content"], "Reply pong.");
+    }
+
+    #[test]
+    fn chat_completion_to_response_maps_text_and_usage() {
+        let chat = json!({
+            "id": "chatcmpl_1",
+            "created": 123,
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "pong"
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 1,
+                "total_tokens": 3
+            }
+        });
+
+        let response = chat_completion_to_response(&chat, "gpt-4.1");
+        assert_eq!(response["id"], "chatcmpl_1");
+        assert_eq!(response["model"], "gpt-4.1");
+        assert_eq!(response["output_text"], "pong");
+        assert_eq!(response["usage"]["input_tokens"], 2);
+        assert_eq!(response["usage"]["output_tokens"], 1);
     }
 }

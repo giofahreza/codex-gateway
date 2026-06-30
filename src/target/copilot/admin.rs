@@ -46,7 +46,7 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
                 "enabled": account.enabled,
                 "account_type": account.account_type,
                 "copilot_expires_at": unix_to_rfc3339(account.copilot_expires_at),
-                "models": account.models.iter().map(|model| serde_json::json!({
+                "models": account.models.iter().filter(|model| super::accounts::is_app_accessible_model(&model.id)).map(|model| serde_json::json!({
                     "model_id": format!("cop:{}", model.id),
                     "display_name": model.name.as_deref().unwrap_or(&model.id),
                     "upstream_model": model.id,
@@ -56,7 +56,8 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
                     "policy_state": model.policy_state,
                     "billing_tier": super::accounts::model_billing_tier(&model.id, model.model_picker_category.as_deref()),
                     "premium": super::accounts::model_is_premium(&model.id, model.model_picker_category.as_deref()),
-                    "utility_model": super::accounts::is_utility_model(&model.id)
+                    "utility_model": super::accounts::is_utility_model(&model.id),
+                    "app_accessible": super::accounts::is_app_accessible_model(&model.id)
                 })).collect::<Vec<_>>(),
                 "requests": usage.requests,
                 "errors": usage.errors,
@@ -163,6 +164,7 @@ pub async fn quota_json(State(state): State<crate::AppState>) -> impl IntoRespon
 fn model_entries(models: &[super::accounts::CopilotModelInfo]) -> Vec<serde_json::Value> {
     models
         .iter()
+        .filter(|model| super::accounts::is_app_accessible_model(&model.id))
         .map(|model| {
             serde_json::json!({
                 "model_id": format!("cop:{}", model.id),
@@ -174,7 +176,8 @@ fn model_entries(models: &[super::accounts::CopilotModelInfo]) -> Vec<serde_json
                 "policy_state": model.policy_state,
                 "billing_tier": super::accounts::model_billing_tier(&model.id, model.model_picker_category.as_deref()),
                 "premium": super::accounts::model_is_premium(&model.id, model.model_picker_category.as_deref()),
-                "utility_model": super::accounts::is_utility_model(&model.id)
+                "utility_model": super::accounts::is_utility_model(&model.id),
+                "app_accessible": super::accounts::is_app_accessible_model(&model.id)
             })
         })
         .collect()

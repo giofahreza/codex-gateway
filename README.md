@@ -589,7 +589,7 @@ Public routing:
 - `POST /claude/v1/messages` and `POST /claude/messages` translate Claude Messages to Copilot Responses and return Anthropic-compatible output.
 - `GET /v1/models` and `GET /codex/models` include Copilot models when a Copilot account is enabled.
 - The dashboard reads Copilot quota snapshots from GitHub's Copilot user metadata and live model availability from the Copilot `/models` endpoint.
-- Copilot model metadata includes `model_picker_category`, `policy_state`, `billing_tier`, `premium`, and `utility_model`; known utility models such as GPT-4.1, GPT-4o, and GPT-4o mini are grouped as non-premium before falling back to Copilot's picker category.
+- Copilot model metadata includes `model_picker_category`, `policy_state`, `billing_tier`, `premium`, `utility_model`, and `app_accessible`. The gateway only exposes Copilot models that were manually verified through this app's `/v1/responses` path; inaccessible Copilot `/models` entries are filtered out. The verified Copilot set is currently GPT-3.5 Turbo, GPT-4.1, GPT-4o, and GPT-4o mini variants, all observed as non-premium because premium-interaction quota did not decrease during curl tests.
 
 Example:
 

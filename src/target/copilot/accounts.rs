@@ -17,7 +17,7 @@ pub struct CopilotModelInfo {
 }
 
 pub fn model_billing_tier(model_id: &str, model_picker_category: Option<&str>) -> &'static str {
-    if is_utility_model(model_id) {
+    if is_observed_non_premium_model(model_id) {
         return "non_premium";
     }
 
@@ -42,20 +42,28 @@ pub fn model_is_premium(model_id: &str, model_picker_category: Option<&str>) -> 
 }
 
 pub fn is_utility_model(model_id: &str) -> bool {
+    is_observed_non_premium_model(model_id)
+}
+
+pub fn is_app_accessible_model(model_id: &str) -> bool {
+    is_observed_non_premium_model(model_id)
+}
+
+pub fn is_observed_non_premium_model(model_id: &str) -> bool {
     let id = model_id
         .trim()
         .strip_prefix("cop:")
         .unwrap_or(model_id.trim())
         .to_ascii_lowercase();
-    id == "gpt-4.1"
+    id == "gpt-3.5-turbo"
+        || id == "gpt-3.5-turbo-0613"
+        || id == "gpt-4-o-preview"
+        || id == "gpt-4.1"
         || id.starts_with("gpt-4.1-")
-        || id == "gpt-41-copilot"
         || id == "gpt-4o"
         || id.starts_with("gpt-4o-")
-        || id == "gpt-4-o-preview"
         || id == "gpt-4o-mini"
         || id.starts_with("gpt-4o-mini-")
-        || id == "gpt-5.4-nano"
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -258,19 +266,22 @@ mod tests {
     #[test]
     fn model_billing_tier_marks_utility_models_non_premium() {
         for model in [
+            "gpt-3.5-turbo",
+            "gpt-3.5-turbo-0613",
+            "gpt-4-o-preview",
             "gpt-4.1",
             "gpt-4.1-2025-04-14",
-            "gpt-41-copilot",
             "gpt-4o",
             "gpt-4o-2024-11-20",
-            "gpt-4-o-preview",
             "gpt-4o-mini",
             "gpt-4o-mini-2024-07-18",
-            "gpt-5.4-nano",
             "cop:gpt-4.1",
         ] {
             assert_eq!(model_billing_tier(model, Some("versatile")), "non_premium");
             assert_eq!(model_is_premium(model, Some("versatile")), Some(false));
+            assert!(is_app_accessible_model(model));
         }
+        assert!(!is_app_accessible_model("gpt-41-copilot"));
+        assert!(!is_app_accessible_model("trajectory-compaction"));
     }
 }
