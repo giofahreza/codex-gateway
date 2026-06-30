@@ -2754,6 +2754,7 @@ async fn dashboard() -> impl IntoResponse {
           preview: model.preview === true,
           billingTier: String(model.billing_tier || model.billing_class || '').trim(),
           premium: typeof model.premium === 'boolean' ? model.premium : null,
+          utilityModel: model.utility_model === true,
           category: String(model.model_picker_category || '').trim(),
           policyState: String(model.policy_state || '').trim()
         };
@@ -2770,7 +2771,7 @@ async fn dashboard() -> impl IntoResponse {
       function copilotModelGroup(entry) {
         var tier = String(entry.billingTier || '').toLowerCase();
         if (tier === 'premium' || entry.premium === true) return 'premium';
-        if (tier === 'non_premium' || tier === 'non-premium' || entry.premium === false) return 'non_premium';
+        if (entry.utilityModel || tier === 'non_premium' || tier === 'non-premium' || entry.premium === false) return 'non_premium';
         return 'unknown';
       }
       function renderModelBadge(text, cls) {
@@ -2788,6 +2789,7 @@ async fn dashboard() -> impl IntoResponse {
           : group === 'non_premium'
             ? renderModelBadge('non-premium', 'model-badge-non-premium')
             : renderModelBadge('unclassified', 'model-badge-unknown');
+        if (entry.utilityModel) badge += renderModelBadge('utility', 'model-badge-non-premium');
         if (entry.category) badge += renderModelBadge(entry.category, 'model-badge-category');
         if (entry.policyState) badge += renderModelBadge(entry.policyState, 'model-badge-policy');
         if (entry.preview) badge += renderModelBadge('preview', 'model-badge-category');

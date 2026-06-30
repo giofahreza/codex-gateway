@@ -511,8 +511,9 @@ fn models_to_openai_entries(models: &[CopilotModelInfo]) -> Vec<Value> {
                 "preview": model.preview,
                 "model_picker_category": model.model_picker_category,
                 "policy_state": model.policy_state,
-                "billing_tier": super::accounts::model_billing_tier(model.model_picker_category.as_deref()),
-                "premium": super::accounts::model_is_premium(model.model_picker_category.as_deref())
+                "billing_tier": super::accounts::model_billing_tier(&model.id, model.model_picker_category.as_deref()),
+                "premium": super::accounts::model_is_premium(&model.id, model.model_picker_category.as_deref()),
+                "utility_model": super::accounts::is_utility_model(&model.id)
             })
         })
         .collect()
@@ -1119,6 +1120,7 @@ mod tests {
         assert_eq!(entries[0]["upstream_model"], "gpt-5.1");
         assert_eq!(entries[0]["billing_tier"], "premium");
         assert_eq!(entries[0]["premium"], true);
+        assert_eq!(entries[0]["utility_model"], false);
     }
 
     #[test]

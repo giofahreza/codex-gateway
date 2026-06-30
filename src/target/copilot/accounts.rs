@@ -16,7 +16,11 @@ pub struct CopilotModelInfo {
     pub policy_state: Option<String>,
 }
 
-pub fn model_billing_tier(model_picker_category: Option<&str>) -> &'static str {
+pub fn model_billing_tier(model_id: &str, model_picker_category: Option<&str>) -> &'static str {
+    if is_utility_model(model_id) {
+        return "non_premium";
+    }
+
     match model_picker_category
         .unwrap_or("")
         .trim()
@@ -24,17 +28,34 @@ pub fn model_billing_tier(model_picker_category: Option<&str>) -> &'static str {
         .as_str()
     {
         "powerful" | "versatile" => "premium",
-        "lightweight" => "non_premium",
+        "lightweight" => "unknown",
         _ => "unknown",
     }
 }
 
-pub fn model_is_premium(model_picker_category: Option<&str>) -> Option<bool> {
-    match model_billing_tier(model_picker_category) {
+pub fn model_is_premium(model_id: &str, model_picker_category: Option<&str>) -> Option<bool> {
+    match model_billing_tier(model_id, model_picker_category) {
         "premium" => Some(true),
         "non_premium" => Some(false),
         _ => None,
     }
+}
+
+pub fn is_utility_model(model_id: &str) -> bool {
+    let id = model_id
+        .trim()
+        .strip_prefix("cop:")
+        .unwrap_or(model_id.trim())
+        .to_ascii_lowercase();
+    id == "gpt-4.1"
+        || id.starts_with("gpt-4.1-")
+        || id == "gpt-41-copilot"
+        || id == "gpt-4o"
+        || id.starts_with("gpt-4o-")
+        || id == "gpt-4-o-preview"
+        || id == "gpt-4o-mini"
+        || id.starts_with("gpt-4o-mini-")
+        || id == "gpt-5.4-nano"
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -225,12 +246,31 @@ mod tests {
 
     #[test]
     fn model_billing_tier_follows_copilot_picker_category() {
-        assert_eq!(model_billing_tier(Some("powerful")), "premium");
-        assert_eq!(model_billing_tier(Some("versatile")), "premium");
-        assert_eq!(model_billing_tier(Some("lightweight")), "non_premium");
-        assert_eq!(model_billing_tier(None), "unknown");
-        assert_eq!(model_is_premium(Some("powerful")), Some(true));
-        assert_eq!(model_is_premium(Some("lightweight")), Some(false));
-        assert_eq!(model_is_premium(None), None);
+        assert_eq!(model_billing_tier("claude-opus-4.7", Some("powerful")), "premium");
+        assert_eq!(model_billing_tier("claude-sonnet-4.5", Some("versatile")), "premium");
+        assert_eq!(model_billing_tier("gpt-5-mini", Some("lightweight")), "unknown");
+        assert_eq!(model_billing_tier("trajectory-compaction", None), "unknown");
+        assert_eq!(model_is_premium("claude-opus-4.7", Some("powerful")), Some(true));
+        assert_eq!(model_is_premium("gpt-5-mini", Some("lightweight")), None);
+        assert_eq!(model_is_premium("trajectory-compaction", None), None);
+    }
+
+    #[test]
+    fn model_billing_tier_marks_utility_models_non_premium() {
+        for model in [
+            "gpt-4.1",
+            "gpt-4.1-2025-04-14",
+            "gpt-41-copilot",
+            "gpt-4o",
+            "gpt-4o-2024-11-20",
+            "gpt-4-o-preview",
+            "gpt-4o-mini",
+            "gpt-4o-mini-2024-07-18",
+            "gpt-5.4-nano",
+            "cop:gpt-4.1",
+        ] {
+            assert_eq!(model_billing_tier(model, Some("versatile")), "non_premium");
+            assert_eq!(model_is_premium(model, Some("versatile")), Some(false));
+        }
     }
 }

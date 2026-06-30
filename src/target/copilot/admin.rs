@@ -54,8 +54,9 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
                     "preview": model.preview,
                     "model_picker_category": model.model_picker_category,
                     "policy_state": model.policy_state,
-                    "billing_tier": super::accounts::model_billing_tier(model.model_picker_category.as_deref()),
-                    "premium": super::accounts::model_is_premium(model.model_picker_category.as_deref())
+                    "billing_tier": super::accounts::model_billing_tier(&model.id, model.model_picker_category.as_deref()),
+                    "premium": super::accounts::model_is_premium(&model.id, model.model_picker_category.as_deref()),
+                    "utility_model": super::accounts::is_utility_model(&model.id)
                 })).collect::<Vec<_>>(),
                 "requests": usage.requests,
                 "errors": usage.errors,
@@ -171,8 +172,9 @@ fn model_entries(models: &[super::accounts::CopilotModelInfo]) -> Vec<serde_json
                 "preview": model.preview,
                 "model_picker_category": model.model_picker_category,
                 "policy_state": model.policy_state,
-                "billing_tier": super::accounts::model_billing_tier(model.model_picker_category.as_deref()),
-                "premium": super::accounts::model_is_premium(model.model_picker_category.as_deref())
+                "billing_tier": super::accounts::model_billing_tier(&model.id, model.model_picker_category.as_deref()),
+                "premium": super::accounts::model_is_premium(&model.id, model.model_picker_category.as_deref()),
+                "utility_model": super::accounts::is_utility_model(&model.id)
             })
         })
         .collect()
