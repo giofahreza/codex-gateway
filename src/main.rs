@@ -1781,6 +1781,9 @@ async fn dashboard() -> impl IntoResponse {
       };
       let activeTipEl = null;
       let activeTipTimer = null;
+      let copilotDevicePollTimer = null;
+      let copilotDevicePollInFlight = false;
+      let copilotDeviceExpiresAt = 0;
       const THEME_KEY = 'gpt-gateway-theme';
       const CONTEXT_RANGE_KEY = 'gpt-gateway-context-range';
       let pendingCredentialAction = null;
@@ -3675,7 +3678,7 @@ async fn dashboard() -> impl IntoResponse {
     <div id="addCopilotModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addCopilotTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
         <h2 id="addCopilotTitle" style="margin-top:0;">Add GitHub Copilot Account</h2>
-        <p>Use GitHub device login, then submit after GitHub confirms the code. Direct token paste is available as a fallback.</p>
+        <p>Use GitHub device login. The gateway will save the account after GitHub confirms the code. Direct token paste is available as a fallback.</p>
         <label for="copilotLabelInput" style="margin-top:12px;">Label</label>
         <input id="copilotLabelInput" placeholder="optional label">
         <label for="copilotAccountTypeInput" style="margin-top:12px;">Account Type</label>
@@ -3690,7 +3693,7 @@ async fn dashboard() -> impl IntoResponse {
         <form id="copilotDeviceForm" style="margin-top:16px;">
           <input type="hidden" name="device_code" value="">
           <div class="modal-actions" style="margin-top:8px;">
-            <button type="submit" id="copilotDeviceSubmitBtn" disabled>Submit Authorized Device</button>
+            <button type="submit" id="copilotDeviceSubmitBtn" disabled>Check Now</button>
           </div>
         </form>
         <p class="muted" style="margin-top:16px;">Direct fallback: paste a GitHub token that can fetch <code>/copilot_internal/v2/token</code>.</p>
@@ -4044,6 +4047,7 @@ async fn dashboard() -> impl IntoResponse {
         }
       });
       function closeCopilotModal() {
+        clearCopilotDevicePoll();
         closeModal('addCopilotModal');
         const form = document.getElementById('copilotDeviceForm');
         form.querySelector('input[name="device_code"]').value = '';
@@ -4052,7 +4056,87 @@ async fn dashboard() -> impl IntoResponse {
         document.getElementById('copilotDeviceInfo').textContent = '';
         document.getElementById('copilotDeviceInfo').style.display = 'none';
       }
+      function clearCopilotDevicePoll() {
+        if (copilotDevicePollTimer) {
+          clearTimeout(copilotDevicePollTimer);
+          copilotDevicePollTimer = null;
+        }
+        copilotDeviceExpiresAt = 0;
+      }
+      function copilotPendingMessage(message) {
+        var lower = String(message || '').toLowerCase();
+        return lower.indexOf('authorization_pending') !== -1 || lower.indexOf('slow_down') !== -1;
+      }
+      function scheduleCopilotDevicePoll(delayMs) {
+        if (copilotDevicePollTimer) {
+          clearTimeout(copilotDevicePollTimer);
+        }
+        copilotDevicePollTimer = setTimeout(function() {
+          copilotDevicePollTimer = null;
+          pollCopilotDevice(true);
+        }, delayMs);
+      }
+      function resetCopilotDeviceUi() {
+        const form = document.getElementById('copilotDeviceForm');
+        form.querySelector('input[name="device_code"]').value = '';
+        document.getElementById('copilotDeviceSubmitBtn').disabled = true;
+        document.getElementById('copilotDeviceInfo').textContent = '';
+        document.getElementById('copilotDeviceInfo').style.display = 'none';
+      }
+      async function pollCopilotDevice(autoPoll) {
+        const form = document.getElementById('copilotDeviceForm');
+        const label = document.getElementById('copilotLabelInput').value.trim();
+        const accountType = document.getElementById('copilotAccountTypeInput').value || 'individual';
+        const deviceCode = form.querySelector('input[name="device_code"]').value.trim();
+        if (!deviceCode) {
+          if (!autoPoll) document.getElementById('copilotStatus').textContent = 'Start device login first.';
+          return;
+        }
+        if (copilotDeviceExpiresAt && Date.now() > copilotDeviceExpiresAt) {
+          clearCopilotDevicePoll();
+          document.getElementById('copilotStatus').textContent = 'GitHub device code expired. Start device login again.';
+          document.getElementById('copilotDeviceSubmitBtn').disabled = true;
+          return;
+        }
+        if (copilotDevicePollInFlight) return;
+        copilotDevicePollInFlight = true;
+        if (!autoPoll) {
+          document.getElementById('copilotStatus').textContent = 'Checking GitHub authorization...';
+        }
+        const res = await adminFetch('/login/copilot/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            device_code: deviceCode,
+            label: label,
+            account_type: accountType
+          })
+        });
+        copilotDevicePollInFlight = false;
+        if (!res) return;
+        if (form.querySelector('input[name="device_code"]').value.trim() !== deviceCode) {
+          return;
+        }
+        const data = await res.json();
+        const message = data.message || '';
+        if (data.ok) {
+          clearCopilotDevicePoll();
+          resetCopilotDeviceUi();
+          document.getElementById('copilotStatus').textContent = message || 'GitHub Copilot account saved.';
+          refreshCopilotQuota();
+          refreshCopilotAccounts();
+          return;
+        }
+        if (copilotPendingMessage(message)) {
+          document.getElementById('copilotStatus').textContent = 'Waiting for GitHub approval... Keep this dialog open after approving the device code.';
+          scheduleCopilotDevicePoll(message.toLowerCase().indexOf('slow_down') !== -1 ? 10000 : 6000);
+          return;
+        }
+        clearCopilotDevicePoll();
+        document.getElementById('copilotStatus').textContent = message || 'Failed to save Copilot account.';
+      }
       async function startCopilotLogin() {
+        clearCopilotDevicePoll();
         const label = document.getElementById('copilotLabelInput').value.trim();
         const accountType = document.getElementById('copilotAccountTypeInput').value || 'individual';
         document.getElementById('copilotStatus').textContent = 'Starting GitHub device login...';
@@ -4070,15 +4154,20 @@ async fn dashboard() -> impl IntoResponse {
         const form = document.getElementById('copilotDeviceForm');
         form.querySelector('input[name="device_code"]').value = data.device_code || '';
         document.getElementById('copilotDeviceSubmitBtn').disabled = !data.device_code;
+        copilotDeviceExpiresAt = Date.now() + Math.max(1, Number(data.expires_in || 900)) * 1000;
         if (data.verification_uri) {
           window.open(data.verification_uri, '_blank');
         }
-        document.getElementById('copilotStatus').textContent = 'Enter the GitHub code, approve access, then submit the authorized device.';
+        document.getElementById('copilotStatus').textContent = 'Enter the GitHub code and approve access. This dialog will save the account automatically.';
         const pre = document.getElementById('copilotDeviceInfo');
         pre.textContent = 'Open: ' + (data.verification_uri || 'https://github.com/login/device') + '\nCode: ' + (data.user_code || '') + '\nDevice code: ' + (data.device_code || '');
         pre.style.display = 'block';
+        if (data.device_code) {
+          scheduleCopilotDevicePoll((Math.max(1, Number(data.interval || 5)) + 1) * 1000);
+        }
       }
       async function submitCopilotToken() {
+        clearCopilotDevicePoll();
         const githubToken = document.getElementById('copilotTokenInput').value.trim();
         const label = document.getElementById('copilotLabelInput').value.trim();
         const accountType = document.getElementById('copilotAccountTypeInput').value || 'individual';
@@ -4127,34 +4216,7 @@ async fn dashboard() -> impl IntoResponse {
       document.getElementById('customModelForm').addEventListener('submit', submitCustomModelForm);
       document.getElementById('copilotDeviceForm').addEventListener('submit', async (e) => {
         e.preventDefault();
-        const label = document.getElementById('copilotLabelInput').value.trim();
-        const accountType = document.getElementById('copilotAccountTypeInput').value || 'individual';
-        const deviceCode = e.target.querySelector('input[name="device_code"]').value.trim();
-        if (!deviceCode) {
-          document.getElementById('copilotStatus').textContent = 'Start device login first.';
-          return;
-        }
-        document.getElementById('copilotStatus').textContent = 'Checking GitHub authorization...';
-        const res = await adminFetch('/login/copilot/submit', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            device_code: deviceCode,
-            label: label,
-            account_type: accountType
-          })
-        });
-        if (!res) return;
-        const data = await res.json();
-        document.getElementById('copilotStatus').textContent = data.message || 'Login completed.';
-        if (data.ok) {
-          e.target.querySelector('input[name="device_code"]').value = '';
-          document.getElementById('copilotDeviceSubmitBtn').disabled = true;
-          document.getElementById('copilotDeviceInfo').textContent = '';
-          document.getElementById('copilotDeviceInfo').style.display = 'none';
-          refreshCopilotQuota();
-          refreshCopilotAccounts();
-        }
+        await pollCopilotDevice(false);
       });
       document.getElementById('loginForm').addEventListener('submit', async (e) => {
         e.preventDefault();
