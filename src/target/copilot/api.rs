@@ -8,6 +8,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 use std::time::Duration;
+use uuid::Uuid;
 
 use super::accounts::{CopilotAccount, CopilotModelInfo};
 
@@ -202,6 +203,31 @@ pub async fn responses(
         }
     };
 
+    if should_use_chat_completions_bridge(&raw) {
+        return match chat_completions_bridge_response(
+            &state,
+            &context,
+            &account,
+            &copilot_token,
+            &raw,
+            &model,
+            wants_stream,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(message) => {
+                crate::record_copilot_error(&state, &context, &message);
+                (
+                    StatusCode::BAD_GATEWAY,
+                    [("Content-Type", "application/json")],
+                    crate::source::v1::response::openai_error_body(&message, "server_error", None),
+                )
+                    .into_response()
+            }
+        };
+    }
+
     let body = match serde_json::to_vec(&raw) {
         Ok(value) => Bytes::from(value),
         Err(err) => {
@@ -247,26 +273,18 @@ pub async fn responses(
         let text = resp.text().await.unwrap_or_default();
         let message = format!("Copilot returned {}: {}", status, text);
         if should_try_chat_completions_fallback(status, &text, wants_stream, &raw) {
-            match chat_completions_fallback_response(
-                &state.client,
+            match chat_completions_bridge_response(
+                &state,
+                &context,
                 &account,
                 &copilot_token,
                 &raw,
                 &model,
-                responses_payload_has_images(&raw),
+                wants_stream,
             )
             .await
             {
-                Ok(value) => {
-                    let usage = crate::usage_metrics_from_response_value(&value);
-                    crate::record_copilot_success(&state, &context, &usage);
-                    return (
-                        StatusCode::OK,
-                        [("Content-Type", "application/json")],
-                        serde_json::to_vec(&value).unwrap_or_default(),
-                    )
-                        .into_response();
-                }
+                Ok(response) => return response,
                 Err(fallback_message) => {
                     let combined = format!("{} | chat fallback: {}", message, fallback_message);
                     crate::record_copilot_error(&state, &context, &combined);
@@ -434,6 +452,48 @@ pub async fn messages(
                 .into_response();
         }
     };
+
+    if should_use_chat_completions_bridge(&responses_payload) {
+        let response_value = match chat_completions_response_value(
+            &state.client,
+            &account,
+            &copilot_token,
+            &responses_payload,
+            &model,
+            false,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(message) => {
+                crate::record_copilot_error(&state, &context, &message);
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    [("Content-Type", "application/json")],
+                    anthropic_error_body("api_error", &message),
+                )
+                    .into_response();
+            }
+        };
+        let usage = crate::usage_metrics_from_response_value(&response_value);
+        crate::record_copilot_success(&state, &context, &usage);
+        let anthropic = responses_to_anthropic_message(&response_value, &model);
+        if raw
+            .get("stream")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            return anthropic_stream_response(&anthropic);
+        }
+
+        return (
+            StatusCode::OK,
+            [("Content-Type", "application/json")],
+            serde_json::to_vec(&anthropic).unwrap_or_default(),
+        )
+            .into_response();
+    }
+
     let body = Bytes::from(serde_json::to_vec(&responses_payload).unwrap_or_default());
     let resp = match post_copilot_responses(
         &state.client,
@@ -655,21 +715,86 @@ async fn post_copilot_responses(
         .map_err(|err| format!("Copilot responses request failed: {}", err))
 }
 
-async fn chat_completions_fallback_response(
+fn should_use_chat_completions_bridge(raw: &Value) -> bool {
+    !responses_payload_has_images(raw)
+}
+
+async fn chat_completions_bridge_response(
+    state: &crate::AppState,
+    context: &crate::UsageContext,
+    account: &CopilotAccount,
+    copilot_token: &str,
+    raw: &Value,
+    model: &str,
+    wants_stream: bool,
+) -> Result<axum::response::Response, String> {
+    if wants_stream {
+        let chat_payload = responses_to_chat_completions_payload(raw, model, true)?;
+        let chat_body = Bytes::from(
+            serde_json::to_vec(&chat_payload)
+                .map_err(|err| format!("Copilot chat payload serialize failed: {}", err))?,
+        );
+        let initiator = chat_payload_initiator(&chat_payload);
+        let resp = post_copilot_chat_completions(
+            &state.client,
+            account,
+            copilot_token,
+            &chat_body,
+            responses_payload_has_images(raw),
+            true,
+            initiator,
+        )
+        .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp
+                .text()
+                .await
+                .map_err(|err| format!("Copilot chat body read failed: {}", err))?;
+            return Err(format!("Copilot chat returned {}: {}", status, text));
+        }
+        return Ok(
+            stream_chat_completions_as_responses(state, context, resp, model.to_string()).await,
+        );
+    }
+
+    let value =
+        chat_completions_response_value(&state.client, account, copilot_token, raw, model, false)
+            .await?;
+    let usage = crate::usage_metrics_from_response_value(&value);
+    crate::record_copilot_success(state, context, &usage);
+    Ok((
+        StatusCode::OK,
+        [("Content-Type", "application/json")],
+        serde_json::to_vec(&value).unwrap_or_default(),
+    )
+        .into_response())
+}
+
+async fn chat_completions_response_value(
     client: &reqwest::Client,
     account: &CopilotAccount,
     copilot_token: &str,
     raw: &Value,
     model: &str,
-    vision: bool,
+    stream: bool,
 ) -> Result<Value, String> {
-    let chat_payload = responses_to_chat_completions_payload(raw, model)?;
+    let chat_payload = responses_to_chat_completions_payload(raw, model, stream)?;
     let chat_body = Bytes::from(
         serde_json::to_vec(&chat_payload)
             .map_err(|err| format!("Copilot chat payload serialize failed: {}", err))?,
     );
-    let resp = post_copilot_chat_completions(client, account, copilot_token, &chat_body, vision)
-        .await?;
+    let initiator = chat_payload_initiator(&chat_payload);
+    let resp = post_copilot_chat_completions(
+        client,
+        account,
+        copilot_token,
+        &chat_body,
+        responses_payload_has_images(raw),
+        stream,
+        initiator,
+    )
+    .await?;
     let status = resp.status();
     let text = resp
         .text()
@@ -689,6 +814,8 @@ async fn post_copilot_chat_completions(
     copilot_token: &str,
     body: &Bytes,
     vision: bool,
+    stream: bool,
+    initiator: &str,
 ) -> Result<reqwest::Response, String> {
     let url = format!(
         "{}/chat/completions",
@@ -696,8 +823,19 @@ async fn post_copilot_chat_completions(
     );
     client
         .post(url)
-        .headers(super::auth::copilot_headers(copilot_token, vision, "user"))
-        .header("Accept", "application/json")
+        .headers(super::auth::copilot_headers(
+            copilot_token,
+            vision,
+            initiator,
+        ))
+        .header(
+            "Accept",
+            if stream {
+                "text/event-stream"
+            } else {
+                "application/json"
+            },
+        )
         .header("Accept-Encoding", "identity")
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .body(body.clone())
@@ -712,16 +850,18 @@ fn should_try_chat_completions_fallback(
     wants_stream: bool,
     raw: &Value,
 ) -> bool {
-    if wants_stream || !status.is_client_error() || responses_payload_has_images(raw) {
+    if !status.is_client_error() || responses_payload_has_images(raw) {
         return false;
     }
-    if raw.get("tools").is_some() {
-        return false;
-    }
+    let _ = wants_stream;
     body.contains("unsupported_api_for_model") || body.contains("model_not_supported")
 }
 
-fn responses_to_chat_completions_payload(raw: &Value, model: &str) -> Result<Value, String> {
+fn responses_to_chat_completions_payload(
+    raw: &Value,
+    model: &str,
+    stream: bool,
+) -> Result<Value, String> {
     let mut messages = Vec::new();
     if let Some(instructions) = raw.get("instructions").and_then(|value| value.as_str()) {
         if !instructions.trim().is_empty() {
@@ -741,14 +881,30 @@ fn responses_to_chat_completions_payload(raw: &Value, model: &str) -> Result<Val
 
     let mut out = Map::new();
     out.insert("model".to_string(), Value::String(model.to_string()));
-    out.insert("messages".to_string(), Value::Array(messages));
-    if let Some(value) = raw.get("max_output_tokens").or_else(|| raw.get("max_tokens")) {
+    out.insert(
+        "messages".to_string(),
+        Value::Array(sanitize_chat_messages(messages)),
+    );
+    if let Some(value) = raw
+        .get("max_output_tokens")
+        .or_else(|| raw.get("max_tokens"))
+    {
         out.insert("max_tokens".to_string(), value.clone());
     }
     copy_if_present(raw, &mut out, "temperature");
     copy_if_present(raw, &mut out, "top_p");
     copy_if_present(raw, &mut out, "stop");
-    out.insert("stream".to_string(), Value::Bool(false));
+    copy_if_present(raw, &mut out, "parallel_tool_calls");
+    if let Some(tools) = chat_tools_from_responses_tools(raw.get("tools")) {
+        out.insert("tools".to_string(), Value::Array(tools));
+    }
+    if let Some(tool_choice) = chat_tool_choice_from_responses(raw.get("tool_choice")) {
+        out.insert("tool_choice".to_string(), tool_choice);
+    }
+    if raw.get("reasoning").is_some() {
+        out.insert("thinking".to_string(), json!({"type": "enabled"}));
+    }
+    out.insert("stream".to_string(), Value::Bool(stream));
     Ok(Value::Object(out))
 }
 
@@ -761,15 +917,93 @@ fn append_responses_input_as_chat(messages: &mut Vec<Value>, input: &Value) {
         }
         Value::Array(items) => {
             for item in items {
-                append_chat_message(messages, item);
+                append_response_input_item_as_chat(messages, item);
             }
         }
-        Value::Object(_) => append_chat_message(messages, input),
+        Value::Object(_) => append_response_input_item_as_chat(messages, input),
         _ => {}
     }
 }
 
+fn append_response_input_item_as_chat(messages: &mut Vec<Value>, item: &Value) {
+    match item
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+    {
+        "function_call" => {
+            let call_id = item
+                .get("call_id")
+                .or_else(|| item.get("id"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let name = item
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if call_id.is_empty() || name.is_empty() {
+                return;
+            }
+            let arguments = item
+                .get("arguments")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    item.get("arguments")
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "{}".to_string())
+                });
+            messages.push(json!({
+                "role": "assistant",
+                "content": Value::Null,
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": arguments
+                    }
+                }]
+            }));
+        }
+        "function_call_output" | "tool_result" => {
+            let call_id = item
+                .get("call_id")
+                .or_else(|| item.get("tool_call_id"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if call_id.is_empty() {
+                return;
+            }
+            let output = item
+                .get("output")
+                .or_else(|| item.get("content"))
+                .map(chat_tool_output_text)
+                .unwrap_or_default();
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": output
+            }));
+        }
+        "reasoning" | "compaction" => {}
+        _ => append_chat_message(messages, item),
+    }
+}
+
 fn append_chat_message(messages: &mut Vec<Value>, message: &Value) {
+    match message
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+    {
+        "function_call" | "function_call_output" | "tool_result" | "reasoning" | "compaction" => {
+            append_response_input_item_as_chat(messages, message);
+            return;
+        }
+        _ => {}
+    }
+
     let role = message
         .get("role")
         .and_then(|value| value.as_str())
@@ -779,24 +1013,42 @@ fn append_chat_message(messages: &mut Vec<Value>, message: &Value) {
         .or_else(|| message.get("text"))
         .or_else(|| message.get("input_text"))
         .or_else(|| message.get("output_text"));
-    let Some(content) = content else {
-        return;
-    };
-    let content = chat_content_from_value(content);
-    if content_is_empty(&content) {
+    let content = content
+        .map(chat_content_from_value)
+        .unwrap_or(Value::String(String::new()));
+    let tool_calls = message.get("tool_calls").and_then(|value| value.as_array());
+    if content_is_empty(&content) && tool_calls.map(|calls| calls.is_empty()).unwrap_or(true) {
         return;
     }
-    messages.push(json!({
-        "role": if role == "assistant" || role == "system" { role } else { "user" },
+
+    let role = match role {
+        "assistant" => "assistant",
+        "system" | "developer" => "system",
+        "tool" => "tool",
+        _ => "user",
+    };
+    let mut entry = json!({
+        "role": role,
         "content": content
-    }));
+    });
+    if let Some(name) = message.get("name").and_then(|value| value.as_str()) {
+        entry["name"] = json!(name);
+    }
+    if let Some(tool_call_id) = message.get("tool_call_id").and_then(|value| value.as_str()) {
+        entry["tool_call_id"] = json!(tool_call_id);
+    }
+    if let Some(tool_calls) = tool_calls {
+        entry["tool_calls"] = Value::Array(tool_calls.clone());
+    }
+    messages.push(entry);
 }
 
 fn chat_content_from_value(value: &Value) -> Value {
     match value {
         Value::String(_) => value.clone(),
         Value::Array(parts) => {
-            let mut text_parts = Vec::new();
+            let mut out = Vec::new();
+            let mut has_image = false;
             for part in parts {
                 if let Some(text) = part
                     .get("text")
@@ -805,34 +1057,277 @@ fn chat_content_from_value(value: &Value) -> Value {
                     .and_then(|value| value.as_str())
                 {
                     if !text.trim().is_empty() {
-                        text_parts.push(text);
+                        out.push(json!({"type": "text", "text": text}));
                     }
+                    continue;
+                }
+                if let Some(image_url) = chat_image_url_from_part(part) {
+                    has_image = true;
+                    out.push(json!({
+                        "type": "image_url",
+                        "image_url": { "url": image_url }
+                    }));
                 }
             }
-            Value::String(text_parts.join("\n\n"))
+            if has_image {
+                Value::Array(out)
+            } else {
+                Value::String(
+                    out.iter()
+                        .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            }
         }
         _ => Value::String(value.to_string()),
     }
 }
 
+fn chat_image_url_from_part(part: &Value) -> Option<String> {
+    if part.get("type").and_then(|value| value.as_str()) != Some("input_image") {
+        return None;
+    }
+    if let Some(url) = part.get("image_url").and_then(|value| value.as_str()) {
+        return Some(url.to_string());
+    }
+    part.get("image_url")
+        .and_then(|value| value.get("url"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
 fn content_is_empty(value: &Value) -> bool {
-    value
-        .as_str()
-        .map(|text| text.trim().is_empty())
-        .unwrap_or(false)
+    match value {
+        Value::String(text) => text.trim().is_empty(),
+        Value::Array(items) => items.is_empty(),
+        Value::Null => true,
+        _ => false,
+    }
+}
+
+fn chat_tool_output_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| {
+                part.get("text")
+                    .or_else(|| part.get("input_text"))
+                    .or_else(|| part.get("output_text"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .or_else(|| Some(part.to_string()))
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        value => value.to_string(),
+    }
+}
+
+fn chat_tools_from_responses_tools(value: Option<&Value>) -> Option<Vec<Value>> {
+    let tools = value?.as_array()?;
+    let out = tools
+        .iter()
+        .filter_map(|tool| {
+            if tool.get("type").and_then(|value| value.as_str()) != Some("function") {
+                return None;
+            }
+            let function = tool.get("function");
+            let name = function
+                .and_then(|value| value.get("name"))
+                .or_else(|| tool.get("name"))
+                .and_then(|value| value.as_str())?;
+            Some(json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": function
+                        .and_then(|value| value.get("description"))
+                        .or_else(|| tool.get("description"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(""),
+                    "parameters": function
+                        .and_then(|value| value.get("parameters"))
+                        .or_else(|| tool.get("parameters"))
+                        .cloned()
+                        .unwrap_or_else(|| json!({ "type": "object" }))
+                }
+            }))
+        })
+        .collect::<Vec<_>>();
+    (!out.is_empty()).then_some(out)
+}
+
+fn chat_tool_choice_from_responses(value: Option<&Value>) -> Option<Value> {
+    let value = value?;
+    if let Some(choice) = value.as_str() {
+        return match choice {
+            "auto" | "none" | "required" => Some(Value::String(choice.to_string())),
+            _ => None,
+        };
+    }
+    if value.get("type").and_then(|value| value.as_str()) != Some("function") {
+        return None;
+    }
+    let name = value
+        .get("function")
+        .and_then(|function| function.get("name"))
+        .or_else(|| value.get("name"))
+        .and_then(|name| name.as_str())?;
+    Some(json!({
+        "type": "function",
+        "function": { "name": name }
+    }))
+}
+
+fn sanitize_chat_messages(messages: Vec<Value>) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut index = 0;
+
+    while index < messages.len() {
+        let message = &messages[index];
+        if chat_message_role(message) == Some("tool") {
+            index += 1;
+            continue;
+        }
+
+        let has_tool_calls = message
+            .get("tool_calls")
+            .and_then(|value| value.as_array())
+            .map(|calls| !calls.is_empty())
+            .unwrap_or(false);
+        if chat_message_role(message) == Some("assistant") && has_tool_calls {
+            let mut pending_ids = chat_message_tool_call_ids(message);
+            if pending_ids.is_empty() {
+                index += 1;
+                continue;
+            }
+
+            let mut tool_messages = Vec::new();
+            let mut next = index + 1;
+            while next < messages.len() && chat_message_role(&messages[next]) == Some("tool") {
+                if let Some(tool_call_id) = chat_message_tool_call_id(&messages[next]) {
+                    if let Some(pos) = pending_ids.iter().position(|id| id == tool_call_id) {
+                        pending_ids.remove(pos);
+                        tool_messages.push(messages[next].clone());
+                    }
+                }
+                next += 1;
+            }
+
+            out.push(message.clone());
+            out.extend(tool_messages);
+            index = next;
+            continue;
+        }
+
+        out.push(message.clone());
+        index += 1;
+    }
+
+    out
+}
+
+fn chat_message_role(message: &Value) -> Option<&str> {
+    message.get("role").and_then(|value| value.as_str())
+}
+
+fn chat_message_tool_call_ids(message: &Value) -> Vec<String> {
+    message
+        .get("tool_calls")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|call| call.get("id").and_then(|value| value.as_str()))
+        .filter(|id| !id.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn chat_message_tool_call_id(message: &Value) -> Option<&str> {
+    message
+        .get("tool_call_id")
+        .and_then(|value| value.as_str())
+        .filter(|id| !id.is_empty())
+}
+
+fn chat_payload_initiator(payload: &Value) -> &str {
+    let has_agent_turn = payload
+        .get("messages")
+        .and_then(|value| value.as_array())
+        .map(|messages| {
+            messages.iter().any(|message| {
+                matches!(
+                    message.get("role").and_then(|value| value.as_str()),
+                    Some("assistant" | "tool")
+                )
+            })
+        })
+        .unwrap_or(false);
+    if has_agent_turn {
+        "agent"
+    } else {
+        "user"
+    }
 }
 
 fn chat_completion_to_response(chat: &Value, model: &str) -> Value {
     let output_text = chat_output_text(chat);
     let usage = chat_usage_to_responses_usage(chat.get("usage"));
-    json!({
-        "id": chat.get("id").and_then(|value| value.as_str()).unwrap_or("resp_copilot_chat"),
-        "object": "response",
-        "created_at": chat.get("created").and_then(|value| value.as_i64()).unwrap_or_else(|| chrono::Utc::now().timestamp()),
-        "status": "completed",
-        "model": model,
-        "output": [{
-            "id": "msg_copilot_chat",
+    let mut output = Vec::new();
+    if let Some(choices) = chat.get("choices").and_then(|value| value.as_array()) {
+        for choice in choices {
+            let Some(message) = choice.get("message") else {
+                continue;
+            };
+            if let Some(text) = chat_message_content_text(message.get("content")) {
+                if !text.is_empty() {
+                    output.push(json!({
+                        "id": format!("msg_{}", Uuid::new_v4().simple()),
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{
+                            "type": "output_text",
+                            "text": text
+                        }]
+                    }));
+                }
+            }
+            if let Some(tool_calls) = message.get("tool_calls").and_then(|value| value.as_array()) {
+                for call in tool_calls {
+                    let call_id = call
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("call_{}", Uuid::new_v4().simple()));
+                    let name = call
+                        .get("function")
+                        .and_then(|value| value.get("name"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("tool");
+                    let arguments = call
+                        .get("function")
+                        .and_then(|value| value.get("arguments"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("{}");
+                    output.push(json!({
+                        "id": call_id,
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": arguments
+                    }));
+                }
+            }
+        }
+    }
+    if output.is_empty() && !output_text.is_empty() {
+        output.push(json!({
+            "id": format!("msg_{}", Uuid::new_v4().simple()),
             "type": "message",
             "status": "completed",
             "role": "assistant",
@@ -840,7 +1335,16 @@ fn chat_completion_to_response(chat: &Value, model: &str) -> Value {
                 "type": "output_text",
                 "text": output_text
             }]
-        }],
+        }));
+    }
+
+    json!({
+        "id": chat.get("id").and_then(|value| value.as_str()).unwrap_or("resp_copilot_chat"),
+        "object": "response",
+        "created_at": chat.get("created").and_then(|value| value.as_i64()).unwrap_or_else(|| chrono::Utc::now().timestamp()),
+        "status": "completed",
+        "model": model,
+        "output": output,
         "output_text": output_text,
         "usage": usage
     })
@@ -873,6 +1377,22 @@ fn chat_output_text(chat: &Value) -> String {
         .join("\n")
 }
 
+fn chat_message_content_text(content: Option<&Value>) -> Option<String> {
+    let content = content?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    if let Some(parts) = content.as_array() {
+        let text = parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        return Some(text);
+    }
+    None
+}
+
 fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
     let usage = usage.unwrap_or(&Value::Null);
     let input_tokens = usage
@@ -894,6 +1414,362 @@ fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
         "output_tokens": output_tokens,
         "total_tokens": total_tokens
     })
+}
+
+async fn stream_chat_completions_as_responses(
+    state: &crate::AppState,
+    context: &crate::UsageContext,
+    resp: reqwest::Response,
+    model: String,
+) -> axum::response::Response {
+    let usage_state = state.clone();
+    let usage_context = context.clone();
+    let stream = async_stream::stream! {
+        let mut upstream = resp.bytes_stream();
+        let mut parser = ChatCompletionsSseAccumulator::default();
+        while let Some(chunk) = upstream.next().await {
+            match chunk {
+                Ok(bytes) => parser.push(&bytes),
+                Err(err) => {
+                    let message = format!("Copilot chat stream read failed: {}", err);
+                    crate::record_copilot_error(&usage_state, &usage_context, &message);
+                    yield Err::<Bytes, std::io::Error>(std::io::Error::new(std::io::ErrorKind::Other, "stream"));
+                    return;
+                }
+            }
+        }
+
+        let response = parser.finish(&model);
+        let usage = crate::usage_metrics_from_response_value(&response);
+        crate::record_copilot_success(&usage_state, &usage_context, &usage);
+        for event in response_stream_events(&response) {
+            yield Ok::<Bytes, std::io::Error>(event);
+        }
+    };
+
+    (
+        StatusCode::OK,
+        [
+            ("Content-Type", "text/event-stream"),
+            ("Cache-Control", "no-store"),
+        ],
+        Body::from_stream(stream),
+    )
+        .into_response()
+}
+
+#[derive(Default)]
+struct ChatCompletionsSseAccumulator {
+    buffer: Vec<u8>,
+    id: Option<String>,
+    created: Option<i64>,
+    model: Option<String>,
+    content: String,
+    tool_calls: Vec<ChatStreamToolCall>,
+    usage: Option<Value>,
+    finish_reason: Option<String>,
+}
+
+#[derive(Default, Clone)]
+struct ChatStreamToolCall {
+    id: Option<String>,
+    name: Option<String>,
+    arguments: String,
+}
+
+impl ChatCompletionsSseAccumulator {
+    fn push(&mut self, bytes: &Bytes) {
+        self.buffer.extend_from_slice(bytes);
+        while let Some((event_end, delimiter_len)) = find_sse_boundary(&self.buffer) {
+            let raw_event: Vec<u8> = self.buffer.drain(..event_end + delimiter_len).collect();
+            self.absorb_event(&raw_event[..event_end]);
+        }
+    }
+
+    fn finish(mut self, client_model: &str) -> Value {
+        if !self.buffer.is_empty() {
+            let raw = std::mem::take(&mut self.buffer);
+            self.absorb_event(&raw);
+        }
+
+        let mut message = json!({
+            "role": "assistant",
+            "content": if self.content.is_empty() { Value::Null } else { Value::String(self.content) }
+        });
+        let tool_calls = self
+            .tool_calls
+            .iter()
+            .filter(|call| call.id.is_some() || call.name.is_some() || !call.arguments.is_empty())
+            .map(|call| {
+                json!({
+                    "id": call
+                        .id
+                        .clone()
+                        .unwrap_or_else(|| format!("call_{}", Uuid::new_v4().simple())),
+                    "type": "function",
+                    "function": {
+                        "name": call.name.clone().unwrap_or_else(|| "tool".to_string()),
+                        "arguments": call.arguments
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        if !tool_calls.is_empty() {
+            message["tool_calls"] = Value::Array(tool_calls);
+        }
+
+        let chat = json!({
+            "id": self
+                .id
+                .unwrap_or_else(|| format!("chatcmpl-{}", Uuid::new_v4().simple())),
+            "object": "chat.completion",
+            "created": self.created.unwrap_or_else(|| chrono::Utc::now().timestamp()),
+            "model": self.model.unwrap_or_else(|| client_model.to_string()),
+            "choices": [{
+                "index": 0,
+                "message": message,
+                "finish_reason": self.finish_reason.unwrap_or_else(|| "stop".to_string())
+            }],
+            "usage": self.usage.unwrap_or_else(|| json!({}))
+        });
+        chat_completion_to_response(&chat, client_model)
+    }
+
+    fn absorb_event(&mut self, raw_event: &[u8]) {
+        let Some(data) = parse_sse_data(raw_event) else {
+            return;
+        };
+        if data.trim() == "[DONE]" {
+            return;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+            return;
+        };
+
+        if let Some(id) = value
+            .get("id")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+        {
+            self.id = Some(id.to_string());
+        }
+        if let Some(created) = value.get("created").and_then(|value| value.as_i64()) {
+            if created > 0 {
+                self.created = Some(created);
+            }
+        }
+        if let Some(model) = value
+            .get("model")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+        {
+            self.model = Some(model.to_string());
+        }
+        if let Some(usage) = value.get("usage") {
+            if !usage.is_null() {
+                self.usage = Some(usage.clone());
+            }
+        }
+
+        let Some(choices) = value.get("choices").and_then(|value| value.as_array()) else {
+            return;
+        };
+        for choice in choices {
+            if let Some(finish_reason) = choice
+                .get("finish_reason")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+            {
+                self.finish_reason = Some(finish_reason.to_string());
+            }
+            let Some(delta) = choice.get("delta") else {
+                continue;
+            };
+            if let Some(content) = delta.get("content").and_then(|value| value.as_str()) {
+                self.content.push_str(content);
+            }
+            if let Some(tool_calls) = delta.get("tool_calls").and_then(|value| value.as_array()) {
+                for call in tool_calls {
+                    self.absorb_tool_call_delta(call);
+                }
+            }
+        }
+    }
+
+    fn absorb_tool_call_delta(&mut self, value: &Value) {
+        let index = value
+            .get("index")
+            .and_then(|value| value.as_u64())
+            .map(|value| value as usize)
+            .unwrap_or(self.tool_calls.len());
+        while self.tool_calls.len() <= index {
+            self.tool_calls.push(ChatStreamToolCall::default());
+        }
+        let call = &mut self.tool_calls[index];
+        if let Some(id) = value
+            .get("id")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+        {
+            call.id = Some(id.to_string());
+        }
+        if let Some(function) = value.get("function") {
+            if let Some(name) = function
+                .get("name")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+            {
+                call.name = Some(name.to_string());
+            }
+            if let Some(arguments) = function.get("arguments").and_then(|value| value.as_str()) {
+                call.arguments.push_str(arguments);
+            }
+        }
+    }
+}
+
+fn response_stream_events(response: &Value) -> Vec<Bytes> {
+    let mut events = Vec::new();
+    let mut created = response.clone();
+    if let Some(object) = created.as_object_mut() {
+        object.insert("status".to_string(), json!("in_progress"));
+    }
+    events.push(response_sse_event(&json!({
+        "type": "response.created",
+        "response": created
+    })));
+    events.extend(response_output_events(response));
+    events.push(response_sse_event(&json!({
+        "type": "response.completed",
+        "response": response
+    })));
+    events.push(done_sse_event());
+    events
+}
+
+fn response_sse_event(value: &Value) -> Bytes {
+    let data = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
+    let event = value
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("message");
+    Bytes::from(format!("event: {}\ndata: {}\n\n", event, data))
+}
+
+fn done_sse_event() -> Bytes {
+    Bytes::from_static(b"data: [DONE]\n\n")
+}
+
+fn response_output_events(response: &Value) -> Vec<Bytes> {
+    let output_items = response
+        .get("output")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut events = Vec::new();
+    for (output_index, item) in output_items.iter().enumerate() {
+        events.extend(response_output_item_events(output_index, item));
+    }
+    events
+}
+
+fn response_output_item_events(output_index: usize, item: &Value) -> Vec<Bytes> {
+    let mut events = vec![response_sse_event(&json!({
+        "type": "response.output_item.added",
+        "output_index": output_index,
+        "item": response_item_with_status(item, "in_progress")
+    }))];
+
+    match item.get("type").and_then(|value| value.as_str()) {
+        Some("message") => {
+            if let Some(content) = item.get("content").and_then(|value| value.as_array()) {
+                for (content_index, part) in content.iter().enumerate() {
+                    if part.get("type").and_then(|value| value.as_str()) != Some("output_text") {
+                        continue;
+                    }
+                    let text = part
+                        .get("text")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    let item_id = response_item_id(item);
+                    events.push(response_sse_event(&json!({
+                        "type": "response.content_part.added",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "part": {"type": "output_text", "text": ""}
+                    })));
+                    if !text.is_empty() {
+                        events.push(response_sse_event(&json!({
+                            "type": "response.output_text.delta",
+                            "item_id": item_id,
+                            "output_index": output_index,
+                            "content_index": content_index,
+                            "delta": text
+                        })));
+                    }
+                    events.push(response_sse_event(&json!({
+                        "type": "response.output_text.done",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "text": text
+                    })));
+                    events.push(response_sse_event(&json!({
+                        "type": "response.content_part.done",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "part": part
+                    })));
+                }
+            }
+        }
+        Some("function_call") => {
+            let arguments = item
+                .get("arguments")
+                .and_then(|value| value.as_str())
+                .unwrap_or("{}");
+            let item_id = response_item_id(item);
+            events.push(response_sse_event(&json!({
+                "type": "response.function_call_arguments.delta",
+                "item_id": item_id,
+                "output_index": output_index,
+                "delta": arguments
+            })));
+            events.push(response_sse_event(&json!({
+                "type": "response.function_call_arguments.done",
+                "item_id": item_id,
+                "output_index": output_index,
+                "arguments": arguments
+            })));
+        }
+        _ => {}
+    }
+
+    events.push(response_sse_event(&json!({
+        "type": "response.output_item.done",
+        "output_index": output_index,
+        "item": item
+    })));
+    events
+}
+
+fn response_item_with_status(item: &Value, status: &str) -> Value {
+    let mut item = item.clone();
+    if let Some(object) = item.as_object_mut() {
+        object.insert("status".to_string(), json!(status));
+    }
+    item
+}
+
+fn response_item_id(item: &Value) -> String {
+    item.get("id")
+        .and_then(|value| value.as_str())
+        .or_else(|| item.get("call_id").and_then(|value| value.as_str()))
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("item_{}", Uuid::new_v4().simple()))
 }
 
 async fn stream_native_responses(
@@ -1507,12 +2383,51 @@ mod tests {
             "max_output_tokens": 16
         });
 
-        let chat = responses_to_chat_completions_payload(&payload, "gpt-4.1").unwrap();
+        let chat = responses_to_chat_completions_payload(&payload, "gpt-4.1", false).unwrap();
         assert_eq!(chat["model"], "gpt-4.1");
         assert_eq!(chat["max_tokens"], 16);
+        assert_eq!(chat["stream"], false);
         assert_eq!(chat["messages"][0]["role"], "system");
         assert_eq!(chat["messages"][1]["role"], "user");
         assert_eq!(chat["messages"][1]["content"], "Reply pong.");
+    }
+
+    #[test]
+    fn responses_to_chat_payload_maps_tools_and_tool_history() {
+        let payload = json!({
+            "model": "gpt-4.1",
+            "input": [
+                {"role": "user", "content": "lookup alpha"},
+                {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{\"query\":\"alpha\"}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "alpha=42"},
+                {"role": "user", "content": [{"type": "input_text", "text": "finish"}]}
+            ],
+            "tools": [{
+                "type": "function",
+                "name": "lookup",
+                "description": "Lookup a value",
+                "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}
+            }],
+            "tool_choice": {"type": "function", "name": "lookup"},
+            "parallel_tool_calls": true
+        });
+
+        let chat = responses_to_chat_completions_payload(&payload, "gpt-4.1", true).unwrap();
+        assert_eq!(chat["stream"], true);
+        assert_eq!(chat["messages"][0]["role"], "user");
+        assert_eq!(chat["messages"][1]["role"], "assistant");
+        assert_eq!(chat["messages"][1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(
+            chat["messages"][1]["tool_calls"][0]["function"]["name"],
+            "lookup"
+        );
+        assert_eq!(chat["messages"][2]["role"], "tool");
+        assert_eq!(chat["messages"][2]["tool_call_id"], "call_1");
+        assert_eq!(chat["messages"][2]["content"], "alpha=42");
+        assert_eq!(chat["messages"][3]["content"], "finish");
+        assert_eq!(chat["tools"][0]["function"]["name"], "lookup");
+        assert_eq!(chat["tool_choice"]["function"]["name"], "lookup");
+        assert_eq!(chat["parallel_tool_calls"], true);
     }
 
     #[test]
@@ -1539,5 +2454,61 @@ mod tests {
         assert_eq!(response["output_text"], "pong");
         assert_eq!(response["usage"]["input_tokens"], 2);
         assert_eq!(response["usage"]["output_tokens"], 1);
+    }
+
+    #[test]
+    fn chat_completion_to_response_maps_tool_calls() {
+        let chat = json!({
+            "id": "chatcmpl_2",
+            "created": 123,
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": "{\"query\":\"alpha\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let response = chat_completion_to_response(&chat, "gpt-4.1");
+        assert_eq!(response["output_text"], "");
+        assert_eq!(response["output"][0]["type"], "function_call");
+        assert_eq!(response["output"][0]["call_id"], "call_abc");
+        assert_eq!(response["output"][0]["name"], "lookup");
+        assert_eq!(response["output"][0]["arguments"], "{\"query\":\"alpha\"}");
+    }
+
+    #[test]
+    fn chat_stream_accumulator_maps_tool_call_chunks() {
+        let mut accumulator = ChatCompletionsSseAccumulator::default();
+        accumulator.push(&Bytes::from_static(
+            br#"data: {"id":"chatcmpl_3","created":123,"model":"gpt-4.1","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_stream","type":"function","function":{"name":"lookup","arguments":""}}]}}]}
+
+"#,
+        ));
+        accumulator.push(&Bytes::from_static(
+            br#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"query\""}}]}}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"beta\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}
+
+data: [DONE]
+
+"#,
+        ));
+
+        let response = accumulator.finish("gpt-4.1");
+        assert_eq!(response["id"], "chatcmpl_3");
+        assert_eq!(response["output"][0]["type"], "function_call");
+        assert_eq!(response["output"][0]["call_id"], "call_stream");
+        assert_eq!(response["output"][0]["name"], "lookup");
+        assert_eq!(response["output"][0]["arguments"], "{\"query\":\"beta\"}");
+        assert_eq!(response["usage"]["total_tokens"], 8);
     }
 }
