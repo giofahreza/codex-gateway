@@ -2230,6 +2230,9 @@ fn anthropic_error_body(kind: &str, message: &str) -> Bytes {
 fn responses_payload_has_images(value: &Value) -> bool {
     match value {
         Value::Object(map) => map.iter().any(|(key, value)| {
+            if key == "tools" {
+                return false;
+            }
             key == "image_url"
                 || key == "input_image"
                 || key == "image"
@@ -2372,6 +2375,35 @@ mod tests {
         assert!(payload.get("service_tier").is_none());
         assert_eq!(payload["tools"].as_array().unwrap().len(), 1);
         assert_eq!(payload["tools"][0]["type"], "function");
+    }
+
+    #[test]
+    fn image_detection_ignores_tool_schemas() {
+        let payload = json!({
+            "model": "gpt-4.1",
+            "input": "inspect repository",
+            "tools": [{
+                "type": "function",
+                "name": "trace",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "image_url": {"type": "string"},
+                        "image": {"type": "string"}
+                    }
+                }
+            }]
+        });
+        assert!(!responses_payload_has_images(&payload));
+
+        let payload_with_image = json!({
+            "model": "gpt-4.1",
+            "input": [{
+                "role": "user",
+                "content": [{"type": "input_image", "image_url": "data:image/png;base64,abc"}]
+            }]
+        });
+        assert!(responses_payload_has_images(&payload_with_image));
     }
 
     #[test]
