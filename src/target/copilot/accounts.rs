@@ -254,11 +254,23 @@ mod tests {
 
     #[test]
     fn model_billing_tier_follows_copilot_picker_category() {
-        assert_eq!(model_billing_tier("claude-opus-4.7", Some("powerful")), "premium");
-        assert_eq!(model_billing_tier("claude-sonnet-4.5", Some("versatile")), "premium");
-        assert_eq!(model_billing_tier("gpt-5-mini", Some("lightweight")), "unknown");
+        assert_eq!(
+            model_billing_tier("claude-opus-4.7", Some("powerful")),
+            "premium"
+        );
+        assert_eq!(
+            model_billing_tier("claude-sonnet-4.5", Some("versatile")),
+            "premium"
+        );
+        assert_eq!(
+            model_billing_tier("gpt-5-mini", Some("lightweight")),
+            "unknown"
+        );
         assert_eq!(model_billing_tier("trajectory-compaction", None), "unknown");
-        assert_eq!(model_is_premium("claude-opus-4.7", Some("powerful")), Some(true));
+        assert_eq!(
+            model_is_premium("claude-opus-4.7", Some("powerful")),
+            Some(true)
+        );
         assert_eq!(model_is_premium("gpt-5-mini", Some("lightweight")), None);
         assert_eq!(model_is_premium("trajectory-compaction", None), None);
     }

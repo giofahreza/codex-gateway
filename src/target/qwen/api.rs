@@ -1005,7 +1005,10 @@ mod tests {
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "shell");
         assert_eq!(tools[0]["function"]["description"], "Run a shell command");
-        assert_eq!(tools[0]["function"]["parameters"]["properties"]["command"]["type"], "string");
+        assert_eq!(
+            tools[0]["function"]["parameters"]["properties"]["command"]["type"],
+            "string"
+        );
         assert_eq!(payload["tool_choice"], "auto");
     }
 

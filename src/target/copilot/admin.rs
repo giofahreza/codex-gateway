@@ -103,10 +103,13 @@ pub async fn quota_json(State(state): State<crate::AppState>) -> impl IntoRespon
                         Ok(live_models) if !live_models.is_empty() => {
                             models = model_entries(&live_models);
                         }
-                        Ok(_) => status.push("Copilot model endpoint returned no models".to_string()),
+                        Ok(_) => {
+                            status.push("Copilot model endpoint returned no models".to_string())
+                        }
                         Err(err) => status.push(err),
                     }
-                    match super::auth::fetch_copilot_user(&state.client, &account.github_token).await
+                    match super::auth::fetch_copilot_user(&state.client, &account.github_token)
+                        .await
                     {
                         Ok(usage) => {
                             chat_enabled = usage
@@ -189,7 +192,10 @@ fn quota_limits_from_usage(usage: &serde_json::Value) -> Vec<serde_json::Value> 
         .and_then(|value| value.as_str())
         .map(|value| format!("resets {}", value))
         .unwrap_or_default();
-    let Some(snapshots) = usage.get("quota_snapshots").and_then(|value| value.as_object()) else {
+    let Some(snapshots) = usage
+        .get("quota_snapshots")
+        .and_then(|value| value.as_object())
+    else {
         return Vec::new();
     };
     let mut out = Vec::new();

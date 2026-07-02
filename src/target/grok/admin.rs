@@ -211,7 +211,10 @@ pub async fn quota_json(State(state): State<crate::AppState>) -> impl IntoRespon
         .send()
         .await
     {
-        Ok(r) => r.json::<serde_json::Value>().await.unwrap_or(serde_json::Value::Null),
+        Ok(r) => r
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or(serde_json::Value::Null),
         Err(_) => serde_json::Value::Null,
     };
 

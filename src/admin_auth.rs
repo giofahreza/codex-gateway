@@ -130,10 +130,7 @@ pub(crate) fn create_session(
     prune_expired_sessions(sessions);
     let session_id = Uuid::new_v4().simple().to_string();
     let expires_at_unix = now_unix_seconds().saturating_add(ttl_seconds);
-    sessions.insert(
-        session_id.clone(),
-        AdminSession { expires_at_unix },
-    );
+    sessions.insert(session_id.clone(), AdminSession { expires_at_unix });
     session_id
 }
 

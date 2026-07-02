@@ -452,10 +452,12 @@ fn build_google_tool_config(request_value: &serde_json::Value) -> Option<serde_j
 fn chat_tool_call_to_function_call_part(tc: &Value) -> Option<Value> {
     let function = tc.get("function")?;
     let name = function.get("name").and_then(|v| v.as_str())?;
-    let arguments = function.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let arguments = function
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     let args_value = if let Some(s) = arguments.as_str() {
-        serde_json::from_str::<serde_json::Value>(s)
-            .unwrap_or_else(|_| json!({ "raw": s }))
+        serde_json::from_str::<serde_json::Value>(s).unwrap_or_else(|_| json!({ "raw": s }))
     } else {
         arguments.clone()
     };
@@ -510,9 +512,7 @@ fn build_google_contents(request_value: &Value) -> Result<Vec<Value>, String> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    transcript.push(format!(
-                        "[assistant called {name}({args_str})]"
-                    ));
+                    transcript.push(format!("[assistant called {name}({args_str})]"));
                     pending_calls.push((call_id, name.to_string(), args_str));
                 }
                 "function_call_output" => {
@@ -535,10 +535,7 @@ fn build_google_contents(request_value: &Value) -> Result<Vec<Value>, String> {
                     transcript.push(format!("[tool result: {}]", output_str));
                 }
                 "message" | "" => {
-                    let role = item
-                        .get("role")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("user");
+                    let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
                     let role = match role {
                         "system" | "developer" => continue,
                         "assistant" => "assistant",
@@ -595,10 +592,7 @@ fn build_google_contents(request_value: &Value) -> Result<Vec<Value>, String> {
             let mut found = false;
             for (role, parts) in entries.iter_mut() {
                 if role == "user" {
-                    if let Some(first_text) = parts
-                        .iter_mut()
-                        .find(|p| p.get("text").is_some())
-                    {
+                    if let Some(first_text) = parts.iter_mut().find(|p| p.get("text").is_some()) {
                         first_text["text"] = json!(new_text);
                     } else {
                         parts.insert(0, json!({ "text": new_text }));
@@ -700,17 +694,10 @@ fn append_input_item(entries: &mut Vec<(String, Vec<Value>)>, item: &Value) {
                 .or_else(|| item.get("id"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let name = item
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let arguments = item
-                .get("arguments")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
+            let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let arguments = item.get("arguments").cloned().unwrap_or_else(|| json!({}));
             let args_value = if let Some(s) = arguments.as_str() {
-                serde_json::from_str::<serde_json::Value>(s)
-                    .unwrap_or_else(|_| json!({ "raw": s }))
+                serde_json::from_str::<serde_json::Value>(s).unwrap_or_else(|_| json!({ "raw": s }))
             } else {
                 arguments.clone()
             };
@@ -726,14 +713,8 @@ fn append_input_item(entries: &mut Vec<(String, Vec<Value>)>, item: &Value) {
             ));
         }
         "function_call_output" => {
-            let call_id = item
-                .get("call_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let output = item
-                .get("output")
-                .cloned()
-                .unwrap_or_else(|| json!(""));
+            let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
+            let output = item.get("output").cloned().unwrap_or_else(|| json!(""));
             let output_str = if let Some(s) = output.as_str() {
                 s.to_string()
             } else {
@@ -756,10 +737,7 @@ fn append_input_item(entries: &mut Vec<(String, Vec<Value>)>, item: &Value) {
             ));
         }
         "message" | "" => {
-            let role = item
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("user");
+            let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
             let role = match role {
                 "system" | "developer" => return,
                 "assistant" => "assistant",
