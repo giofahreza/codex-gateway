@@ -7,11 +7,13 @@ use std::{path::Path, time::Duration};
 use super::accounts::ClaudeModelInfo;
 use crate::target::oauth::{provider_config, OAuthProvider};
 
-pub const DEFAULT_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+pub const DEFAULT_CLIENT_ID: &str = "https://claude.ai/oauth/claude-code-client-metadata";
 const CLAUDE_AI_BASE_URL: &str = "https://claude.ai";
-const DEFAULT_AUTHORIZE_URL: &str = "https://claude.ai/v1/oauth/{organization_uuid}/authorize";
-const DEFAULT_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
-const DEFAULT_REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
+const DEFAULT_AUTHORIZE_URL: &str = "https://platform.claude.com/oauth/authorize";
+const DEFAULT_COOKIE_AUTHORIZE_URL: &str =
+    "https://claude.ai/v1/oauth/{organization_uuid}/authorize";
+const DEFAULT_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+const DEFAULT_REDIRECT_URI: &str = "http://localhost/callback";
 const DEFAULT_SCOPE: &str = "user:profile user:inference";
 const TOKEN_USER_AGENT: &str = "claude-cli/2.1.81 (external, cli)";
 
@@ -99,6 +101,13 @@ pub fn authorize_url_template() -> String {
         .unwrap_or_else(|| DEFAULT_AUTHORIZE_URL.to_string())
 }
 
+fn cookie_authorize_url_template() -> String {
+    let configured = provider_config(None, OAuthProvider::Claude).authorize_url;
+    configured
+        .filter(|value| value.contains("{organization_uuid}"))
+        .unwrap_or_else(|| DEFAULT_COOKIE_AUTHORIZE_URL.to_string())
+}
+
 pub fn scopes() -> Vec<String> {
     let scopes = provider_config(None, OAuthProvider::Claude).scopes;
     if scopes.is_empty() {
@@ -125,6 +134,19 @@ pub fn build_manual_authorize_payload(
         "code_challenge": pending.code_challenge,
         "code_challenge_method": "S256"
     })
+}
+
+pub fn build_auth_url(pending: &PendingOAuth) -> Result<String, String> {
+    let mut url = url::Url::parse(&authorize_url_template()).map_err(|err| err.to_string())?;
+    url.query_pairs_mut()
+        .append_pair("client_id", &client_id())
+        .append_pair("response_type", "code")
+        .append_pair("redirect_uri", &redirect_uri())
+        .append_pair("scope", &scopes().join(" "))
+        .append_pair("state", &pending.state_token)
+        .append_pair("code_challenge", &pending.code_challenge)
+        .append_pair("code_challenge_method", "S256");
+    Ok(url.to_string())
 }
 
 pub async fn fetch_organizations(
@@ -168,7 +190,8 @@ pub async fn authorize_with_cookie(
     organization_uuid: &str,
     pending: &PendingOAuth,
 ) -> Result<String, String> {
-    let authorize_url = authorize_url_template().replace("{organization_uuid}", organization_uuid);
+    let authorize_url =
+        cookie_authorize_url_template().replace("{organization_uuid}", organization_uuid);
     let resp = client
         .post(authorize_url)
         .headers(claude_ai_headers(cookie))

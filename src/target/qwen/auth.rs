@@ -1416,6 +1416,7 @@ mod tests {
                 qwen_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 grok_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 copilot_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
+                claude_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 admin_sessions: Arc::new(Mutex::new(HashMap::new())),
                 disabled: Arc::new(Mutex::new(HashSet::new())),
                 usage_history_lock: Arc::new(Mutex::new(())),

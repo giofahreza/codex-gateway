@@ -1,8 +1,8 @@
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{Query, State},
     http::{Method, StatusCode},
-    response::{Html, IntoResponse},
+    response::IntoResponse,
     Form,
 };
 use serde::Deserialize;
@@ -28,6 +28,16 @@ struct LoginStartRequest {
 }
 
 #[derive(Deserialize)]
+pub struct LoginStartQuery {
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub organization_uuid: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct CallbackForm {
     pub redirect_url: String,
     #[serde(default)]
@@ -38,6 +48,8 @@ pub struct CallbackForm {
     pub organization_uuid: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoResponse {
@@ -111,17 +123,49 @@ pub async fn quota_json(State(state): State<crate::AppState>) -> impl IntoRespon
 pub async fn login_start(
     State(state): State<crate::AppState>,
     method: Method,
+    Query(query): Query<LoginStartQuery>,
     body: Bytes,
 ) -> impl IntoResponse {
     match method {
-        Method::GET => Html(helper_html()).into_response(),
+        Method::GET => start_browser_oauth(&state, query).await,
         Method::POST => save_or_oauth_account(&state, &body).await,
         _ => (
             StatusCode::METHOD_NOT_ALLOWED,
-            "Claude setup supports GET for instructions or POST for OAuth/token submission",
+            "Claude setup supports GET for OAuth start or POST for cookie/token submission",
         )
             .into_response(),
     }
+}
+
+async fn start_browser_oauth(
+    state: &crate::AppState,
+    query: LoginStartQuery,
+) -> axum::response::Response {
+    let pending = super::auth::PendingOAuth::new();
+    let url = match super::auth::build_auth_url(&pending) {
+        Ok(url) => url,
+        Err(err) => {
+            return axum::Json(serde_json::json!({
+                "ok": false,
+                "message": format!("failed to create Claude OAuth URL: {}", err)
+            }))
+            .into_response()
+        }
+    };
+    let state_token = pending.state_token.clone();
+    {
+        let mut pending_map = state.claude_oauth_pending.lock().unwrap();
+        pending_map.insert(state_token.clone(), pending);
+    }
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "url": url,
+        "state": state_token,
+        "label": query.label,
+        "organization_uuid": query.organization_uuid,
+        "base_url": query.base_url
+    }))
+    .into_response()
 }
 
 pub async fn login_submit(
@@ -129,11 +173,10 @@ pub async fn login_submit(
     Form(form): Form<CallbackForm>,
 ) -> impl IntoResponse {
     let redirect_url = form.redirect_url.trim();
-    let verifier = form.verifier.unwrap_or_default();
-    if redirect_url.is_empty() || verifier.trim().is_empty() {
+    if redirect_url.is_empty() {
         return axum::Json(serde_json::json!({
             "ok": false,
-            "message": "redirect_url and verifier are required for manual Claude OAuth exchange"
+            "message": "redirect_url is required"
         }))
         .into_response();
     }
@@ -153,17 +196,36 @@ pub async fn login_submit(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .or_else(|| {
-            parsed_state
-                .trim()
-                .is_empty()
-                .then_some("")
-                .filter(|_| false)
-        })
-        .or_else(|| Some(parsed_state.trim()))
-        .filter(|value| !value.is_empty());
+        .or_else(|| (!parsed_state.trim().is_empty()).then_some(parsed_state.trim()));
+    let Some(state_value) = state_value else {
+        return axum::Json(serde_json::json!({
+            "ok": false,
+            "message": "callback URL missing state"
+        }))
+        .into_response();
+    };
+    let verifier = if let Some(verifier) = form
+        .verifier
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        verifier.to_string()
+    } else {
+        let mut pending_map = state.claude_oauth_pending.lock().unwrap();
+        match pending_map.remove(state_value) {
+            Some(pending) => pending.code_verifier,
+            None => {
+                return axum::Json(serde_json::json!({
+                    "ok": false,
+                    "message": "invalid or expired state"
+                }))
+                .into_response()
+            }
+        }
+    };
 
-    let token = match super::auth::exchange_code(&state.client, &code, verifier.trim(), state_value)
+    let token = match super::auth::exchange_code(&state.client, &code, &verifier, Some(state_value))
         .await
     {
         Ok(token) => token,
@@ -182,7 +244,7 @@ pub async fn login_submit(
         form.organization_uuid.as_deref(),
         form.label.as_deref(),
         None,
-        None,
+        form.base_url.as_deref(),
     )
     .await
 }
@@ -367,14 +429,4 @@ fn select_organization(
         return organizations.first().cloned();
     }
     None
-}
-
-fn helper_html() -> String {
-    r#"<!doctype html><html><head><meta charset="utf-8"><title>Claude OAuth Setup</title></head><body>
-<h1>Claude OAuth Setup</h1>
-<p>Preferred: paste a Claude.ai browser cookie in the dashboard. The gateway will exchange it for Anthropic OAuth tokens and only save the OAuth tokens.</p>
-<p>Fallback: paste an existing Anthropic OAuth access token and refresh token from a trusted local Claude Code login.</p>
-<p>Saved model ids use the <code>cld:</code> prefix, for example <code>cld:claude-sonnet-4-20250514</code>.</p>
-</body></html>"#
-        .to_string()
 }

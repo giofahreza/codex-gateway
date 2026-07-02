@@ -116,11 +116,11 @@ cargo run
         "base_url": "https://portal.qwen.ai/v1"
       },
       "claude": {
-        "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-        "redirect_uri": "https://console.anthropic.com/oauth/code/callback",
+        "client_id": "https://claude.ai/oauth/claude-code-client-metadata",
+        "redirect_uri": "http://localhost/callback",
         "scopes": ["user:profile", "user:inference"],
-        "authorize_url": "https://claude.ai/v1/oauth/{organization_uuid}/authorize",
-        "token_url": "https://console.anthropic.com/v1/oauth/token",
+        "authorize_url": "https://platform.claude.com/oauth/authorize",
+        "token_url": "https://platform.claude.com/v1/oauth/token",
         "base_url": "https://api.anthropic.com"
       }
     }
@@ -638,13 +638,29 @@ model_reasoning_effort = "high"
 
 ## Claude OAuth provider
 
-Claude is exposed as a native Anthropic OAuth target. Add a Claude account from the dashboard, or submit a Claude.ai browser cookie to the admin API. The gateway exchanges the cookie for Anthropic OAuth tokens and saves only the OAuth token file under `auth_dir`.
+Claude is exposed as a native Anthropic OAuth target. Add a Claude account from the dashboard with the same pattern as Codex login: click **Start Login**, complete Claude login in the browser, copy the failed `http://localhost/callback?code=...&state=...` callback URL, and paste it back into the dashboard. The gateway stores the PKCE verifier server-side and saves only the OAuth token file under `auth_dir`.
+
+```bash
+curl -sS 'http://127.0.0.1:8319/login/claude/start?label=personal' \
+  -b "$ADMIN_COOKIE"
+```
+
+Open the returned `url`, finish login, then submit the callback URL:
+
+```bash
+curl -sS http://127.0.0.1:8319/login/claude/submit \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode 'redirect_url=http://localhost/callback?code=CODE&state=STATE'
+```
+
+Cookie fallback is still supported when browser OAuth is unavailable:
 
 ```bash
 curl -sS http://127.0.0.1:8319/login/claude/start \
   -b "$ADMIN_COOKIE" \
   -H "Content-Type: application/json" \
-  -d '{"cookie":"CLAUDE_AI_COOKIE","label":"personal","organization_uuid":"optional"}'
+  -d '{"cookie":"CLAUDE_AI_COOKIE","label":"personal","organization_uuid":"required-for-cookie-fallback"}'
 ```
 
 Direct token fallback is also supported when you already have trusted Anthropic OAuth tokens:

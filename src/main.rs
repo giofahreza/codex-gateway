@@ -73,6 +73,7 @@ struct AppState {
     qwen_oauth_pending: Arc<Mutex<HashMap<String, target::qwen::auth::PendingOAuth>>>,
     grok_oauth_pending: Arc<Mutex<HashMap<String, target::grok::auth::PendingOAuth>>>,
     copilot_oauth_pending: Arc<Mutex<HashMap<String, target::copilot::auth::PendingDevice>>>,
+    claude_oauth_pending: Arc<Mutex<HashMap<String, target::claude::auth::PendingOAuth>>>,
     admin_sessions: Arc<Mutex<HashMap<String, admin_auth::AdminSession>>>,
     disabled: Arc<Mutex<HashSet<String>>>,
     usage_history_lock: Arc<Mutex<()>>,
@@ -279,6 +280,7 @@ async fn main() {
         qwen_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         grok_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         copilot_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
+        claude_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         admin_sessions: Arc::new(Mutex::new(admin_sessions)),
         disabled: Arc::new(Mutex::new(disabled)),
         usage_history_lock: Arc::new(Mutex::new(())),
@@ -3930,17 +3932,28 @@ async fn dashboard() -> impl IntoResponse {
     <div id="addClaudeModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addClaudeTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
         <h2 id="addClaudeTitle" style="margin-top:0;">Add Claude Account</h2>
-        <p>Paste a Claude.ai browser cookie. The gateway exchanges it for Anthropic OAuth tokens and saves only the OAuth tokens. Direct OAuth token paste is available as a fallback.</p>
+        <p>Use Claude OAuth login. Open the generated Claude login URL, finish login in the browser, then paste the callback URL here.</p>
         <label for="claudeLabelInput" style="margin-top:12px;">Label</label>
         <input id="claudeLabelInput" placeholder="optional label">
         <label for="claudeOrganizationInput" style="margin-top:12px;">Organization UUID</label>
-        <input id="claudeOrganizationInput" placeholder="optional unless multiple organizations exist">
+        <input id="claudeOrganizationInput" placeholder="optional label for saved account">
         <label for="claudeBaseUrlInput" style="margin-top:12px;">API Base URL</label>
         <input id="claudeBaseUrlInput" placeholder="https://api.anthropic.com">
+        <button type="button" onclick="startClaudeLogin()" style="margin-top:12px;">Start Login</button>
+        <div id="claudeStatus" class="muted" style="margin-top:8px;"></div>
+        <pre id="claudeAuthUrl" class="auth-url"></pre>
+        <form id="claudeLoginForm" style="margin-top:16px;">
+          <label for="claudeRedirectInput">Callback URL</label>
+          <input id="claudeRedirectInput" name="redirect_url" placeholder="http://localhost/callback?code=...&state=...">
+          <input type="hidden" name="state" value="">
+          <div class="modal-actions" style="margin-top:8px;">
+            <button type="submit">Submit</button>
+          </div>
+        </form>
+        <p class="muted" style="margin-top:16px;">Cookie fallback: paste a Claude.ai browser cookie if the browser OAuth flow is unavailable.</p>
         <label for="claudeCookieInput" style="margin-top:12px;">Claude.ai Cookie</label>
         <textarea id="claudeCookieInput" rows="5" placeholder="Paste Claude.ai browser cookie here"></textarea>
-        <button type="button" onclick="submitClaudeCookie()" style="margin-top:12px;">Save with OAuth</button>
-        <div id="claudeStatus" class="muted" style="margin-top:8px;"></div>
+        <button type="button" onclick="submitClaudeCookie()" style="margin-top:12px;">Save Cookie</button>
         <p class="muted" style="margin-top:16px;">Direct fallback: paste Anthropic OAuth tokens from a trusted local Claude login.</p>
         <label for="claudeAccessTokenInput" style="margin-top:12px;">Access Token</label>
         <textarea id="claudeAccessTokenInput" rows="4" placeholder="OAuth access token"></textarea>
@@ -4444,6 +4457,11 @@ async fn dashboard() -> impl IntoResponse {
       }
       function closeClaudeModal() {
         closeModal('addClaudeModal');
+        const form = document.getElementById('claudeLoginForm');
+        form.querySelector('input[name="state"]').value = '';
+        document.getElementById('claudeRedirectInput').value = '';
+        document.getElementById('claudeAuthUrl').textContent = '';
+        document.getElementById('claudeAuthUrl').style.display = 'none';
         document.getElementById('claudeCookieInput').value = '';
         document.getElementById('claudeAccessTokenInput').value = '';
         document.getElementById('claudeRefreshTokenInput').value = '';
@@ -4457,6 +4475,63 @@ async fn dashboard() -> impl IntoResponse {
         if (organizationUuid) payload.organization_uuid = organizationUuid;
         if (baseUrl) payload.base_url = baseUrl;
         return payload;
+      }
+      async function startClaudeLogin() {
+        const payload = claudePayloadBase();
+        const params = new URLSearchParams();
+        if (payload.label) params.set('label', payload.label);
+        if (payload.organization_uuid) params.set('organization_uuid', payload.organization_uuid);
+        if (payload.base_url) params.set('base_url', payload.base_url);
+        document.getElementById('claudeStatus').textContent = 'Starting Claude OAuth login...';
+        const query = params.toString();
+        const res = await adminFetch('/login/claude/start' + (query ? '?' + query : ''));
+        if (!res) return;
+        const data = await res.json();
+        if (!data.ok || !data.url) {
+          document.getElementById('claudeStatus').textContent = data.message || 'Failed to start Claude login.';
+          return;
+        }
+        const form = document.getElementById('claudeLoginForm');
+        form.querySelector('input[name="state"]').value = data.state || '';
+        window.open(data.url, '_blank');
+        document.getElementById('claudeStatus').textContent = 'Opened Claude login URL in a new tab. After login, paste the callback URL below.';
+        const pre = document.getElementById('claudeAuthUrl');
+        pre.textContent = data.url;
+        pre.style.display = 'block';
+      }
+      async function submitClaudeRedirect(e) {
+        e.preventDefault();
+        const form = document.getElementById('claudeLoginForm');
+        const redirectUrl = document.getElementById('claudeRedirectInput').value.trim();
+        if (!redirectUrl) {
+          document.getElementById('claudeStatus').textContent = 'Callback URL is required.';
+          return;
+        }
+        const payload = claudePayloadBase();
+        const body = new URLSearchParams({
+          redirect_url: redirectUrl,
+          state: form.querySelector('input[name="state"]').value || ''
+        });
+        if (payload.label) body.set('label', payload.label);
+        if (payload.organization_uuid) body.set('organization_uuid', payload.organization_uuid);
+        if (payload.base_url) body.set('base_url', payload.base_url);
+        document.getElementById('claudeStatus').textContent = 'Completing Claude OAuth login...';
+        const res = await adminFetch('/login/claude/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: body
+        });
+        if (!res) return;
+        const data = await res.json();
+        document.getElementById('claudeStatus').textContent = data.message || (data.ok ? 'Claude account saved.' : 'Failed to save Claude account.');
+        if (data.ok) {
+          form.querySelector('input[name="state"]').value = '';
+          document.getElementById('claudeRedirectInput').value = '';
+          document.getElementById('claudeAuthUrl').textContent = '';
+          document.getElementById('claudeAuthUrl').style.display = 'none';
+          refreshClaudeQuota();
+          refreshClaudeAccounts();
+        }
       }
       async function submitClaudeCookie() {
         const cookie = document.getElementById('claudeCookieInput').value.trim();
@@ -4526,6 +4601,7 @@ async fn dashboard() -> impl IntoResponse {
           closeClaudeModal();
         }
       });
+      document.getElementById('claudeLoginForm').addEventListener('submit', submitClaudeRedirect);
       document.getElementById('addCustomModelBtn').addEventListener('click', () => {
         openCustomModelModal();
       });
@@ -5555,13 +5631,14 @@ async fn claude_quota_json_route(State(state): State<AppState>, headers: HeaderM
 async fn claude_login_start_route(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<target::claude::admin::LoginStartQuery>,
     method: Method,
     body: Bytes,
 ) -> Response {
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::claude::admin::login_start(State(state), method, body)
+    target::claude::admin::login_start(State(state), method, Query(query), body)
         .await
         .into_response()
 }

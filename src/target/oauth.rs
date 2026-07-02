@@ -279,11 +279,9 @@ fn default_provider_config(provider: OAuthProvider) -> OAuthProviderConfig {
         OAuthProvider::Claude => OAuthProviderConfig {
             client_id: Some(super::claude::auth::DEFAULT_CLIENT_ID.to_string()),
             client_secret: None,
-            redirect_uri: Some("https://console.anthropic.com/oauth/code/callback".to_string()),
-            authorize_url: Some(
-                "https://claude.ai/v1/oauth/{organization_uuid}/authorize".to_string(),
-            ),
-            token_url: Some("https://console.anthropic.com/v1/oauth/token".to_string()),
+            redirect_uri: Some("http://localhost/callback".to_string()),
+            authorize_url: Some("https://platform.claude.com/oauth/authorize".to_string()),
+            token_url: Some("https://platform.claude.com/v1/oauth/token".to_string()),
             device_code_url: None,
             validate_url: None,
             refresh_url: None,
