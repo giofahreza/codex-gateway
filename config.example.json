@@ -28,6 +28,18 @@
         "refresh_url": "https://chat.qwen.ai/api/v1/auths/",
         "session_url": "https://chat.qwen.ai/api/v1/auths/",
         "base_url": "https://portal.qwen.ai/v1"
+      },
+      "claude": {
+        "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+        "client_secret": "",
+        "redirect_uri": "https://console.anthropic.com/oauth/code/callback",
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "authorize_url": "https://claude.ai/v1/oauth/{organization_uuid}/authorize",
+        "token_url": "https://console.anthropic.com/v1/oauth/token",
+        "base_url": "https://api.anthropic.com"
       }
     }
   }

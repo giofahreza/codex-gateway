@@ -114,6 +114,14 @@ cargo run
         "refresh_url": "https://chat.qwen.ai/api/v1/auths/",
         "session_url": "https://chat.qwen.ai/api/v1/auths/",
         "base_url": "https://portal.qwen.ai/v1"
+      },
+      "claude": {
+        "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+        "redirect_uri": "https://console.anthropic.com/oauth/code/callback",
+        "scopes": ["user:profile", "user:inference"],
+        "authorize_url": "https://claude.ai/v1/oauth/{organization_uuid}/authorize",
+        "token_url": "https://console.anthropic.com/v1/oauth/token",
+        "base_url": "https://api.anthropic.com"
       }
     }
   }
@@ -126,7 +134,7 @@ Notes:
 - `admin_auth.api_key` falls back to `proxy_api_key` if left empty, but using a separate key is safer.
 - `admin_auth.totp_secret` can also be provided by `ADMIN_AUTH_TOTP_SECRET`.
 - `admin_auth.session_ttl_seconds` defaults to 12 hours.
-- `oauth.providers.qwen` is optional. Built-in defaults are used when omitted, and any field can also be overridden with `QWEN_OAUTH_*` environment variables from `.env.example`.
+- `oauth.providers.qwen` and `oauth.providers.claude` are optional. Built-in defaults are used when omitted, and any field can also be overridden with `QWEN_OAUTH_*` or `CLAUDE_OAUTH_*` environment variables from `.env.example`.
 
 ## Qwen Browser Token Flow
 
@@ -231,7 +239,7 @@ Current routing rules:
 - `qwen*` goes to Qwen.
 - `deepseek*` goes to DeepSeek.
 - `grok*` goes to Grok.
-- `claude*` goes to Antigravity.
+- `claude*` goes to the native Claude OAuth target.
 - Standard `gemini-*` models go to the native Gemini target.
 - Antigravity-only Gemini variants such as `gemini-3-pro-image`, `gemini-3-pro-high`, `gemini-3-pro-low`, and `gemini-2.5-flash-thinking` go to Antigravity.
 
@@ -241,7 +249,7 @@ Provider prefixes can force a specific target while keeping the upstream model i
 
 - `agw:gemini-2.5-pro` routes to Antigravity with upstream model `gemini-2.5-pro`.
 - `gem:gemini-2.5-pro` routes to the native Gemini target with upstream model `gemini-2.5-pro`.
-- Supported prefixes: `agw` Antigravity, `gem` Gemini, `qwn` Qwen, `dsk` DeepSeek, `grk` Grok, `min` MiniMax, `cop` GitHub Copilot, `cod` Codex/OpenAI.
+- Supported prefixes: `agw` Antigravity, `gem` Gemini, `qwn` Qwen, `dsk` DeepSeek, `grk` Grok, `min` MiniMax, `cop` GitHub Copilot, `cld` Claude, `cod` Codex/OpenAI.
 - Old unprefixed model names still work exactly as before.
 
 ### Custom models
@@ -295,7 +303,7 @@ Custom model rules:
 - `alias` is normalized by trimming whitespace and removing an optional `ctm:` prefix. `workhorse` and `ctm:workhorse` refer to the same alias.
 - Aliases must not be empty and must not contain whitespace, `:`, `/`, or `\`.
 - A custom model must have at least one enabled primary target.
-- Targets may use these provider prefixes: `agw`, `gem`, `qwn`, `dsk`, `grk`, `min`, `cop`, and `cod`. Unprefixed targets still use the normal provider routing rules.
+- Targets may use these provider prefixes: `agw`, `gem`, `qwn`, `dsk`, `grk`, `min`, `cop`, `cld`, and `cod`. Unprefixed targets still use the normal provider routing rules.
 - Targets cannot point at another custom model, so recursive `ctm:` routes are rejected.
 - Disabled custom models are hidden from model catalogs and return `503` if called directly.
 - Disabled primary or fallback target entries are skipped.
@@ -624,6 +632,72 @@ model_reasoning_effort = "high"
     "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
     "ANTHROPIC_MODEL": "cop:claude-sonnet-4",
     "ANTHROPIC_SMALL_FAST_MODEL": "cop:claude-sonnet-4"
+  }
+}
+```
+
+## Claude OAuth provider
+
+Claude is exposed as a native Anthropic OAuth target. Add a Claude account from the dashboard, or submit a Claude.ai browser cookie to the admin API. The gateway exchanges the cookie for Anthropic OAuth tokens and saves only the OAuth token file under `auth_dir`.
+
+```bash
+curl -sS http://127.0.0.1:8319/login/claude/start \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/json" \
+  -d '{"cookie":"CLAUDE_AI_COOKIE","label":"personal","organization_uuid":"optional"}'
+```
+
+Direct token fallback is also supported when you already have trusted Anthropic OAuth tokens:
+
+```bash
+curl -sS http://127.0.0.1:8319/login/claude/start \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/json" \
+  -d '{"access_token":"OAUTH_ACCESS_TOKEN","refresh_token":"OAUTH_REFRESH_TOKEN","label":"personal"}'
+```
+
+Public routing:
+
+- Use the `cld:` prefix when you want to force Claude, for example `cld:claude-sonnet-4-20250514`.
+- Unprefixed `claude*` model ids also route to the native Claude target.
+- `POST /v1/responses` and `POST /codex/responses` translate OpenAI Responses input/tools to Anthropic Messages and map the reply back to Responses format.
+- `POST /claude/v1/messages` and `POST /claude/messages` pass Anthropic Messages through to the Anthropic API using the saved OAuth token.
+- `GET /v1/models` and `GET /codex/models` include `cld:` model ids when a Claude account is enabled.
+- Access tokens are refreshed from the saved refresh token when they expire.
+
+Example:
+
+```bash
+curl http://127.0.0.1:8319/v1/responses \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"cld:claude-sonnet-4-20250514","input":"say hi in one word"}'
+```
+
+### Using Claude with the Codex CLI
+
+```toml
+[model_providers.claude_via_gateway]
+name = "Claude via codex-gateway"
+base_url = "http://127.0.0.1:8319/v1"
+experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+wire_api = "responses"
+
+[profiles.claude]
+model = "cld:claude-sonnet-4-20250514"
+model_provider = "claude_via_gateway"
+model_reasoning_effort = "high"
+```
+
+### Using Claude with Claude Code
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8319/claude",
+    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
+    "ANTHROPIC_MODEL": "cld:claude-sonnet-4-20250514",
+    "ANTHROPIC_SMALL_FAST_MODEL": "cld:claude-3-5-haiku-20241022"
   }
 }
 ```

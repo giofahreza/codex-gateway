@@ -44,6 +44,16 @@ pub fn route_to_target(
                 response_mode: ResponseMode::Passthrough,
             });
         }
+        if crate::source::v1::provider::target_from_request_body(&body) == Some(TargetModel::Claude)
+        {
+            return Ok(RoutedRequest {
+                target: TargetModel::Claude,
+                upstream_path: "anthropic/v1/messages".to_string(),
+                upstream_query: uri.query().map(|value| value.to_string()),
+                upstream_body: crate::source::v1::provider::strip_provider_prefix_from_body(body),
+                response_mode: ResponseMode::Passthrough,
+            });
+        }
 
         // Legacy bridge: Claude-style messages endpoint to Codex responses target.
         return Ok(codex::convert(
@@ -80,6 +90,15 @@ pub fn route_to_target(
         {
             return Ok(crate::source::v1::provider::convert(
                 TargetModel::Copilot,
+                upstream_path,
+                uri,
+                body,
+            ));
+        }
+        if crate::source::v1::provider::target_from_request_body(&body) == Some(TargetModel::Claude)
+        {
+            return Ok(crate::source::v1::provider::convert(
+                TargetModel::Claude,
                 upstream_path,
                 uri,
                 body,
@@ -157,19 +176,37 @@ mod tests {
     }
 
     #[test]
-    fn claude_messages_keeps_non_minimax_codex_bridge() {
+    fn claude_messages_keeps_non_provider_model_on_codex_bridge() {
         let uri: Uri = "/claude/messages".parse().unwrap();
         let routed = route_to_target(
             "/claude/messages",
             &uri,
             &Method::POST,
             &HeaderMap::new(),
-            Bytes::from_static(br#"{"model":"claude-sonnet-4-5","messages":[]}"#),
+            Bytes::from_static(br#"{"model":"gpt-5.1","messages":[]}"#),
         )
         .unwrap();
 
         assert_eq!(routed.target, TargetModel::Codex);
         assert_eq!(routed.upstream_path, "responses");
+    }
+
+    #[test]
+    fn claude_v1_messages_routes_native_claude_to_anthropic_oauth() {
+        let uri: Uri = "/claude/v1/messages".parse().unwrap();
+        let routed = route_to_target(
+            "/claude/v1/messages",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"cld:claude-sonnet-4-20250514","messages":[]}"#),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::Claude);
+        assert_eq!(routed.upstream_path, "anthropic/v1/messages");
+        let body: serde_json::Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "claude-sonnet-4-20250514");
     }
 }
 

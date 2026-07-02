@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn route_to_target_uses_antigravity_for_claude_and_special_gemini_models() {
+    fn route_to_target_uses_claude_for_claude_and_antigravity_for_special_gemini_models() {
         let uri: Uri = "/v1/responses".parse().unwrap();
 
         let claude = route_to_target(
@@ -336,7 +336,7 @@ mod tests {
             Bytes::from_static(br#"{"model":"claude-sonnet-4-5","input":"hi"}"#),
         )
         .unwrap();
-        assert_eq!(claude.target, crate::source::TargetModel::Antigravity);
+        assert_eq!(claude.target, crate::source::TargetModel::Claude);
 
         let agw_gemini = route_to_target(
             "/v1/responses",

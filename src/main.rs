@@ -46,6 +46,7 @@ struct AppState {
     minimax_rr: Arc<Mutex<usize>>,
     grok_rr: Arc<Mutex<usize>>,
     copilot_rr: Arc<Mutex<usize>>,
+    claude_rr: Arc<Mutex<usize>>,
     custom_model_rr: Arc<Mutex<HashMap<String, usize>>>,
     client: reqwest::Client,
     tokens: Arc<Mutex<Vec<UpstreamToken>>>,
@@ -56,6 +57,7 @@ struct AppState {
     minimax_accounts: Arc<Mutex<Vec<target::minimax::accounts::MiniMaxAccount>>>,
     grok_accounts: Arc<Mutex<Vec<target::grok::accounts::GrokAccount>>>,
     copilot_accounts: Arc<Mutex<Vec<target::copilot::accounts::CopilotAccount>>>,
+    claude_accounts: Arc<Mutex<Vec<target::claude::accounts::ClaudeAccount>>>,
     custom_models: Arc<Mutex<Vec<custom_models::CustomModel>>>,
     stats: Arc<Mutex<UsageStats>>,
     persisted_stats: Arc<Mutex<StatsStore>>,
@@ -113,6 +115,7 @@ struct UsageStats {
     minimax_accounts: Vec<AccountUsage>,
     grok_accounts: Vec<AccountUsage>,
     copilot_accounts: Vec<AccountUsage>,
+    claude_accounts: Vec<AccountUsage>,
     total_requests: u64,
     total_errors: u64,
     total_prompt_total: u64,
@@ -210,6 +213,7 @@ async fn main() {
     let grok_accounts = target::grok::accounts::load_accounts(&cfg, &disabled);
     let minimax_accounts = target::minimax::accounts::load_accounts(&cfg, &disabled);
     let copilot_accounts = target::copilot::accounts::load_accounts(&cfg, &disabled);
+    let claude_accounts = target::claude::accounts::load_accounts(&cfg, &disabled);
     let custom_models = custom_models::load(&cfg);
     let persisted_stats = stats_store::load(&cfg);
     let admin_sessions = admin_auth::load_sessions(&admin_session_path(&cfg));
@@ -222,6 +226,7 @@ async fn main() {
         &grok_accounts,
         &minimax_accounts,
         &copilot_accounts,
+        &claude_accounts,
         &persisted_stats,
     );
     let quota_cache = vec![None; tokens.len()];
@@ -247,6 +252,7 @@ async fn main() {
         grok_rr: Arc::new(Mutex::new(0)),
         minimax_rr: Arc::new(Mutex::new(0)),
         copilot_rr: Arc::new(Mutex::new(0)),
+        claude_rr: Arc::new(Mutex::new(0)),
         custom_model_rr: Arc::new(Mutex::new(HashMap::new())),
         client,
         tokens: Arc::new(Mutex::new(tokens)),
@@ -257,6 +263,7 @@ async fn main() {
         grok_accounts: Arc::new(Mutex::new(grok_accounts)),
         minimax_accounts: Arc::new(Mutex::new(minimax_accounts)),
         copilot_accounts: Arc::new(Mutex::new(copilot_accounts)),
+        claude_accounts: Arc::new(Mutex::new(claude_accounts)),
         custom_models: Arc::new(Mutex::new(custom_models)),
         stats: Arc::new(Mutex::new(stats)),
         persisted_stats: Arc::new(Mutex::new(persisted_stats)),
@@ -323,6 +330,10 @@ async fn main() {
         .route("/copilot/quota.json", any(copilot_quota_json_route))
         .route("/login/copilot/start", any(copilot_login_start_route))
         .route("/login/copilot/submit", any(copilot_login_submit_route))
+        .route("/claude/accounts.json", any(claude_accounts_route))
+        .route("/claude/quota.json", any(claude_quota_json_route))
+        .route("/login/claude/start", any(claude_login_start_route))
+        .route("/login/claude/submit", any(claude_login_submit_route))
         .route("/custom-models.json", any(custom_models_json_route))
         .route("/custom-models/save", any(custom_models_save_route))
         .route("/custom-models/delete", any(custom_models_delete_route))
@@ -1675,6 +1686,7 @@ async fn dashboard() -> impl IntoResponse {
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="minimax">MiniMax</button>
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="grok">Grok (xAI)</button>
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="copilot">GitHub Copilot</button>
+              <button type="button" class="provider-menu-item" role="menuitem" data-provider="claude">Claude</button>
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="custom-model">Custom model</button>
             </div>
           </div>
@@ -1812,6 +1824,13 @@ async fn dashboard() -> impl IntoResponse {
         </div>
         <div id="copilotCards"></div>
       </section>
+      <section class="provider-section" aria-labelledby="claudeProviderTitle">
+        <div class="provider-badge">
+          <span id="claudeProviderTitle">Claude</span>
+          <span class="provider-badge-count" id="claudeBadgeCount">0 accounts</span>
+        </div>
+        <div id="claudeCards"></div>
+      </section>
       </div>
     </main>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
@@ -1835,6 +1854,7 @@ async fn dashboard() -> impl IntoResponse {
       let lastGeminiQuota = new Map();
       let lastQwenQuota = new Map();
       let lastCopilotQuota = new Map();
+      let lastClaudeQuota = new Map();
       let openAgwRows = new Set();
       let openGeminiRows = new Set();
       let openQwenRows = new Set();
@@ -1859,6 +1879,7 @@ async fn dashboard() -> impl IntoResponse {
         'addMiniMaxModal',
         'addGrokModal',
         'addCopilotModal',
+        'addClaudeModal',
         'customModelModal',
         'confirmActionModal'
       ];
@@ -1873,7 +1894,8 @@ async fn dashboard() -> impl IntoResponse {
           deepseek: [],
           minimax: [],
           grok: [],
-          copilot: []
+          copilot: [],
+          claude: []
         },
         customModels: [],
         quotas: {
@@ -1884,7 +1906,8 @@ async fn dashboard() -> impl IntoResponse {
           deepseek: new Map(),
           minimax: new Map(),
           grok: new Map(),
-          copilot: new Map()
+          copilot: new Map(),
+          claude: new Map()
         }
       };
       const providerLabels = {
@@ -1895,7 +1918,8 @@ async fn dashboard() -> impl IntoResponse {
         deepseek: 'DeepSeek',
         minimax: 'MiniMax',
         grok: 'Grok',
-        copilot: 'GitHub Copilot'
+        copilot: 'GitHub Copilot',
+        claude: 'Claude'
       };
       function formatNumber(value) {
         return Number(value || 0).toLocaleString();
@@ -2136,6 +2160,8 @@ async fn dashboard() -> impl IntoResponse {
         refreshMiniMaxQuota();
         refreshCopilotQuota();
         refreshCopilotAccounts();
+        refreshClaudeQuota();
+        refreshClaudeAccounts();
         refreshCustomModels();
       }
       function accountActionMenuId(fileName) {
@@ -2723,6 +2749,7 @@ async fn dashboard() -> impl IntoResponse {
         rows.push(renderMetaLine('login', firstPresent(a, ['login']), false));
         rows.push(renderMetaLine('email', firstPresent(a, ['email']), false));
         rows.push(renderMetaLine('account id', firstPresent(a, ['account_id', 'subject']), true));
+        rows.push(renderMetaLine('organization uuid', firstPresent(a, ['organization_uuid']), true));
         rows.push(renderMetaLine('account type', firstPresent(a, ['account_type']), false));
         rows.push(renderMetaLine('project id', firstPresent(a, ['project_id']), true));
         rows.push(renderMetaLine('resource URL', firstPresent(a, ['resource_url', 'base_url', 'api_base_url']), true));
@@ -3166,6 +3193,52 @@ async fn dashboard() -> impl IntoResponse {
         dashboardState.quotas.copilot = quotaMap;
         updateOverview();
         refreshCopilotAccounts();
+      }
+      function buildClaudeCard(a, quota) {
+        var usage = '';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.prompt_total || 0) + '</span><span class="stat-pill-label">prompt</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.input_tokens || 0) + '</span><span class="stat-pill-label">in tok</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.output_tokens || 0) + '</span><span class="stat-pill-label">out tok</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.total_tokens || 0) + '</span><span class="stat-pill-label">total tok</span></span>';
+        if (a.email) {
+          usage += '<span class="stat-pill"><span class="stat-pill-label">email</span><span class="stat-pill-value">' + escapeHtml(a.email) + '</span></span>';
+        }
+        return '<div class="card">'
+          + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.email || a.organization_uuid || a.account_id || 'Claude') + '</span>' + renderAccountState(a) + renderAttentionBadge('claude', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
+          + '<div class="stat-pills">' + usage + '</div>'
+          + renderQuotaBars(quota, { provider: 'claude', key: a.file_name || a.label || a.organization_uuid || a.account_id || '' })
+          + renderAccountModels(a, quota, 'claude', a.file_name || a.label || a.organization_uuid || a.account_id || '')
+          + renderMetaDetails(connectionRows('claude', a), 'Connection details', 'claude', a, a.file_name || a.label || a.organization_uuid || a.account_id || '')
+          + '</div>';
+      }
+      async function refreshClaudeAccounts() {
+        var res = await adminFetch('/claude/accounts.json');
+        if (!res) return;
+        var data = await res.json();
+        var accounts = data.accounts || [];
+        dashboardState.providers.claude = accounts;
+        var cards = accounts.map(function(a) {
+          return buildClaudeCard(a, lastClaudeQuota.get(a.file_name || a.label) || lastClaudeQuota.get(a.organization_uuid) || null);
+        }).join('');
+        document.getElementById('claudeCards').innerHTML = cards || '<div class="empty-state">No Claude accounts</div>';
+        document.getElementById('claudeBadgeCount').textContent = accounts.length + ' accounts';
+        updateOverview();
+      }
+      async function refreshClaudeQuota() {
+        const res = await adminFetch('/claude/quota.json');
+        if (!res) return;
+        const quota = await res.json();
+        const quotaMap = new Map();
+        (quota.accounts || []).forEach(q => {
+          if (q.file_name || q.label) quotaMap.set(q.file_name || q.label, q);
+          if (q.organization_uuid) quotaMap.set(q.organization_uuid, q);
+        });
+        lastClaudeQuota = quotaMap;
+        dashboardState.quotas.claude = quotaMap;
+        updateOverview();
+        refreshClaudeAccounts();
       }
       function normalizeCustomAlias(alias) {
         return String(alias || '').trim().replace(/^ctm:/i, '');
@@ -3854,6 +3927,31 @@ async fn dashboard() -> impl IntoResponse {
         </div>
       </div>
     </div>
+    <div id="addClaudeModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addClaudeTitle" aria-hidden="true" style="display:none;">
+      <div class="modal-card">
+        <h2 id="addClaudeTitle" style="margin-top:0;">Add Claude Account</h2>
+        <p>Paste a Claude.ai browser cookie. The gateway exchanges it for Anthropic OAuth tokens and saves only the OAuth tokens. Direct OAuth token paste is available as a fallback.</p>
+        <label for="claudeLabelInput" style="margin-top:12px;">Label</label>
+        <input id="claudeLabelInput" placeholder="optional label">
+        <label for="claudeOrganizationInput" style="margin-top:12px;">Organization UUID</label>
+        <input id="claudeOrganizationInput" placeholder="optional unless multiple organizations exist">
+        <label for="claudeBaseUrlInput" style="margin-top:12px;">API Base URL</label>
+        <input id="claudeBaseUrlInput" placeholder="https://api.anthropic.com">
+        <label for="claudeCookieInput" style="margin-top:12px;">Claude.ai Cookie</label>
+        <textarea id="claudeCookieInput" rows="5" placeholder="Paste Claude.ai browser cookie here"></textarea>
+        <button type="button" onclick="submitClaudeCookie()" style="margin-top:12px;">Save with OAuth</button>
+        <div id="claudeStatus" class="muted" style="margin-top:8px;"></div>
+        <p class="muted" style="margin-top:16px;">Direct fallback: paste Anthropic OAuth tokens from a trusted local Claude login.</p>
+        <label for="claudeAccessTokenInput" style="margin-top:12px;">Access Token</label>
+        <textarea id="claudeAccessTokenInput" rows="4" placeholder="OAuth access token"></textarea>
+        <label for="claudeRefreshTokenInput" style="margin-top:12px;">Refresh Token</label>
+        <textarea id="claudeRefreshTokenInput" rows="3" placeholder="optional refresh token"></textarea>
+        <button type="button" onclick="submitClaudeToken()" style="margin-top:12px;">Save Token</button>
+        <div class="modal-actions" style="margin-top:16px;">
+          <button type="button" id="closeClaudeModalBtn" class="secondary-button">Close</button>
+        </div>
+      </div>
+    </div>
     <div id="customModelModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="customModelTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
         <h2 id="customModelTitle" style="margin-top:0;">Add Custom Model</h2>
@@ -3954,6 +4052,7 @@ async fn dashboard() -> impl IntoResponse {
           else if (provider === 'minimax') openModal('addMiniMaxModal');
           else if (provider === 'grok') openModal('addGrokModal');
           else if (provider === 'copilot') openModal('addCopilotModal');
+          else if (provider === 'claude') openModal('addClaudeModal');
           else if (provider === 'custom-model') openCustomModelModal();
         });
       });
@@ -4343,12 +4442,88 @@ async fn dashboard() -> impl IntoResponse {
           refreshCopilotAccounts();
         }
       }
+      function closeClaudeModal() {
+        closeModal('addClaudeModal');
+        document.getElementById('claudeCookieInput').value = '';
+        document.getElementById('claudeAccessTokenInput').value = '';
+        document.getElementById('claudeRefreshTokenInput').value = '';
+      }
+      function claudePayloadBase() {
+        const label = document.getElementById('claudeLabelInput').value.trim();
+        const organizationUuid = document.getElementById('claudeOrganizationInput').value.trim();
+        const baseUrl = document.getElementById('claudeBaseUrlInput').value.trim();
+        const payload = {};
+        if (label) payload.label = label;
+        if (organizationUuid) payload.organization_uuid = organizationUuid;
+        if (baseUrl) payload.base_url = baseUrl;
+        return payload;
+      }
+      async function submitClaudeCookie() {
+        const cookie = document.getElementById('claudeCookieInput').value.trim();
+        if (!cookie) {
+          document.getElementById('claudeStatus').textContent = 'Paste a Claude.ai cookie first.';
+          return;
+        }
+        document.getElementById('claudeStatus').textContent = 'Exchanging Claude cookie for OAuth tokens...';
+        const payload = claudePayloadBase();
+        payload.cookie = cookie;
+        const res = await adminFetch('/login/claude/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!res) return;
+        const data = await res.json();
+        document.getElementById('claudeStatus').textContent = data.message || (data.ok ? 'Claude account saved.' : 'Failed to save Claude account.');
+        if (data.organizations && data.organizations.length) {
+          document.getElementById('claudeStatus').textContent += ' Choose an organization UUID and try again.';
+        }
+        if (data.ok) {
+          document.getElementById('claudeCookieInput').value = '';
+          refreshClaudeQuota();
+          refreshClaudeAccounts();
+        }
+      }
+      async function submitClaudeToken() {
+        const accessToken = document.getElementById('claudeAccessTokenInput').value.trim();
+        const refreshToken = document.getElementById('claudeRefreshTokenInput').value.trim();
+        if (!accessToken) {
+          document.getElementById('claudeStatus').textContent = 'Paste a Claude OAuth access token first.';
+          return;
+        }
+        document.getElementById('claudeStatus').textContent = 'Validating Claude token...';
+        const payload = claudePayloadBase();
+        payload.access_token = accessToken;
+        if (refreshToken) payload.refresh_token = refreshToken;
+        const res = await adminFetch('/login/claude/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!res) return;
+        const data = await res.json();
+        document.getElementById('claudeStatus').textContent = data.message || (data.ok ? 'Claude account saved.' : 'Failed to save Claude token.');
+        if (data.ok) {
+          document.getElementById('claudeAccessTokenInput').value = '';
+          document.getElementById('claudeRefreshTokenInput').value = '';
+          refreshClaudeQuota();
+          refreshClaudeAccounts();
+        }
+      }
       document.getElementById('closeCopilotModalBtn').addEventListener('click', () => {
         closeCopilotModal();
       });
       document.getElementById('addCopilotModal').addEventListener('click', (e) => {
         if (e.target.id === 'addCopilotModal') {
           closeCopilotModal();
+        }
+      });
+      document.getElementById('closeClaudeModalBtn').addEventListener('click', () => {
+        closeClaudeModal();
+      });
+      document.getElementById('addClaudeModal').addEventListener('click', (e) => {
+        if (e.target.id === 'addClaudeModal') {
+          closeClaudeModal();
         }
       });
       document.getElementById('addCustomModelBtn').addEventListener('click', () => {
@@ -4494,6 +4669,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshMiniMaxAccounts();
         refreshMiniMaxQuota();
         refreshCopilotQuota().then(() => refreshCopilotAccounts());
+        refreshClaudeQuota().then(() => refreshClaudeAccounts());
         refreshCustomModels();
         if (dashboardIntervalsStarted) {
           return;
@@ -4508,6 +4684,7 @@ async fn dashboard() -> impl IntoResponse {
         setInterval(() => { if (adminAuthenticated) refreshGrokQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshMiniMaxQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshCopilotQuota(); }, 60000);
+        setInterval(() => { if (adminAuthenticated) refreshClaudeQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshAgwAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshGeminiAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshQwenAccounts(); }, 10000);
@@ -4515,6 +4692,7 @@ async fn dashboard() -> impl IntoResponse {
         setInterval(() => { if (adminAuthenticated) refreshMiniMaxAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshGrokAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshCopilotAccounts(); }, 10000);
+        setInterval(() => { if (adminAuthenticated) refreshClaudeAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshContextChart(); }, 60000);
       }
       document.getElementById('adminLoginForm').addEventListener('submit', async (e) => {
@@ -5356,6 +5534,51 @@ async fn copilot_login_submit_route(
         .into_response()
 }
 
+async fn claude_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::claude::admin::accounts_json(State(state))
+        .await
+        .into_response()
+}
+
+async fn claude_quota_json_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::claude::admin::quota_json(State(state))
+        .await
+        .into_response()
+}
+
+async fn claude_login_start_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    method: Method,
+    body: Bytes,
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::claude::admin::login_start(State(state), method, body)
+        .await
+        .into_response()
+}
+
+async fn claude_login_submit_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<target::claude::admin::CallbackForm>,
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::claude::admin::login_submit(State(state), Form(form))
+        .await
+        .into_response()
+}
+
 async fn deepseek_login_start_route(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -5463,6 +5686,16 @@ async fn usage_summary_route(State(state): State<AppState>, headers: HeaderMap) 
         .into_iter()
         .map(|(key, usage)| serde_json::json!({ "key": key, "usage": usage }))
         .collect::<Vec<_>>();
+    let mut copilot = persisted
+        .copilot
+        .into_iter()
+        .map(|(key, usage)| serde_json::json!({ "key": key, "usage": usage }))
+        .collect::<Vec<_>>();
+    let mut claude = persisted
+        .claude
+        .into_iter()
+        .map(|(key, usage)| serde_json::json!({ "key": key, "usage": usage }))
+        .collect::<Vec<_>>();
     codex.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     antigravity.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     gemini.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
@@ -5470,6 +5703,8 @@ async fn usage_summary_route(State(state): State<AppState>, headers: HeaderMap) 
     deepseek.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     grok.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     minimax.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+    copilot.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+    claude.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     axum::Json(serde_json::json!({
         "totals": {
             "requests": persisted.total_requests,
@@ -5491,7 +5726,9 @@ async fn usage_summary_route(State(state): State<AppState>, headers: HeaderMap) 
             "qwen": qwen,
             "deepseek": deepseek,
             "grok": grok,
-            "minimax": minimax
+            "minimax": minimax,
+            "copilot": copilot,
+            "claude": claude
         }
     }))
     .into_response()
@@ -6215,6 +6452,18 @@ async fn proxy(
                     .into_response(),
             };
         }
+        TargetModel::Claude => {
+            return match routed.upstream_path.as_str() {
+                "anthropic/v1/messages" => {
+                    target::claude::api::messages(State(state), headers, routed.upstream_body)
+                        .await
+                        .into_response()
+                }
+                _ => target::claude::api::responses(State(state), headers, routed.upstream_body)
+                    .await
+                    .into_response(),
+            };
+        }
         TargetModel::Codex => {}
     }
     let upstream = match routed.target {
@@ -6230,6 +6479,7 @@ async fn proxy(
         | TargetModel::Grok
         | TargetModel::MiniMax
         | TargetModel::Copilot
+        | TargetModel::Claude
         | TargetModel::Custom
         | TargetModel::CodexModels
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
@@ -6283,6 +6533,7 @@ async fn proxy(
         | TargetModel::Grok
         | TargetModel::MiniMax
         | TargetModel::Copilot
+        | TargetModel::Claude
         | TargetModel::Custom
         | TargetModel::CodexModels
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
@@ -6314,6 +6565,7 @@ async fn proxy(
         | TargetModel::Grok
         | TargetModel::MiniMax
         | TargetModel::Copilot
+        | TargetModel::Claude
         | TargetModel::Custom
         | TargetModel::CodexModels
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
@@ -6827,6 +7079,14 @@ fn best_provider_score_for_model(state: &AppState, model: &str) -> AccountSelect
                 |idx| copilot_account_selection_score(state, &accounts[idx]),
             )
         }
+        TargetModel::Claude => {
+            let accounts = state.claude_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| accounts[idx].enabled,
+                |idx| claude_account_selection_score(state, &accounts[idx]),
+            )
+        }
         TargetModel::Custom | TargetModel::CodexModels | TargetModel::UnifiedV1Models => {
             AccountSelectionScore {
                 quota_pressure: Some(f64::INFINITY),
@@ -6922,6 +7182,9 @@ async fn dispatch_custom_target(
                 .into_response()
         }
         TargetModel::Copilot => target::copilot::api::responses(State(state), headers, body)
+            .await
+            .into_response(),
+        TargetModel::Claude => target::claude::api::responses(State(state), headers, body)
             .await
             .into_response(),
         TargetModel::Custom | TargetModel::CodexModels | TargetModel::UnifiedV1Models => (
@@ -7182,6 +7445,7 @@ fn preferred_model_provider_prefix(model_id: &str) -> &'static str {
         TargetModel::Grok => "grk",
         TargetModel::MiniMax => "min",
         TargetModel::Copilot => "cop",
+        TargetModel::Claude => "cld",
         TargetModel::Custom => "ctm",
         TargetModel::Codex | TargetModel::CodexModels | TargetModel::UnifiedV1Models => "cod",
     }
@@ -7296,6 +7560,21 @@ async fn collect_unified_v1_models(
             "cop",
         ),
     );
+    append_unique_models(
+        &mut models,
+        &mut seen,
+        provider_prefixed_models(
+            fetch_openai_models_from_response(if has_enabled_claude_account(state) {
+                target::claude::api::models(State(state.clone()), headers.clone())
+                    .await
+                    .into_response()
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
+            })
+            .await,
+            "cld",
+        ),
+    );
     append_unique_models(&mut models, &mut seen, custom_model_openai_entries(state));
 
     models
@@ -7393,7 +7672,7 @@ fn split_provider_prefixed_model_id(model: &str) -> Option<(&str, &str)> {
 fn is_supported_provider_prefix(prefix: &str) -> bool {
     matches!(
         prefix.to_ascii_lowercase().as_str(),
-        "agw" | "gem" | "qwn" | "dsk" | "grk" | "min" | "cop" | "cod" | "ctm"
+        "agw" | "gem" | "qwn" | "dsk" | "grk" | "min" | "cop" | "cld" | "cod" | "ctm"
     )
 }
 
@@ -7488,6 +7767,15 @@ fn has_enabled_minimax_account(state: &AppState) -> bool {
 fn has_enabled_copilot_account(state: &AppState) -> bool {
     state
         .copilot_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|account| account.enabled)
+}
+
+fn has_enabled_claude_account(state: &AppState) -> bool {
+    state
+        .claude_accounts
         .lock()
         .unwrap()
         .iter()
@@ -7871,6 +8159,7 @@ fn build_usage_stats(
     grok_accounts: &[target::grok::accounts::GrokAccount],
     minimax_accounts: &[target::minimax::accounts::MiniMaxAccount],
     copilot_accounts: &[target::copilot::accounts::CopilotAccount],
+    claude_accounts: &[target::claude::accounts::ClaudeAccount],
     persisted_stats: &StatsStore,
 ) -> UsageStats {
     let codex_accounts = tokens
@@ -8109,6 +8398,35 @@ fn build_usage_stats(
         })
         .collect();
 
+    let claude_accounts = claude_accounts
+        .iter()
+        .map(|account| {
+            let key = claude_stats_key(account);
+            let stored = persisted_stats
+                .account_usage(Provider::Claude, &key)
+                .cloned()
+                .unwrap_or_default();
+            AccountUsage {
+                key,
+                label: account.label.clone(),
+                account_id: account.account_id.clone(),
+                requests: stored.requests,
+                errors: stored.errors,
+                prompt_total: stored.prompt_total,
+                prompt_error_total: stored.prompt_error_total,
+                input_tokens: stored.input_tokens,
+                output_tokens: stored.output_tokens,
+                total_tokens: stored.total_tokens,
+                cache_tokens: stored.cache_tokens,
+                reasoning_tokens: stored.reasoning_tokens,
+                first_seen_at: stored.first_seen_at,
+                last_seen_at: stored.last_seen_at,
+                last_success_at: stored.last_success_at,
+                last_error_at: stored.last_error_at,
+            }
+        })
+        .collect();
+
     UsageStats {
         codex_accounts,
         agw_accounts,
@@ -8118,6 +8436,7 @@ fn build_usage_stats(
         grok_accounts,
         minimax_accounts,
         copilot_accounts,
+        claude_accounts,
         total_requests: persisted_stats.total_requests,
         total_errors: persisted_stats.total_errors,
         total_prompt_total: persisted_stats.total_prompt_total,
@@ -8141,6 +8460,7 @@ pub(crate) fn sync_usage_stats(state: &AppState) {
     let grok_accounts = state.grok_accounts.lock().unwrap().clone();
     let minimax_accounts = state.minimax_accounts.lock().unwrap().clone();
     let copilot_accounts = state.copilot_accounts.lock().unwrap().clone();
+    let claude_accounts = state.claude_accounts.lock().unwrap().clone();
     let persisted_stats = state.persisted_stats.lock().unwrap().clone();
     let mut stats = state.stats.lock().unwrap();
     *stats = build_usage_stats(
@@ -8152,6 +8472,7 @@ pub(crate) fn sync_usage_stats(state: &AppState) {
         &grok_accounts,
         &minimax_accounts,
         &copilot_accounts,
+        &claude_accounts,
         &persisted_stats,
     );
 }
@@ -8378,6 +8699,30 @@ pub(crate) fn copilot_stats_key(account: &target::copilot::accounts::CopilotAcco
         return format!("copilot:file:{}", file_name);
     }
     format!("copilot:label:{}", account.label)
+}
+
+pub(crate) fn claude_stats_key(account: &target::claude::accounts::ClaudeAccount) -> String {
+    if !account.organization_uuid.trim().is_empty() {
+        return format!("claude:organization:{}", account.organization_uuid);
+    }
+    if !account.account_id.trim().is_empty() {
+        return format!("claude:account_id:{}", account.account_id);
+    }
+    if let Some(email) = account
+        .email
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return format!("claude:email:{}", email);
+    }
+    if let Some(file_name) = account
+        .file_name
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return format!("claude:file:{}", file_name);
+    }
+    format!("claude:label:{}", account.label)
 }
 
 const ACCOUNT_SELECTION_QUOTA_EPSILON: f64 = 0.01;
@@ -8644,6 +8989,13 @@ pub(crate) fn copilot_account_selection_score(
     account: &target::copilot::accounts::CopilotAccount,
 ) -> AccountSelectionScore {
     usage_backed_selection_score(state, Provider::Copilot, copilot_stats_key(account), None)
+}
+
+pub(crate) fn claude_account_selection_score(
+    state: &AppState,
+    account: &target::claude::accounts::ClaudeAccount,
+) -> AccountSelectionScore {
+    usage_backed_selection_score(state, Provider::Claude, claude_stats_key(account), None)
 }
 
 fn codex_quota_pressure(summary: &target::codex::quota::QuotaSummary) -> Option<f64> {
@@ -9009,6 +9361,25 @@ pub(crate) fn copilot_usage_context(
         provider: Provider::Copilot,
         provider_name: "copilot",
         key: copilot_stats_key(account),
+        label: account.label.clone(),
+        account_id: account.account_id.clone(),
+        credential_file: account.file_name.clone(),
+        model,
+        request_path: request_path.into(),
+        prompt,
+    }
+}
+
+pub(crate) fn claude_usage_context(
+    account: &target::claude::accounts::ClaudeAccount,
+    model: Option<String>,
+    request_path: impl Into<String>,
+    prompt: PromptMetrics,
+) -> UsageContext {
+    UsageContext {
+        provider: Provider::Claude,
+        provider_name: "claude",
+        key: claude_stats_key(account),
         label: account.label.clone(),
         account_id: account.account_id.clone(),
         credential_file: account.file_name.clone(),
@@ -9434,6 +9805,26 @@ pub(crate) fn record_copilot_error(
 }
 
 pub(crate) fn record_copilot_success(
+    state: &AppState,
+    context: &UsageContext,
+    metrics: &UsageMetrics,
+) {
+    record_usage_success(state, context, metrics);
+}
+
+pub(crate) fn record_claude_request(state: &AppState, context: &UsageContext) {
+    record_request_started(state, context);
+}
+
+pub(crate) fn record_claude_error(
+    state: &AppState,
+    context: &UsageContext,
+    message: impl Into<String>,
+) {
+    record_request_error(state, context, message);
+}
+
+pub(crate) fn record_claude_success(
     state: &AppState,
     context: &UsageContext,
     metrics: &UsageMetrics,

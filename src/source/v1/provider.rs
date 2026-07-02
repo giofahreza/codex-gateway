@@ -45,7 +45,7 @@ fn target_from_unprefixed_model(model: &str) -> TargetModel {
     } else if lower.starts_with("minimax") || lower.starts_with("abab") {
         TargetModel::MiniMax
     } else if lower.starts_with("claude") {
-        TargetModel::Antigravity
+        TargetModel::Claude
     } else if lower.starts_with("gemini") {
         if is_antigravity_gemini_model(&lower) {
             TargetModel::Antigravity
@@ -87,6 +87,7 @@ fn target_from_provider_prefix(provider: &str) -> Option<TargetModel> {
         "grk" => Some(TargetModel::Grok),
         "min" => Some(TargetModel::MiniMax),
         "cop" => Some(TargetModel::Copilot),
+        "cld" => Some(TargetModel::Claude),
         "cod" => Some(TargetModel::Codex),
         "ctm" => Some(TargetModel::Custom),
         _ => None,
@@ -154,10 +155,7 @@ mod tests {
         assert_eq!(target_from_model("MiniMax-Text-01"), TargetModel::MiniMax);
         assert_eq!(target_from_model("abab6.5s-chat"), TargetModel::MiniMax);
         assert_eq!(target_from_model("minimax-text-01"), TargetModel::MiniMax);
-        assert_eq!(
-            target_from_model("claude-sonnet-4-5"),
-            TargetModel::Antigravity
-        );
+        assert_eq!(target_from_model("claude-sonnet-4-5"), TargetModel::Claude);
         assert_eq!(target_from_model("gemini-2.5-pro"), TargetModel::Gemini);
         assert_eq!(
             target_from_model("agw:gemini-2.5-pro"),
@@ -172,6 +170,10 @@ mod tests {
         assert_eq!(target_from_model("grk:grok-4.3"), TargetModel::Grok);
         assert_eq!(target_from_model("min:MiniMax-M3"), TargetModel::MiniMax);
         assert_eq!(target_from_model("cop:gpt-5.1"), TargetModel::Copilot);
+        assert_eq!(
+            target_from_model("cld:claude-sonnet-4-20250514"),
+            TargetModel::Claude
+        );
         assert_eq!(target_from_model("cod:gpt-5.4"), TargetModel::Codex);
         assert_eq!(target_from_model("ctm:default"), TargetModel::Custom);
         assert_eq!(

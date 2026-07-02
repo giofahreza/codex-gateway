@@ -11,6 +11,7 @@ pub enum Provider {
     Grok,
     MiniMax,
     Copilot,
+    Claude,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -85,6 +86,8 @@ pub struct StatsStore {
     pub minimax: HashMap<String, StoredAccountUsage>,
     #[serde(default)]
     pub copilot: HashMap<String, StoredAccountUsage>,
+    #[serde(default)]
+    pub claude: HashMap<String, StoredAccountUsage>,
 }
 
 impl Default for StatsStore {
@@ -110,6 +113,7 @@ impl Default for StatsStore {
             grok: HashMap::new(),
             minimax: HashMap::new(),
             copilot: HashMap::new(),
+            claude: HashMap::new(),
         }
     }
 }
@@ -125,6 +129,7 @@ impl StatsStore {
             Provider::Grok => self.grok.get(key),
             Provider::MiniMax => self.minimax.get(key),
             Provider::Copilot => self.copilot.get(key),
+            Provider::Claude => self.claude.get(key),
         }
     }
 
@@ -142,6 +147,7 @@ impl StatsStore {
             Provider::Grok => self.grok.entry(key).or_default(),
             Provider::MiniMax => self.minimax.entry(key).or_default(),
             Provider::Copilot => self.copilot.entry(key).or_default(),
+            Provider::Claude => self.claude.entry(key).or_default(),
         }
     }
 }

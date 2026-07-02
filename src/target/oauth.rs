@@ -21,6 +21,7 @@ const GEMINI_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/userinfo.profile",
 ];
 const QWEN_SCOPES: &[&str] = &["openid", "profile", "email", "model.completion"];
+const CLAUDE_SCOPES: &[&str] = &["user:profile", "user:inference"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OAuthProvider {
@@ -28,6 +29,7 @@ pub enum OAuthProvider {
     Antigravity,
     Gemini,
     Qwen,
+    Claude,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -46,6 +48,8 @@ pub struct OAuthProvidersConfig {
     pub gemini: OAuthProviderOverride,
     #[serde(default)]
     pub qwen: OAuthProviderOverride,
+    #[serde(default)]
+    pub claude: OAuthProviderOverride,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -85,6 +89,7 @@ impl OAuthProvider {
             Self::Antigravity => "ANTIGRAVITY_OAUTH",
             Self::Gemini => "GEMINI_OAUTH",
             Self::Qwen => "QWEN_OAUTH",
+            Self::Claude => "CLAUDE_OAUTH",
         }
     }
 
@@ -94,6 +99,7 @@ impl OAuthProvider {
             Self::Antigravity => "antigravity",
             Self::Gemini => "gemini",
             Self::Qwen => "qwen",
+            Self::Claude => "claude",
         }
     }
 
@@ -103,6 +109,7 @@ impl OAuthProvider {
             "antigravity" => Some(Self::Antigravity),
             "gemini" => Some(Self::Gemini),
             "qwen" => Some(Self::Qwen),
+            "claude" => Some(Self::Claude),
             _ => None,
         }
     }
@@ -199,6 +206,7 @@ fn provider_override<'a>(
         OAuthProvider::Antigravity => &cfg.oauth.providers.antigravity,
         OAuthProvider::Gemini => &cfg.oauth.providers.gemini,
         OAuthProvider::Qwen => &cfg.oauth.providers.qwen,
+        OAuthProvider::Claude => &cfg.oauth.providers.claude,
     }
 }
 
@@ -264,6 +272,24 @@ fn default_provider_config(provider: OAuthProvider) -> OAuthProviderConfig {
             session_url: Some("https://chat.qwen.ai/api/v1/auths/".to_string()),
             base_url: Some("https://portal.qwen.ai/v1".to_string()),
             scopes: QWEN_SCOPES
+                .iter()
+                .map(|scope| (*scope).to_string())
+                .collect(),
+        },
+        OAuthProvider::Claude => OAuthProviderConfig {
+            client_id: Some(super::claude::auth::DEFAULT_CLIENT_ID.to_string()),
+            client_secret: None,
+            redirect_uri: Some("https://console.anthropic.com/oauth/code/callback".to_string()),
+            authorize_url: Some(
+                "https://claude.ai/v1/oauth/{organization_uuid}/authorize".to_string(),
+            ),
+            token_url: Some("https://console.anthropic.com/v1/oauth/token".to_string()),
+            device_code_url: None,
+            validate_url: None,
+            refresh_url: None,
+            session_url: None,
+            base_url: Some("https://api.anthropic.com".to_string()),
+            scopes: CLAUDE_SCOPES
                 .iter()
                 .map(|scope| (*scope).to_string())
                 .collect(),
@@ -372,6 +398,7 @@ fn provider_client_id_fallbacks(provider: OAuthProvider) -> &'static [&'static s
     match provider {
         OAuthProvider::Antigravity => &["ANTIGRAVITY_GOOGLE_CLIENT_ID"],
         OAuthProvider::Gemini => &["GEMINI_GOOGLE_CLIENT_ID"],
+        OAuthProvider::Claude => &[],
         _ => &[],
     }
 }
@@ -380,6 +407,7 @@ fn provider_client_secret_fallbacks(provider: OAuthProvider) -> &'static [&'stat
     match provider {
         OAuthProvider::Antigravity => &["ANTIGRAVITY_GOOGLE_CLIENT_SECRET"],
         OAuthProvider::Gemini => &["GEMINI_GOOGLE_CLIENT_SECRET"],
+        OAuthProvider::Claude => &[],
         _ => &[],
     }
 }
@@ -434,6 +462,7 @@ fn state_cookie_name(provider: OAuthProvider) -> &'static str {
         OAuthProvider::Antigravity => "codex_gateway_oauth_state_antigravity",
         OAuthProvider::Gemini => "codex_gateway_oauth_state_gemini",
         OAuthProvider::Qwen => "codex_gateway_oauth_state_qwen",
+        OAuthProvider::Claude => "codex_gateway_oauth_state_claude",
     }
 }
 
