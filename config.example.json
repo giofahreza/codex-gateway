@@ -30,14 +30,18 @@
         "base_url": "https://portal.qwen.ai/v1"
       },
       "claude": {
-        "client_id": "https://claude.ai/oauth/claude-code-client-metadata",
+        "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
         "client_secret": "",
-        "redirect_uri": "http://localhost/callback",
+        "redirect_uri": "https://platform.claude.com/oauth/code/callback",
         "scopes": [
+          "org:create_api_key",
           "user:profile",
-          "user:inference"
+          "user:inference",
+          "user:sessions:claude_code",
+          "user:mcp_servers",
+          "user:file_upload"
         ],
-        "authorize_url": "https://platform.claude.com/oauth/authorize",
+        "authorize_url": "https://claude.com/cai/oauth/authorize",
         "token_url": "https://platform.claude.com/v1/oauth/token",
         "base_url": "https://api.anthropic.com"
       }

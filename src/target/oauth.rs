@@ -21,7 +21,14 @@ const GEMINI_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/userinfo.profile",
 ];
 const QWEN_SCOPES: &[&str] = &["openid", "profile", "email", "model.completion"];
-const CLAUDE_SCOPES: &[&str] = &["user:profile", "user:inference"];
+const CLAUDE_SCOPES: &[&str] = &[
+    "org:create_api_key",
+    "user:profile",
+    "user:inference",
+    "user:sessions:claude_code",
+    "user:mcp_servers",
+    "user:file_upload",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OAuthProvider {
@@ -279,8 +286,8 @@ fn default_provider_config(provider: OAuthProvider) -> OAuthProviderConfig {
         OAuthProvider::Claude => OAuthProviderConfig {
             client_id: Some(super::claude::auth::DEFAULT_CLIENT_ID.to_string()),
             client_secret: None,
-            redirect_uri: Some("http://localhost/callback".to_string()),
-            authorize_url: Some("https://platform.claude.com/oauth/authorize".to_string()),
+            redirect_uri: Some("https://platform.claude.com/oauth/code/callback".to_string()),
+            authorize_url: Some("https://claude.com/cai/oauth/authorize".to_string()),
             token_url: Some("https://platform.claude.com/v1/oauth/token".to_string()),
             device_code_url: None,
             validate_url: None,

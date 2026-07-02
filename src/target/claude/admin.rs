@@ -176,7 +176,7 @@ pub async fn login_submit(
     if redirect_url.is_empty() {
         return axum::Json(serde_json::json!({
             "ok": false,
-            "message": "redirect_url is required"
+            "message": "authorization code or callback URL is required"
         }))
         .into_response();
     }

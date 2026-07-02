@@ -7,14 +7,14 @@ use std::{path::Path, time::Duration};
 use super::accounts::ClaudeModelInfo;
 use crate::target::oauth::{provider_config, OAuthProvider};
 
-pub const DEFAULT_CLIENT_ID: &str = "https://claude.ai/oauth/claude-code-client-metadata";
+pub const DEFAULT_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const CLAUDE_AI_BASE_URL: &str = "https://claude.ai";
-const DEFAULT_AUTHORIZE_URL: &str = "https://platform.claude.com/oauth/authorize";
+const DEFAULT_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
 const DEFAULT_COOKIE_AUTHORIZE_URL: &str =
     "https://claude.ai/v1/oauth/{organization_uuid}/authorize";
 const DEFAULT_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
-const DEFAULT_REDIRECT_URI: &str = "http://localhost/callback";
-const DEFAULT_SCOPE: &str = "user:profile user:inference";
+const DEFAULT_REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
+const DEFAULT_SCOPE: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 const TOKEN_USER_AGENT: &str = "claude-cli/2.1.81 (external, cli)";
 
 #[derive(Clone, Debug)]
@@ -139,6 +139,7 @@ pub fn build_manual_authorize_payload(
 pub fn build_auth_url(pending: &PendingOAuth) -> Result<String, String> {
     let mut url = url::Url::parse(&authorize_url_template()).map_err(|err| err.to_string())?;
     url.query_pairs_mut()
+        .append_pair("code", "true")
         .append_pair("client_id", &client_id())
         .append_pair("response_type", "code")
         .append_pair("redirect_uri", &redirect_uri())
@@ -671,7 +672,7 @@ mod tests {
     #[test]
     fn parse_callback_accepts_url_and_code_hash_state() {
         let (code, state) = parse_oauth_callback(
-            "https://console.anthropic.com/oauth/code/callback?code=abc&state=xyz",
+            "https://platform.claude.com/oauth/code/callback?code=abc&state=xyz",
         )
         .unwrap();
         assert_eq!(code, "abc");
@@ -680,6 +681,43 @@ mod tests {
         let (code, state) = parse_oauth_callback("abc#xyz").unwrap();
         assert_eq!(code, "abc");
         assert_eq!(state, "xyz");
+    }
+
+    #[test]
+    fn browser_auth_url_matches_claude_code_subscription_flow() {
+        let pending = PendingOAuth::new();
+        let url = build_auth_url(&pending).unwrap();
+        let parsed = url::Url::parse(&url).unwrap();
+        let params = parsed
+            .query_pairs()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(
+            parsed.as_str().split('?').next().unwrap(),
+            DEFAULT_AUTHORIZE_URL
+        );
+        assert_eq!(params.get("code").map(String::as_str), Some("true"));
+        assert_eq!(
+            params.get("client_id").map(String::as_str),
+            Some(DEFAULT_CLIENT_ID)
+        );
+        assert_eq!(
+            params.get("redirect_uri").map(String::as_str),
+            Some(DEFAULT_REDIRECT_URI)
+        );
+        assert_eq!(
+            params.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+        let scope = params.get("scope").cloned().unwrap_or_default();
+        assert!(scope.contains("user:inference"));
+        assert!(scope.contains("user:sessions:claude_code"));
+        assert!(scope.contains("user:mcp_servers"));
+        assert_eq!(
+            params.get("state").map(String::as_str),
+            Some(pending.state_token.as_str())
+        );
     }
 
     #[test]

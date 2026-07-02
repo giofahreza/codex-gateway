@@ -3932,7 +3932,7 @@ async fn dashboard() -> impl IntoResponse {
     <div id="addClaudeModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addClaudeTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
         <h2 id="addClaudeTitle" style="margin-top:0;">Add Claude Account</h2>
-        <p>Use Claude OAuth login. Open the generated Claude login URL, finish login in the browser, then paste the callback URL here.</p>
+        <p>Use Claude OAuth login. Open the generated Claude login URL, finish login in the browser, then paste the displayed code or callback URL here.</p>
         <label for="claudeLabelInput" style="margin-top:12px;">Label</label>
         <input id="claudeLabelInput" placeholder="optional label">
         <label for="claudeOrganizationInput" style="margin-top:12px;">Organization UUID</label>
@@ -3943,8 +3943,8 @@ async fn dashboard() -> impl IntoResponse {
         <div id="claudeStatus" class="muted" style="margin-top:8px;"></div>
         <pre id="claudeAuthUrl" class="auth-url"></pre>
         <form id="claudeLoginForm" style="margin-top:16px;">
-          <label for="claudeRedirectInput">Callback URL</label>
-          <input id="claudeRedirectInput" name="redirect_url" placeholder="http://localhost/callback?code=...&state=...">
+          <label for="claudeRedirectInput">Authorization Code or Callback URL</label>
+          <input id="claudeRedirectInput" name="redirect_url" placeholder="CODE#STATE or https://platform.claude.com/oauth/code/callback?code=...&state=...">
           <input type="hidden" name="state" value="">
           <div class="modal-actions" style="margin-top:8px;">
             <button type="submit">Submit</button>
@@ -4494,7 +4494,7 @@ async fn dashboard() -> impl IntoResponse {
         const form = document.getElementById('claudeLoginForm');
         form.querySelector('input[name="state"]').value = data.state || '';
         window.open(data.url, '_blank');
-        document.getElementById('claudeStatus').textContent = 'Opened Claude login URL in a new tab. After login, paste the callback URL below.';
+        document.getElementById('claudeStatus').textContent = 'Opened Claude login URL in a new tab. After login, paste the displayed code or callback URL below.';
         const pre = document.getElementById('claudeAuthUrl');
         pre.textContent = data.url;
         pre.style.display = 'block';
@@ -4504,7 +4504,7 @@ async fn dashboard() -> impl IntoResponse {
         const form = document.getElementById('claudeLoginForm');
         const redirectUrl = document.getElementById('claudeRedirectInput').value.trim();
         if (!redirectUrl) {
-          document.getElementById('claudeStatus').textContent = 'Callback URL is required.';
+          document.getElementById('claudeStatus').textContent = 'Authorization code or callback URL is required.';
           return;
         }
         const payload = claudePayloadBase();
