@@ -334,6 +334,7 @@ fn summary_from_usage(account: &super::accounts::ClaudeAccount, raw: Value) -> Q
     summary.additional_rate_limits = [
         ("seven_day_sonnet", "Sonnet"),
         ("seven_day_opus", "Opus"),
+        ("seven_day_omelette", "Fable"),
         ("seven_day_oauth_apps", "OAuth apps"),
         ("seven_day_cowork", "Claude Code teams"),
     ]
@@ -346,9 +347,10 @@ fn summary_from_usage(account: &super::accounts::ClaudeAccount, raw: Value) -> Q
         })
     })
     .collect();
-    summary.limits = extra_usage_limit(raw.get("extra_usage"))
-        .into_iter()
-        .collect();
+    summary.limits = usage_limit_summaries(raw.get("limits"));
+    if let Some(extra_usage) = extra_usage_limit(raw.get("extra_usage")) {
+        summary.limits.push(extra_usage);
+    }
     summary.raw_usage = raw;
     summary.is_available = true;
     summary.status_msg = if has_any_quota(&summary) {
@@ -622,6 +624,133 @@ fn extra_usage_limit(value: Option<&Value>) -> Option<RateLimitSummary> {
     })
 }
 
+fn usage_limit_summaries(value: Option<&Value>) -> Vec<RateLimitSummary> {
+    value
+        .and_then(Value::as_array)
+        .map(|limits| {
+            limits
+                .iter()
+                .filter_map(usage_limit_summary)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn usage_limit_summary(value: &Value) -> Option<RateLimitSummary> {
+    let obj = value.as_object()?;
+    let kind = obj.get("kind").and_then(Value::as_str).unwrap_or_default();
+    let group = obj.get("group").and_then(Value::as_str).unwrap_or_default();
+    let percent = obj
+        .get("percent")
+        .or_else(|| obj.get("utilization"))
+        .or_else(|| obj.get("used_percentage"))
+        .and_then(number_value)
+        .map(|value| value.clamp(0.0, 100.0));
+    let reset_at = obj
+        .get("resets_at")
+        .or_else(|| obj.get("reset_at"))
+        .or_else(|| obj.get("resetsAt"))
+        .or_else(|| obj.get("resetAt"))
+        .and_then(parse_reset_value);
+
+    if percent.is_none() && reset_at.is_none() {
+        return None;
+    }
+
+    let label = usage_limit_label(obj, kind, group);
+    let remaining = percent.map(|value| (100.0 - value).clamp(0.0, 100.0));
+    Some(RateLimitSummary {
+        label,
+        scope: if kind.is_empty() {
+            group.to_string()
+        } else {
+            kind.to_string()
+        },
+        limit: Some(100.0),
+        remaining,
+        used: percent,
+        used_percent: percent,
+        remaining_percent: remaining,
+        limit_text: "100%".to_string(),
+        remaining_text: percent_text(remaining),
+        used_text: percent_text(percent),
+        reset_label: reset_at
+            .as_ref()
+            .map(format_reset_label)
+            .unwrap_or_default(),
+    })
+}
+
+fn usage_limit_label(obj: &serde_json::Map<String, Value>, kind: &str, group: &str) -> String {
+    let scope = obj.get("scope").and_then(Value::as_object);
+    let model_name = scope
+        .and_then(|scope| scope.get("model"))
+        .and_then(Value::as_object)
+        .and_then(|model| {
+            model
+                .get("display_name")
+                .or_else(|| model.get("id"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if let Some(model_name) = model_name {
+        let suffix = if kind.contains("weekly") || group.eq_ignore_ascii_case("weekly") {
+            "weekly"
+        } else if kind.contains("session") || group.eq_ignore_ascii_case("session") {
+            "session"
+        } else {
+            kind
+        };
+        return if suffix.is_empty() {
+            model_name.to_string()
+        } else {
+            format!("{} {}", model_name, humanize_limit_name(suffix))
+        };
+    }
+
+    match kind {
+        "weekly_all" => "Weekly all".to_string(),
+        "weekly_scoped" => "Weekly scoped".to_string(),
+        "session" => "Session".to_string(),
+        _ if !kind.is_empty() => humanize_limit_name(kind),
+        _ if !group.is_empty() => humanize_limit_name(group),
+        _ => "Usage limit".to_string(),
+    }
+}
+
+fn humanize_limit_name(value: &str) -> String {
+    value
+        .split(['_', '-'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut out = first.to_uppercase().collect::<String>();
+                    out.push_str(chars.as_str());
+                    out
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn percent_text(value: Option<f64>) -> String {
+    value
+        .map(|value| {
+            if (value.fract()).abs() < f64::EPSILON {
+                format!("{}%", value as i64)
+            } else {
+                format!("{:.1}%", value)
+            }
+        })
+        .unwrap_or_default()
+}
+
 fn extract_rate_limit_headers(headers: &HeaderMap) -> Vec<HeaderSummary> {
     let mut out = headers
         .iter()
@@ -771,5 +900,78 @@ mod tests {
         let limit = parse_standard_limit(&headers, "tokens").unwrap();
         assert_eq!(limit.used, Some(750.0));
         assert_eq!(limit.used_percent, Some(75.0));
+    }
+
+    #[test]
+    fn oauth_usage_limits_include_scoped_model_display_name() {
+        let limits = json!([
+            {
+                "group": "weekly",
+                "is_active": false,
+                "kind": "weekly_scoped",
+                "percent": 12.5,
+                "resets_at": 1_700_000_000,
+                "scope": {
+                    "model": {
+                        "display_name": "Fable",
+                        "id": null
+                    },
+                    "surface": null
+                },
+                "severity": "normal"
+            }
+        ]);
+
+        let parsed = usage_limit_summaries(Some(&limits));
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].label, "Fable Weekly");
+        assert_eq!(parsed[0].scope, "weekly_scoped");
+        assert_eq!(parsed[0].used_percent, Some(12.5));
+        assert_eq!(parsed[0].remaining_percent, Some(87.5));
+        assert_eq!(parsed[0].used_text, "12.5%");
+        assert_eq!(parsed[0].limit_text, "100%");
+        assert_eq!(
+            parsed[0].reset_label,
+            format_reset_label(
+                &chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn oauth_usage_maps_omelette_bucket_to_fable() {
+        let account = super::super::accounts::ClaudeAccount {
+            label: "claude".to_string(),
+            email: None,
+            organization_uuid: String::new(),
+            account_id: String::new(),
+            file_name: None,
+            access_token: String::new(),
+            refresh_token: None,
+            token_type: String::new(),
+            expires_at: None,
+            api_base_url: None,
+            enabled: true,
+            models: Vec::new(),
+        };
+        let summary = summary_from_usage(
+            &account,
+            json!({
+                "seven_day_omelette": {
+                    "utilization": 10.0,
+                    "resets_at": 1_700_000_000
+                }
+            }),
+        );
+
+        assert_eq!(summary.additional_rate_limits.len(), 1);
+        assert_eq!(summary.additional_rate_limits[0].display_name, "Fable");
+        assert_eq!(
+            summary.additional_rate_limits[0]
+                .weekly
+                .as_ref()
+                .and_then(|bucket| bucket.used_percent),
+            Some(10.0)
+        );
     }
 }
