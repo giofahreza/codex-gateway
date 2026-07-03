@@ -67,6 +67,7 @@ struct AppState {
     qwen_quota_cache: Arc<Mutex<HashMap<String, target::qwen::quota::QuotaCacheEntry>>>,
     minimax_quota_cache: Arc<Mutex<HashMap<String, target::minimax::quota::QuotaCacheEntry>>>,
     deepseek_quota_cache: Arc<Mutex<HashMap<String, target::deepseek::quota::QuotaCacheEntry>>>,
+    claude_quota_cache: Arc<Mutex<HashMap<String, target::claude::quota::QuotaCacheEntry>>>,
     oauth_pending: Arc<Mutex<HashMap<String, PendingOAuth>>>,
     agw_oauth_pending: Arc<Mutex<HashMap<String, target::antigravity::auth::PendingOAuth>>>,
     gemini_oauth_pending: Arc<Mutex<HashSet<String>>>,
@@ -274,6 +275,7 @@ async fn main() {
         qwen_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         minimax_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         deepseek_quota_cache: Arc::new(Mutex::new(HashMap::new())),
+        claude_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         agw_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),
@@ -2045,12 +2047,18 @@ async fn dashboard() -> impl IntoResponse {
             pushQuotaPercent(values, group.weekly);
           });
         }
+        if (quota.additional_rate_limits && Array.isArray(quota.additional_rate_limits)) {
+          quota.additional_rate_limits.forEach(function(limit) {
+            pushQuotaPercent(values, limit.five_hour);
+            pushQuotaPercent(values, limit.weekly);
+          });
+        }
         if (provider === 'gemini') {
           geminiModelFamilySummaries(quota).forEach(function(summary) {
             pushQuotaPercent(values, summary.bucket);
           });
         }
-        if (provider === 'qwen' && quota.limits && Array.isArray(quota.limits)) {
+        if (quota.limits && Array.isArray(quota.limits)) {
           quota.limits.forEach(function(limit) {
             if (limit && limit.used_percent != null) values.push(Number(limit.used_percent));
           });
@@ -3204,6 +3212,12 @@ async fn dashboard() -> impl IntoResponse {
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.input_tokens || 0) + '</span><span class="stat-pill-label">in tok</span></span>';
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.output_tokens || 0) + '</span><span class="stat-pill-label">out tok</span></span>';
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.total_tokens || 0) + '</span><span class="stat-pill-label">total tok</span></span>';
+        if (a.cache_tokens) {
+          usage += '<span class="stat-pill"><span class="stat-pill-value">' + a.cache_tokens + '</span><span class="stat-pill-label">cache tok</span></span>';
+        }
+        if (a.reasoning_tokens) {
+          usage += '<span class="stat-pill"><span class="stat-pill-value">' + a.reasoning_tokens + '</span><span class="stat-pill-label">reason tok</span></span>';
+        }
         if (a.email) {
           usage += '<span class="stat-pill"><span class="stat-pill-label">email</span><span class="stat-pill-value">' + escapeHtml(a.email) + '</span></span>';
         }
@@ -3222,7 +3236,7 @@ async fn dashboard() -> impl IntoResponse {
         var accounts = data.accounts || [];
         dashboardState.providers.claude = accounts;
         var cards = accounts.map(function(a) {
-          return buildClaudeCard(a, lastClaudeQuota.get(a.file_name || a.label) || lastClaudeQuota.get(a.organization_uuid) || null);
+          return buildClaudeCard(a, lastClaudeQuota.get(a.file_name || a.label) || lastClaudeQuota.get(a.organization_uuid) || lastClaudeQuota.get(a.account_id) || lastClaudeQuota.get(a.email) || null);
         }).join('');
         document.getElementById('claudeCards').innerHTML = cards || '<div class="empty-state">No Claude accounts</div>';
         document.getElementById('claudeBadgeCount').textContent = accounts.length + ' accounts';
@@ -3235,7 +3249,10 @@ async fn dashboard() -> impl IntoResponse {
         const quotaMap = new Map();
         (quota.accounts || []).forEach(q => {
           if (q.file_name || q.label) quotaMap.set(q.file_name || q.label, q);
+          if (q.label) quotaMap.set(q.label, q);
           if (q.organization_uuid) quotaMap.set(q.organization_uuid, q);
+          if (q.account_id) quotaMap.set(q.account_id, q);
+          if (q.email) quotaMap.set(q.email, q);
         });
         lastClaudeQuota = quotaMap;
         dashboardState.quotas.claude = quotaMap;
@@ -6238,6 +6255,12 @@ pub(crate) fn usage_metrics_from_response_value(value: &serde_json::Value) -> Us
         .cloned()
         .or_else(|| {
             value
+                .get("message")
+                .and_then(|message| message.get("usage"))
+                .cloned()
+        })
+        .or_else(|| {
+            value
                 .get("response")
                 .and_then(|resp| resp.get("usage"))
                 .cloned()
@@ -6263,6 +6286,20 @@ pub(crate) fn usage_metrics_from_response_value(value: &serde_json::Value) -> Us
         .and_then(|v| v.get("cached_tokens"))
         .and_then(|v| v.as_u64())
         .or_else(|| usage.get("cache_tokens").and_then(|v| v.as_u64()))
+        .or_else(|| {
+            let read = usage
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64());
+            let create = usage
+                .get("cache_creation_input_tokens")
+                .and_then(|v| v.as_u64());
+            match (read, create) {
+                (Some(read), Some(create)) => Some(read.saturating_add(create)),
+                (Some(read), None) => Some(read),
+                (None, Some(create)) => Some(create),
+                _ => None,
+            }
+        })
         .unwrap_or(0);
     let reasoning_tokens = usage
         .get("output_tokens_details")

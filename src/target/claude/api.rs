@@ -150,6 +150,7 @@ pub async fn messages(
     };
 
     let status = resp.status();
+    super::quota::observe_response_headers(&state, &account, resp.headers());
     let out_headers = response_headers(
         resp.headers(),
         if wants_stream {
@@ -270,6 +271,7 @@ pub async fn responses(
         }
     };
     let status = resp.status();
+    super::quota::observe_response_headers(&state, &account, resp.headers());
     let text = match resp.text().await {
         Ok(text) => text,
         Err(err) => {
@@ -943,7 +945,8 @@ fn openai_error_body_from_anthropic(text: &str) -> Vec<u8> {
 #[derive(Default)]
 struct AnthropicSseUsageTracker {
     buffer: Vec<u8>,
-    last_usage: Option<crate::UsageMetrics>,
+    usage: crate::UsageMetrics,
+    saw_usage: bool,
 }
 
 impl AnthropicSseUsageTracker {
@@ -963,7 +966,11 @@ impl AnthropicSseUsageTracker {
             let raw = std::mem::take(&mut self.buffer);
             self.absorb_event(&raw);
         }
-        self.last_usage
+        if self.saw_usage {
+            Some(self.usage)
+        } else {
+            None
+        }
     }
 
     fn absorb_event(&mut self, raw_event: &[u8]) {
@@ -978,8 +985,23 @@ impl AnthropicSseUsageTracker {
         };
         let usage = crate::usage_metrics_from_response_value(&value);
         if usage.input_tokens > 0 || usage.output_tokens > 0 || usage.total_tokens > 0 {
-            self.last_usage = Some(usage);
+            merge_usage_metrics(&mut self.usage, usage);
+            self.saw_usage = true;
         }
+    }
+}
+
+fn merge_usage_metrics(current: &mut crate::UsageMetrics, incoming: crate::UsageMetrics) {
+    current.input_tokens = current.input_tokens.max(incoming.input_tokens);
+    current.output_tokens = current.output_tokens.max(incoming.output_tokens);
+    current.cache_tokens = current.cache_tokens.max(incoming.cache_tokens);
+    current.reasoning_tokens = current.reasoning_tokens.max(incoming.reasoning_tokens);
+    current.total_tokens = current
+        .total_tokens
+        .max(incoming.total_tokens)
+        .max(current.input_tokens.saturating_add(current.output_tokens));
+    if incoming.raw_usage.is_some() {
+        current.raw_usage = incoming.raw_usage;
     }
 }
 

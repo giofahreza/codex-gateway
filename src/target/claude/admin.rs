@@ -101,22 +101,7 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
 }
 
 pub async fn quota_json(State(state): State<crate::AppState>) -> impl IntoResponse {
-    let accounts = state
-        .claude_accounts
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|account| {
-            serde_json::json!({
-                "label": account.label,
-                "file_name": account.file_name,
-                "organization_uuid": account.organization_uuid,
-                "models": account.models,
-                "is_available": account.enabled,
-                "note": "Anthropic OAuth quota limits are not exposed by this provider endpoint yet."
-            })
-        })
-        .collect::<Vec<_>>();
+    let accounts = super::quota::get_quota_summaries(&state).await;
     axum::Json(serde_json::json!({ "accounts": accounts }))
 }
 
