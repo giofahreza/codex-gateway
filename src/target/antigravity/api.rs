@@ -1052,97 +1052,156 @@ fn render_response_sse(response: &serde_json::Value) -> Vec<u8> {
         .as_slice(),
     );
 
-    if let Some(text) = response.get("output_text").and_then(|v| v.as_str()) {
-        if !text.is_empty() {
-            for delta in text_delta_chunks(text) {
-                chunks.extend_from_slice(
-                    sse_json(&json!({
-                        "type": "response.output_text.delta",
-                        "delta": delta
-                    }))
-                    .as_slice(),
-                );
-            }
-        }
-    }
-
-    if let Some(images) = response.get("images").and_then(|v| v.as_array()) {
-        for image in images {
-            if let Some(data) = image.get("b64_json").and_then(|v| v.as_str()) {
-                chunks.extend_from_slice(
-                    sse_json(&json!({
-                        "type": "response.image_generation_call.partial_image",
-                        "partial_image_b64": data
-                    }))
-                    .as_slice(),
-                );
-            }
-        }
-    }
-
     if let Some(output) = response.get("output").and_then(|v| v.as_array()) {
         for (idx, item) in output.iter().enumerate() {
-            if item.get("type").and_then(|v| v.as_str()) == Some("function_call") {
-                let call_id = item
-                    .get("call_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                let name = item
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                let arguments = item
-                    .get("arguments")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("{}");
-                if !call_id.is_empty() {
-                    chunks.extend_from_slice(
-                        sse_json(&json!({
-                            "type": "response.output_item.added",
-                            "output_index": idx,
-                            "item": {
-                                "id": call_id,
-                                "type": "function_call",
-                                "call_id": call_id,
-                                "name": name,
-                                "arguments": "",
-                                "status": "in_progress"
-                            }
-                        }))
-                        .as_slice(),
-                    );
-                    chunks.extend_from_slice(
-                        sse_json(&json!({
-                            "type": "response.function_call_arguments.delta",
-                            "output_index": idx,
-                            "delta": arguments
-                        }))
-                        .as_slice(),
-                    );
-                    chunks.extend_from_slice(
-                        sse_json(&json!({
-                            "type": "response.function_call_arguments.done",
-                            "output_index": idx,
-                            "arguments": arguments
-                        }))
-                        .as_slice(),
-                    );
-                    chunks.extend_from_slice(
-                        sse_json(&json!({
-                            "type": "response.output_item.done",
-                            "output_index": idx,
-                            "item": {
-                                "id": call_id,
-                                "type": "function_call",
-                                "call_id": call_id,
-                                "name": name,
-                                "arguments": arguments,
-                                "status": "completed"
-                            }
-                        }))
-                        .as_slice(),
-                    );
+            let mut in_progress = item.clone();
+            if let Some(object) = in_progress.as_object_mut() {
+                if object.contains_key("status") {
+                    object.insert("status".to_string(), json!("in_progress"));
                 }
+            }
+            chunks.extend_from_slice(
+                sse_json(&json!({
+                    "type": "response.output_item.added",
+                    "output_index": idx,
+                    "item": in_progress
+                }))
+                .as_slice(),
+            );
+
+            match item.get("type").and_then(|v| v.as_str()) {
+                Some("message") => {
+                    let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                    if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
+                        for (content_index, part) in content.iter().enumerate() {
+                            if part.get("type").and_then(|v| v.as_str()) != Some("output_text") {
+                                continue;
+                            }
+                            let text = part.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            chunks.extend_from_slice(
+                                sse_json(&json!({
+                                    "type": "response.content_part.added",
+                                    "item_id": item_id,
+                                    "output_index": idx,
+                                    "content_index": content_index,
+                                    "part": {
+                                        "type": "output_text",
+                                        "text": "",
+                                        "annotations": part.get("annotations").cloned().unwrap_or_else(|| json!([]))
+                                    }
+                                }))
+                                .as_slice(),
+                            );
+                            for delta in text_delta_chunks(text) {
+                                chunks.extend_from_slice(
+                                    sse_json(&json!({
+                                        "type": "response.output_text.delta",
+                                        "item_id": item_id,
+                                        "output_index": idx,
+                                        "content_index": content_index,
+                                        "delta": delta
+                                    }))
+                                    .as_slice(),
+                                );
+                            }
+                            chunks.extend_from_slice(
+                                sse_json(&json!({
+                                    "type": "response.output_text.done",
+                                    "item_id": item_id,
+                                    "output_index": idx,
+                                    "content_index": content_index,
+                                    "text": text
+                                }))
+                                .as_slice(),
+                            );
+                            chunks.extend_from_slice(
+                                sse_json(&json!({
+                                    "type": "response.content_part.done",
+                                    "item_id": item_id,
+                                    "output_index": idx,
+                                    "content_index": content_index,
+                                    "part": part
+                                }))
+                                .as_slice(),
+                            );
+                        }
+                    }
+                }
+                Some("image_generation_call") => {
+                    if let Some(data) = item
+                        .get("result")
+                        .and_then(|result| result.get("b64_json"))
+                        .and_then(|v| v.as_str())
+                    {
+                        chunks.extend_from_slice(
+                            sse_json(&json!({
+                                "type": "response.image_generation_call.partial_image",
+                                "output_index": idx,
+                                "partial_image_b64": data
+                            }))
+                            .as_slice(),
+                        );
+                    }
+                }
+                Some("function_call") => {
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let arguments = item
+                        .get("arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}");
+                    if !call_id.is_empty() {
+                        chunks.extend_from_slice(
+                            sse_json(&json!({
+                                "type": "response.function_call_arguments.delta",
+                                "output_index": idx,
+                                "delta": arguments
+                            }))
+                            .as_slice(),
+                        );
+                        chunks.extend_from_slice(
+                            sse_json(&json!({
+                                "type": "response.function_call_arguments.done",
+                                "output_index": idx,
+                                "arguments": arguments
+                            }))
+                            .as_slice(),
+                        );
+                        chunks.extend_from_slice(
+                            sse_json(&json!({
+                                "type": "response.output_item.done",
+                                "output_index": idx,
+                                "item": {
+                                    "id": call_id,
+                                    "type": "function_call",
+                                    "call_id": call_id,
+                                    "name": name,
+                                    "arguments": arguments,
+                                    "status": "completed"
+                                }
+                            }))
+                            .as_slice(),
+                        );
+                    }
+                }
+                _ => {}
+            }
+
+            if item.get("type").and_then(|v| v.as_str()) != Some("function_call") {
+                chunks.extend_from_slice(
+                    sse_json(&json!({
+                        "type": "response.output_item.done",
+                        "output_index": idx,
+                        "item": item
+                    }))
+                    .as_slice(),
+                );
             }
         }
     }
@@ -1295,6 +1354,13 @@ mod tests {
         serde_json::from_slice::<serde_json::Value>(&body).unwrap();
 
         let sse = String::from_utf8(render_response_sse(&response)).unwrap();
+        let item_added = sse.find("response.output_item.added").unwrap();
+        let part_added = sse.find("response.content_part.added").unwrap();
+        let text_delta = sse.find("response.output_text.delta").unwrap();
+        let item_done = sse.rfind("response.output_item.done").unwrap();
+        assert!(item_added < part_added);
+        assert!(part_added < text_delta);
+        assert!(text_delta < item_done);
         for line in sse.lines() {
             let Some(data) = line.strip_prefix("data: ") else {
                 continue;
