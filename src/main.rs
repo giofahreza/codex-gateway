@@ -609,6 +609,44 @@ async fn dashboard() -> impl IntoResponse {
       .provider-menu-item:last-child { border-bottom: 0; }
       .provider-menu-item:hover,
       .provider-menu-item:focus { background: var(--row-hover); }
+      .provider-settings-list {
+        display: grid;
+        gap: 8px;
+        margin-top: 10px;
+      }
+      .provider-settings-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        gap: 10px;
+        align-items: center;
+        padding: 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-alt);
+      }
+      .provider-settings-row.is-hidden {
+        opacity: 0.62;
+      }
+      .provider-settings-visible {
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .provider-settings-key {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .provider-settings-actions {
+        display: flex;
+        gap: 6px;
+        justify-content: flex-end;
+      }
+      .provider-settings-actions .mini-btn {
+        min-width: 34px;
+      }
+      .provider-settings-actions .mini-btn:disabled {
+        cursor: not-allowed;
+        opacity: 0.45;
+      }
       .section { margin-top: 28px; }
       .table-wrap {
         overflow-x: auto;
@@ -1571,6 +1609,16 @@ async fn dashboard() -> impl IntoResponse {
           right: auto;
           width: min(100%, 260px);
         }
+        .provider-settings-row {
+          grid-template-columns: 1fr;
+          align-items: stretch;
+        }
+        .provider-settings-actions {
+          justify-content: flex-start;
+        }
+        .provider-settings-actions .mini-btn {
+          flex: 1;
+        }
         .overview-grid {
           gap: 8px;
         }
@@ -1694,6 +1742,7 @@ async fn dashboard() -> impl IntoResponse {
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="custom-model">Custom model</button>
             </div>
           </div>
+          <button type="button" id="appSettingsBtn" class="secondary-button">Settings</button>
         </div>
       </header>
       <section class="overview-grid" aria-label="Gateway overview">
@@ -1772,63 +1821,63 @@ async fn dashboard() -> impl IntoResponse {
         <div id="customModelCards" class="custom-model-grid"></div>
       </section>
       <div class="providers-grid">
-      <section class="provider-section" aria-labelledby="codexProviderTitle">
+      <section class="provider-section" data-provider-section="codex" aria-labelledby="codexProviderTitle">
         <div class="provider-badge">
           <span id="codexProviderTitle">Codex</span>
           <span class="provider-badge-count" id="codexBadgeCount">0 accounts</span>
         </div>
         <div id="codexCards"></div>
       </section>
-      <section class="provider-section" aria-labelledby="agwProviderTitle">
+      <section class="provider-section" data-provider-section="agw" aria-labelledby="agwProviderTitle">
         <div class="provider-badge">
           <span id="agwProviderTitle">Antigravity</span>
           <span class="provider-badge-count" id="agwBadgeCount">0 accounts</span>
         </div>
         <div id="agwCards"></div>
       </section>
-      <section class="provider-section" aria-labelledby="geminiProviderTitle">
+      <section class="provider-section" data-provider-section="gemini" aria-labelledby="geminiProviderTitle">
         <div class="provider-badge">
           <span id="geminiProviderTitle">Gemini</span>
           <span class="provider-badge-count" id="geminiBadgeCount">0 accounts</span>
         </div>
         <div id="geminiCards"></div>
       </section>
-      <section class="provider-section" aria-labelledby="qwenProviderTitle">
+      <section class="provider-section" data-provider-section="qwen" aria-labelledby="qwenProviderTitle">
         <div class="provider-badge">
           <span id="qwenProviderTitle">Qwen</span>
           <span class="provider-badge-count" id="qwenBadgeCount">0 accounts</span>
         </div>
         <div id="qwenCards"></div>
       </section>
-      <section class="provider-section" aria-labelledby="deepseekProviderTitle">
+      <section class="provider-section" data-provider-section="deepseek" aria-labelledby="deepseekProviderTitle">
         <div class="provider-badge">
           <span id="deepseekProviderTitle">DeepSeek</span>
           <span class="provider-badge-count" id="deepseekBadgeCount">0 accounts</span>
         </div>
         <div id="deepseekCards"></div>
       </section>
-      <section class="provider-section" aria-labelledby="minimaxProviderTitle">
+      <section class="provider-section" data-provider-section="minimax" aria-labelledby="minimaxProviderTitle">
         <div class="provider-badge">
           <span id="minimaxProviderTitle">MiniMax</span>
           <span class="provider-badge-count" id="minimaxBadgeCount">0 accounts</span>
         </div>
         <div id="minimaxCards"></div>
       </section>
-      <section class="provider-section" aria-labelledby="grokProviderTitle">
+      <section class="provider-section" data-provider-section="grok" aria-labelledby="grokProviderTitle">
         <div class="provider-badge">
           <span id="grokProviderTitle">Grok (xAI)</span>
           <span class="provider-badge-count" id="grokBadgeCount">— accounts</span>
         </div>
         <div id="grokCards"></div>
       </section>
-      <section class="provider-section" aria-labelledby="copilotProviderTitle">
+      <section class="provider-section" data-provider-section="copilot" aria-labelledby="copilotProviderTitle">
         <div class="provider-badge">
           <span id="copilotProviderTitle">GitHub Copilot</span>
           <span class="provider-badge-count" id="copilotBadgeCount">0 accounts</span>
         </div>
         <div id="copilotCards"></div>
       </section>
-      <section class="provider-section" aria-labelledby="claudeProviderTitle">
+      <section class="provider-section" data-provider-section="claude" aria-labelledby="claudeProviderTitle">
         <div class="provider-badge">
           <span id="claudeProviderTitle">Claude</span>
           <span class="provider-badge-count" id="claudeBadgeCount">0 accounts</span>
@@ -1873,6 +1922,18 @@ async fn dashboard() -> impl IntoResponse {
       let copilotDeviceExpiresAt = 0;
       const THEME_KEY = 'gpt-gateway-theme';
       const CONTEXT_RANGE_KEY = 'gpt-gateway-context-range';
+      const PROVIDER_DASHBOARD_SETTINGS_KEY = 'gpt-gateway-provider-dashboard-settings';
+      const dashboardProviderKeys = [
+        'codex',
+        'agw',
+        'gemini',
+        'qwen',
+        'deepseek',
+        'minimax',
+        'grok',
+        'copilot',
+        'claude'
+      ];
       let pendingCredentialAction = null;
       const modalIds = [
         'addModal',
@@ -1884,6 +1945,7 @@ async fn dashboard() -> impl IntoResponse {
         'addGrokModal',
         'addCopilotModal',
         'addClaudeModal',
+        'appSettingsModal',
         'customModelModal',
         'confirmActionModal'
       ];
@@ -1902,6 +1964,7 @@ async fn dashboard() -> impl IntoResponse {
           claude: []
         },
         customModels: [],
+        providerSettings: readProviderDashboardSettings(),
         quotas: {
           codex: new Map(),
           agw: new Map(),
@@ -1925,6 +1988,122 @@ async fn dashboard() -> impl IntoResponse {
         copilot: 'GitHub Copilot',
         claude: 'Claude'
       };
+      function normalizeProviderDashboardSettings(value) {
+        var known = new Set(dashboardProviderKeys);
+        var order = [];
+        if (value && Array.isArray(value.order)) {
+          value.order.forEach(function(provider) {
+            if (known.has(provider) && order.indexOf(provider) === -1) {
+              order.push(provider);
+            }
+          });
+        }
+        dashboardProviderKeys.forEach(function(provider) {
+          if (order.indexOf(provider) === -1) order.push(provider);
+        });
+        var hidden = {};
+        var rawHidden = value && value.hidden && typeof value.hidden === 'object' ? value.hidden : {};
+        dashboardProviderKeys.forEach(function(provider) {
+          if (rawHidden[provider] === true) hidden[provider] = true;
+        });
+        return { order: order, hidden: hidden };
+      }
+      function readProviderDashboardSettings() {
+        try {
+          return normalizeProviderDashboardSettings(JSON.parse(localStorage.getItem(PROVIDER_DASHBOARD_SETTINGS_KEY) || 'null'));
+        } catch (_) {
+          return normalizeProviderDashboardSettings(null);
+        }
+      }
+      function writeProviderDashboardSettings(settings) {
+        dashboardState.providerSettings = normalizeProviderDashboardSettings(settings);
+        try {
+          localStorage.setItem(PROVIDER_DASHBOARD_SETTINGS_KEY, JSON.stringify(dashboardState.providerSettings));
+        } catch (_) {}
+      }
+      function applyProviderDashboardSettings() {
+        var settings = normalizeProviderDashboardSettings(dashboardState.providerSettings);
+        dashboardState.providerSettings = settings;
+        var orderByProvider = {};
+        settings.order.forEach(function(provider, index) {
+          orderByProvider[provider] = index;
+        });
+        dashboardProviderKeys.forEach(function(provider, fallbackIndex) {
+          var section = document.querySelector('[data-provider-section="' + provider + '"]');
+          if (!section) return;
+          section.style.order = String(orderByProvider[provider] != null ? orderByProvider[provider] : fallbackIndex);
+          section.hidden = settings.hidden[provider] === true;
+        });
+      }
+      function providerDashboardVisibleCount() {
+        var settings = normalizeProviderDashboardSettings(dashboardState.providerSettings);
+        return dashboardProviderKeys.filter(function(provider) {
+          return settings.hidden[provider] !== true;
+        }).length;
+      }
+      function updateAppSettingsStatus() {
+        setText('appSettingsStatus', providerDashboardVisibleCount() + ' providers visible');
+      }
+      function renderProviderSettingsList() {
+        var list = document.getElementById('providerSettingsList');
+        if (!list) return;
+        var settings = normalizeProviderDashboardSettings(dashboardState.providerSettings);
+        dashboardState.providerSettings = settings;
+        var total = settings.order.length;
+        list.innerHTML = settings.order.map(function(provider, index) {
+          var label = providerLabels[provider] || provider;
+          var checked = settings.hidden[provider] === true ? '' : ' checked';
+          var hiddenClass = settings.hidden[provider] === true ? ' is-hidden' : '';
+          var providerArg = escapeHtml(jsString(provider));
+          return '<div class="provider-settings-row' + hiddenClass + '">'
+            + '<label class="check-row provider-settings-visible">'
+            + '<input type="checkbox" onchange="setProviderDashboardVisible(' + providerArg + ', this.checked)"' + checked + '> '
+            + '<span>' + escapeHtml(label) + '</span>'
+            + '</label>'
+            + '<span class="provider-settings-key"><code>' + escapeHtml(provider) + '</code></span>'
+            + '<span class="provider-settings-actions">'
+            + '<button type="button" class="mini-btn" aria-label="' + escapeHtml('Move ' + label + ' up') + '" onclick="moveProviderDashboardSetting(' + providerArg + ', -1)"' + (index === 0 ? ' disabled' : '') + '>&uarr;</button>'
+            + '<button type="button" class="mini-btn" aria-label="' + escapeHtml('Move ' + label + ' down') + '" onclick="moveProviderDashboardSetting(' + providerArg + ', 1)"' + (index === total - 1 ? ' disabled' : '') + '>&darr;</button>'
+            + '</span>'
+            + '</div>';
+        }).join('');
+        updateAppSettingsStatus();
+      }
+      function saveAndRenderProviderDashboardSettings(settings) {
+        writeProviderDashboardSettings(settings);
+        applyProviderDashboardSettings();
+        renderProviderSettingsList();
+      }
+      function setProviderDashboardVisible(provider, visible) {
+        var settings = normalizeProviderDashboardSettings(dashboardState.providerSettings);
+        if (visible) {
+          delete settings.hidden[provider];
+        } else {
+          settings.hidden[provider] = true;
+        }
+        saveAndRenderProviderDashboardSettings(settings);
+      }
+      function moveProviderDashboardSetting(provider, direction) {
+        var settings = normalizeProviderDashboardSettings(dashboardState.providerSettings);
+        var index = settings.order.indexOf(provider);
+        if (index === -1) return;
+        var nextIndex = Math.max(0, Math.min(settings.order.length - 1, index + direction));
+        if (nextIndex === index) return;
+        var moved = settings.order.splice(index, 1)[0];
+        settings.order.splice(nextIndex, 0, moved);
+        saveAndRenderProviderDashboardSettings(settings);
+      }
+      function resetProviderDashboardSettings() {
+        saveAndRenderProviderDashboardSettings(normalizeProviderDashboardSettings(null));
+      }
+      function openAppSettingsModal() {
+        renderProviderSettingsList();
+        setMobileNavOpen(false);
+        openModal('appSettingsModal');
+      }
+      function closeAppSettingsModal() {
+        closeModal('appSettingsModal');
+      }
       function formatNumber(value) {
         return Number(value || 0).toLocaleString();
       }
@@ -3982,6 +4161,20 @@ async fn dashboard() -> impl IntoResponse {
         </div>
       </div>
     </div>
+    <div id="appSettingsModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="appSettingsTitle" aria-hidden="true" style="display:none;">
+      <div class="modal-card">
+        <h2 id="appSettingsTitle" style="margin-top:0;">Settings</h2>
+        <div class="custom-model-form-row">
+          <label>Dashboard providers</label>
+          <div id="providerSettingsList" class="provider-settings-list"></div>
+        </div>
+        <div id="appSettingsStatus" class="muted" style="margin-top:10px;"></div>
+        <div class="modal-actions" style="margin-top:16px;">
+          <button type="button" id="resetProviderSettingsBtn" class="secondary-button">Reset default</button>
+          <button type="button" id="closeAppSettingsModalBtn">Done</button>
+        </div>
+      </div>
+    </div>
     <div id="customModelModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="customModelTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
         <h2 id="customModelTitle" style="margin-top:0;">Add Custom Model</h2>
@@ -4042,6 +4235,7 @@ async fn dashboard() -> impl IntoResponse {
         }
       }
       document.getElementById('themeToggleBtn').addEventListener('click', toggleTheme);
+      document.getElementById('appSettingsBtn').addEventListener('click', openAppSettingsModal);
       // Provider selector menu
       document.getElementById('addProviderBtn').addEventListener('click', function(e) {
         e.stopPropagation();
@@ -4091,6 +4285,13 @@ async fn dashboard() -> impl IntoResponse {
       document.getElementById('confirmActionModal').addEventListener('click', function(e) {
         if (e.target.id === 'confirmActionModal') {
           closeCredentialActionConfirm();
+        }
+      });
+      document.getElementById('closeAppSettingsModalBtn').addEventListener('click', closeAppSettingsModal);
+      document.getElementById('resetProviderSettingsBtn').addEventListener('click', resetProviderDashboardSettings);
+      document.getElementById('appSettingsModal').addEventListener('click', function(e) {
+        if (e.target.id === 'appSettingsModal') {
+          closeAppSettingsModal();
         }
       });
       document.getElementById('closeModalBtn').addEventListener('click', () => {
@@ -4823,6 +5024,7 @@ async fn dashboard() -> impl IntoResponse {
       configureMobileNav();
       configureContextRangeControls();
       configureChartDisclosure();
+      applyProviderDashboardSettings();
       updateOverview();
       bootstrapAdmin();
     </script>
