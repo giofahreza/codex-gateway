@@ -22,6 +22,7 @@ use tracing::{error, info};
 use uuid::Uuid;
 mod admin_auth;
 mod custom_models;
+mod notifications;
 mod source;
 mod stats_store;
 mod target;
@@ -80,6 +81,7 @@ struct AppState {
     copilot_oauth_pending: Arc<Mutex<HashMap<String, target::copilot::auth::PendingDevice>>>,
     claude_oauth_pending: Arc<Mutex<HashMap<String, target::claude::auth::PendingOAuth>>>,
     admin_sessions: Arc<Mutex<HashMap<String, admin_auth::AdminSession>>>,
+    notification_settings: Arc<Mutex<notifications::NotificationSettings>>,
     disabled: Arc<Mutex<HashSet<String>>>,
     usage_history_lock: Arc<Mutex<()>>,
 }
@@ -225,6 +227,7 @@ async fn main() {
     let custom_models = custom_models::load(&cfg);
     let persisted_stats = stats_store::load(&cfg);
     let admin_sessions = admin_auth::load_sessions(&admin_session_path(&cfg));
+    let notification_settings = notifications::load(&cfg);
     let stats = build_usage_stats(
         &tokens,
         &agw_accounts,
@@ -294,6 +297,7 @@ async fn main() {
         copilot_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         claude_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         admin_sessions: Arc::new(Mutex::new(admin_sessions)),
+        notification_settings: Arc::new(Mutex::new(notification_settings)),
         disabled: Arc::new(Mutex::new(disabled)),
         usage_history_lock: Arc::new(Mutex::new(())),
     };
@@ -354,6 +358,8 @@ async fn main() {
         .route("/custom-models.json", any(custom_models_json_route))
         .route("/custom-models/save", any(custom_models_save_route))
         .route("/custom-models/delete", any(custom_models_delete_route))
+        .route("/notifications/settings", any(notification_settings_route))
+        .route("/notifications/test", any(notification_test_route))
         .route("/usage/summary.json", any(usage_summary_route))
         .route("/usage/history.json", any(usage_history_route))
         .route("/usage/context-history.json", any(context_history_route))
@@ -659,6 +665,82 @@ async fn dashboard() -> impl IntoResponse {
       .provider-settings-actions .mini-btn:disabled {
         cursor: not-allowed;
         opacity: 0.45;
+      }
+      .settings-block {
+        margin-top: 18px;
+        padding-top: 16px;
+        border-top: 1px solid var(--border);
+      }
+      .settings-block:first-of-type {
+        margin-top: 0;
+        padding-top: 0;
+        border-top: 0;
+      }
+      .settings-block-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 10px;
+        font-weight: 700;
+      }
+      .notification-channel-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .notification-watch-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 10px 0;
+      }
+      .notification-watch-list {
+        display: grid;
+        gap: 10px;
+        max-height: min(46vh, 520px);
+        overflow: auto;
+        padding-right: 4px;
+      }
+      .notification-provider-group {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-alt);
+        overflow: hidden;
+      }
+      .notification-provider-head {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        padding: 8px;
+        border-bottom: 1px solid var(--border);
+      }
+      .notification-provider-actions {
+        display: flex;
+        gap: 6px;
+        justify-content: flex-end;
+      }
+      .notification-account-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        padding: 8px;
+        border-bottom: 1px solid var(--border);
+      }
+      .notification-account-row:last-child {
+        border-bottom: 0;
+      }
+      .notification-account-row.is-disabled {
+        opacity: 0.62;
+      }
+      .notification-account-meta {
+        display: block;
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 12px;
+        overflow-wrap: anywhere;
       }
       .section { margin-top: 28px; }
       .table-wrap {
@@ -1601,6 +1683,14 @@ async fn dashboard() -> impl IntoResponse {
         .provider-settings-actions .mini-btn {
           flex: 1;
         }
+        .notification-channel-grid,
+        .notification-provider-head,
+        .notification-account-row {
+          grid-template-columns: 1fr;
+        }
+        .notification-provider-actions {
+          justify-content: flex-start;
+        }
         .overview-grid {
           gap: 8px;
         }
@@ -1955,6 +2045,7 @@ async fn dashboard() -> impl IntoResponse {
         },
         customModels: [],
         providerSettings: readProviderDashboardSettings(),
+        notificationSettings: null,
         quotas: {
           codex: new Map(),
           agw: new Map(),
@@ -2088,8 +2179,189 @@ async fn dashboard() -> impl IntoResponse {
       function resetProviderDashboardSettings() {
         saveAndRenderProviderDashboardSettings(normalizeProviderDashboardSettings(null));
       }
+      async function loadNotificationSettings() {
+        setText('notificationStatus', 'Loading notification settings...');
+        const res = await adminFetch('/notifications/settings');
+        if (!res) return;
+        const data = await res.json();
+        dashboardState.notificationSettings = data.settings || null;
+        renderNotificationSettings();
+      }
+      function renderNotificationSettings() {
+        var settings = dashboardState.notificationSettings || {};
+        var enabled = document.getElementById('notificationEnabledInput');
+        var channel = document.getElementById('notificationChannelInput');
+        var telegramChatId = document.getElementById('telegramChatIdInput');
+        var telegramToken = document.getElementById('telegramBotTokenInput');
+        var googleWebhook = document.getElementById('googleChatWebhookInput');
+        if (enabled) enabled.checked = settings.enabled === true;
+        if (channel) channel.value = settings.channel === 'google_chat' ? 'google_chat' : 'telegram';
+        if (telegramChatId) telegramChatId.value = settings.telegram && settings.telegram.chat_id ? settings.telegram.chat_id : '';
+        if (telegramToken) {
+          telegramToken.value = '';
+          telegramToken.placeholder = settings.telegram && settings.telegram.bot_token_configured
+            ? 'Configured. Leave blank to keep current token.'
+            : 'Telegram bot token';
+        }
+        if (googleWebhook) {
+          googleWebhook.value = '';
+          googleWebhook.placeholder = settings.google_chat && settings.google_chat.webhook_configured
+            ? 'Configured. Leave blank to keep current webhook URL.'
+            : 'Google Chat incoming webhook URL';
+        }
+        updateNotificationChannelUi();
+        renderNotificationWatchList();
+        updateNotificationStatusText();
+      }
+      function updateNotificationChannelUi() {
+        var value = document.getElementById('notificationChannelInput')?.value || 'telegram';
+        var telegram = document.getElementById('telegramNotificationFields');
+        var google = document.getElementById('googleChatNotificationFields');
+        if (telegram) telegram.hidden = value !== 'telegram';
+        if (google) google.hidden = value !== 'google_chat';
+      }
+      function updateNotificationStatusText(message) {
+        if (message) {
+          setText('notificationStatus', message);
+          return;
+        }
+        var settings = dashboardState.notificationSettings || {};
+        var watched = Array.isArray(settings.watched_accounts) ? settings.watched_accounts.length : 0;
+        var total = Array.isArray(settings.accounts) ? settings.accounts.length : 0;
+        var stateText = settings.enabled ? 'enabled' : 'disabled';
+        setText('notificationStatus', 'Notifications ' + stateText + ' - watching ' + watched + ' of ' + total + ' accounts');
+      }
+      function renderNotificationWatchList() {
+        var list = document.getElementById('notificationWatchList');
+        if (!list) return;
+        var settings = dashboardState.notificationSettings || {};
+        var accounts = Array.isArray(settings.accounts) ? settings.accounts : [];
+        var watched = new Set(Array.isArray(settings.watched_accounts) ? settings.watched_accounts : []);
+        if (!accounts.length) {
+          list.innerHTML = '<div class="empty-state">No provider accounts available</div>';
+          return;
+        }
+        var grouped = {};
+        accounts.forEach(function(account) {
+          var provider = account.provider || 'unknown';
+          if (!grouped[provider]) grouped[provider] = [];
+          grouped[provider].push(account);
+        });
+        var providers = dashboardProviderKeys.slice();
+        Object.keys(grouped).forEach(function(provider) {
+          if (providers.indexOf(provider) === -1) providers.push(provider);
+        });
+        list.innerHTML = providers.filter(function(provider) {
+          return grouped[provider] && grouped[provider].length;
+        }).map(function(provider) {
+          var items = grouped[provider] || [];
+          var label = items[0].provider_label || providerLabels[provider] || provider;
+          var providerArg = escapeHtml(jsString(provider));
+          var rows = items.map(function(account) {
+            var key = account.key || '';
+            var keyArg = escapeHtml(jsString(key));
+            var checked = watched.has(key) ? ' checked' : '';
+            var disabledClass = account.enabled === false ? ' is-disabled' : '';
+            var title = account.label || account.account_id || key;
+            var meta = [account.account_id, account.credential_file, key].filter(Boolean).join(' - ');
+            return '<div class="notification-account-row' + disabledClass + '" data-notification-provider="' + escapeHtml(provider) + '">'
+              + '<label class="check-row">'
+              + '<input type="checkbox" data-notification-account value="' + escapeHtml(key) + '" onchange="toggleNotificationAccount(' + keyArg + ', this.checked)"' + checked + '> '
+              + '<span>' + escapeHtml(title) + '</span>'
+              + (meta ? '<span class="notification-account-meta">' + escapeHtml(meta) + '</span>' : '')
+              + '</label>'
+              + '<span class="provider-settings-key"><code>' + escapeHtml(provider) + '</code></span>'
+              + '</div>';
+          }).join('');
+          return '<div class="notification-provider-group">'
+            + '<div class="notification-provider-head">'
+            + '<div><strong>' + escapeHtml(label) + '</strong> <span class="muted">' + items.length + ' accounts</span></div>'
+            + '<span class="notification-provider-actions">'
+            + '<button type="button" class="mini-btn" onclick="setNotificationProviderWatch(' + providerArg + ', true)">Check all</button>'
+            + '<button type="button" class="mini-btn secondary-button" onclick="setNotificationProviderWatch(' + providerArg + ', false)">Uncheck all</button>'
+            + '</span>'
+            + '</div>'
+            + rows
+            + '</div>';
+        }).join('');
+      }
+      function notificationWatchedKeysFromDom() {
+        return Array.from(document.querySelectorAll('[data-notification-account]:checked'))
+          .map(function(input) { return input.value; })
+          .filter(Boolean);
+      }
+      function setNotificationWatchedKeys(keys) {
+        var settings = dashboardState.notificationSettings || {};
+        var unique = Array.from(new Set(keys || []));
+        settings.watched_accounts = unique;
+        dashboardState.notificationSettings = settings;
+        renderNotificationWatchList();
+        updateNotificationStatusText();
+      }
+      function toggleNotificationAccount(key, checked) {
+        var settings = dashboardState.notificationSettings || {};
+        var watched = new Set(Array.isArray(settings.watched_accounts) ? settings.watched_accounts : []);
+        if (checked) watched.add(key);
+        else watched.delete(key);
+        setNotificationWatchedKeys(Array.from(watched));
+      }
+      function setNotificationAllWatch(checked) {
+        var settings = dashboardState.notificationSettings || {};
+        var accounts = Array.isArray(settings.accounts) ? settings.accounts : [];
+        setNotificationWatchedKeys(checked ? accounts.map(function(account) { return account.key; }).filter(Boolean) : []);
+      }
+      function setNotificationProviderWatch(provider, checked) {
+        var settings = dashboardState.notificationSettings || {};
+        var watched = new Set(Array.isArray(settings.watched_accounts) ? settings.watched_accounts : []);
+        (settings.accounts || []).forEach(function(account) {
+          if (account.provider !== provider || !account.key) return;
+          if (checked) watched.add(account.key);
+          else watched.delete(account.key);
+        });
+        setNotificationWatchedKeys(Array.from(watched));
+      }
+      async function saveNotificationSettings() {
+        var settings = dashboardState.notificationSettings || {};
+        var telegramToken = document.getElementById('telegramBotTokenInput').value.trim();
+        var googleWebhook = document.getElementById('googleChatWebhookInput').value.trim();
+        var body = {
+          enabled: document.getElementById('notificationEnabledInput').checked,
+          channel: document.getElementById('notificationChannelInput').value,
+          telegram: {
+            bot_token: telegramToken || undefined,
+            chat_id: document.getElementById('telegramChatIdInput').value.trim()
+          },
+          google_chat: {
+            webhook_url: googleWebhook || undefined
+          },
+          watched_accounts: notificationWatchedKeysFromDom()
+        };
+        setText('notificationStatus', 'Saving notification settings...');
+        const res = await adminFetch('/notifications/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        if (!res) return;
+        const data = await res.json();
+        if (!data.ok) {
+          updateNotificationStatusText(data.message || 'Failed to save notification settings');
+          return;
+        }
+        dashboardState.notificationSettings = data.settings || settings;
+        renderNotificationSettings();
+        updateNotificationStatusText('Notification settings saved');
+      }
+      async function sendTestNotification() {
+        setText('notificationStatus', 'Sending test notification...');
+        const res = await adminFetch('/notifications/test', { method: 'POST' });
+        if (!res) return;
+        const data = await res.json();
+        updateNotificationStatusText(data.message || (data.ok ? 'Test notification sent' : 'Test notification failed'));
+      }
       function openAppSettingsModal() {
         renderProviderSettingsList();
+        loadNotificationSettings();
         setMobileNavOpen(false);
         openModal('appSettingsModal');
       }
@@ -4236,11 +4508,49 @@ async fn dashboard() -> impl IntoResponse {
     <div id="appSettingsModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="appSettingsTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
         <h2 id="appSettingsTitle" style="margin-top:0;">Settings</h2>
-        <div class="custom-model-form-row">
+        <div class="settings-block custom-model-form-row">
           <label>Dashboard providers</label>
           <div id="providerSettingsList" class="provider-settings-list"></div>
         </div>
         <div id="appSettingsStatus" class="muted" style="margin-top:10px;"></div>
+        <div class="settings-block">
+          <div class="settings-block-title">
+            <span>Notifications</span>
+            <label class="check-row" for="notificationEnabledInput">
+              <input id="notificationEnabledInput" type="checkbox">
+              Enabled
+            </label>
+          </div>
+          <div class="notification-channel-grid">
+            <div class="custom-model-form-row">
+              <label for="notificationChannelInput">Channel</label>
+              <select id="notificationChannelInput">
+                <option value="telegram">Telegram</option>
+                <option value="google_chat">Google Chat</option>
+              </select>
+            </div>
+            <div class="custom-model-form-row" id="telegramNotificationFields">
+              <label for="telegramBotTokenInput">Telegram Bot Token</label>
+              <input id="telegramBotTokenInput" type="password" autocomplete="off" placeholder="Telegram bot token">
+              <label for="telegramChatIdInput" style="margin-top:8px;">Telegram Chat ID</label>
+              <input id="telegramChatIdInput" autocomplete="off" placeholder="chat id">
+            </div>
+            <div class="custom-model-form-row" id="googleChatNotificationFields" hidden>
+              <label for="googleChatWebhookInput">Google Chat Webhook URL</label>
+              <textarea id="googleChatWebhookInput" rows="4" autocomplete="off" placeholder="Google Chat incoming webhook URL"></textarea>
+            </div>
+          </div>
+          <div class="notification-watch-toolbar">
+            <button type="button" class="mini-btn" onclick="setNotificationAllWatch(true)">Check all accounts</button>
+            <button type="button" class="mini-btn secondary-button" onclick="setNotificationAllWatch(false)">Uncheck all accounts</button>
+          </div>
+          <div id="notificationWatchList" class="notification-watch-list"></div>
+          <div id="notificationStatus" class="muted" style="margin-top:10px;"></div>
+          <div class="modal-actions" style="margin-top:12px;">
+            <button type="button" id="saveNotificationSettingsBtn">Save Notifications</button>
+            <button type="button" id="testNotificationBtn" class="secondary-button">Send Test</button>
+          </div>
+        </div>
         <div class="modal-actions" style="margin-top:16px;">
           <button type="button" id="resetProviderSettingsBtn" class="secondary-button">Reset default</button>
           <button type="button" id="closeAppSettingsModalBtn">Done</button>
@@ -4362,6 +4672,9 @@ async fn dashboard() -> impl IntoResponse {
       });
       document.getElementById('closeAppSettingsModalBtn').addEventListener('click', closeAppSettingsModal);
       document.getElementById('resetProviderSettingsBtn').addEventListener('click', resetProviderDashboardSettings);
+      document.getElementById('notificationChannelInput').addEventListener('change', updateNotificationChannelUi);
+      document.getElementById('saveNotificationSettingsBtn').addEventListener('click', saveNotificationSettings);
+      document.getElementById('testNotificationBtn').addEventListener('click', sendTestNotification);
       document.getElementById('appSettingsModal').addEventListener('click', function(e) {
         if (e.target.id === 'appSettingsModal') {
           closeAppSettingsModal();
@@ -5494,6 +5807,232 @@ async fn custom_models_delete_route(
         "message": "Custom model deleted"
     }))
     .into_response()
+}
+
+async fn notification_settings_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    method: Method,
+    body: Bytes,
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+
+    match method {
+        Method::GET => notification_settings_json(&state),
+        Method::POST => {
+            let update: notifications::NotificationSettingsUpdate =
+                match serde_json::from_slice(&body) {
+                    Ok(update) => update,
+                    Err(err) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            [("Content-Type", "application/json")],
+                            serde_json::to_vec(&serde_json::json!({
+                                "ok": false,
+                                "message": format!("invalid notification settings JSON: {}", err)
+                            }))
+                            .unwrap_or_default(),
+                        )
+                            .into_response();
+                    }
+                };
+            let next = {
+                let current = state.notification_settings.lock().unwrap().clone();
+                notifications::apply_update(&current, update)
+            };
+            if let Err(err) = notifications::save(state.cfg.as_ref(), &next) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [("Content-Type", "application/json")],
+                    serde_json::to_vec(&serde_json::json!({
+                        "ok": false,
+                        "message": err
+                    }))
+                    .unwrap_or_default(),
+                )
+                    .into_response();
+            }
+            {
+                let mut lock = state.notification_settings.lock().unwrap();
+                *lock = next;
+            }
+            notification_settings_json(&state)
+        }
+        _ => (
+            StatusCode::METHOD_NOT_ALLOWED,
+            [("Content-Type", "application/json")],
+            serde_json::to_vec(&serde_json::json!({
+                "ok": false,
+                "message": "notification settings supports GET and POST"
+            }))
+            .unwrap_or_default(),
+        )
+            .into_response(),
+    }
+}
+
+async fn notification_test_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    let settings = state.notification_settings.lock().unwrap().clone();
+    let text = format!("codex-gateway test notification\nTime: {}", now_rfc3339());
+    match notifications::send_notification(&state.client, &settings, &text).await {
+        Ok(()) => axum::Json(serde_json::json!({
+            "ok": true,
+            "message": "test notification sent"
+        }))
+        .into_response(),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            [("Content-Type", "application/json")],
+            serde_json::to_vec(&serde_json::json!({
+                "ok": false,
+                "message": err
+            }))
+            .unwrap_or_default(),
+        )
+            .into_response(),
+    }
+}
+
+fn notification_settings_json(state: &AppState) -> Response {
+    let settings = state.notification_settings.lock().unwrap().clone();
+    let accounts = notification_account_options(state);
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "settings": notifications::public_json(&settings, accounts)
+    }))
+    .into_response()
+}
+
+fn notification_account_options(state: &AppState) -> Vec<notifications::NotificationAccountOption> {
+    let mut out = Vec::new();
+
+    for token in state.tokens.lock().unwrap().clone() {
+        out.push(notifications::NotificationAccountOption {
+            provider: "codex".to_string(),
+            provider_label: "Codex".to_string(),
+            key: codex_stats_key(&token),
+            label: token.label.clone(),
+            account_id: token.account_id.clone().unwrap_or_default(),
+            credential_file: token.file_name.clone(),
+            enabled: token.enabled,
+        });
+    }
+    for account in state.agw_accounts.lock().unwrap().clone() {
+        out.push(notifications::NotificationAccountOption {
+            provider: "agw".to_string(),
+            provider_label: "Antigravity".to_string(),
+            key: antigravity_stats_key(&account),
+            label: account.label.clone(),
+            account_id: account.email.clone(),
+            credential_file: account.file_name.clone(),
+            enabled: account.enabled,
+        });
+    }
+    for account in state.gemini_accounts.lock().unwrap().clone() {
+        out.push(notifications::NotificationAccountOption {
+            provider: "gemini".to_string(),
+            provider_label: "Gemini".to_string(),
+            key: gemini_stats_key(&account),
+            label: account.label.clone(),
+            account_id: account.email.clone(),
+            credential_file: account.file_name.clone(),
+            enabled: account.enabled,
+        });
+    }
+    for account in state.qwen_accounts.lock().unwrap().clone() {
+        out.push(notifications::NotificationAccountOption {
+            provider: "qwen".to_string(),
+            provider_label: "Qwen".to_string(),
+            key: qwen_stats_key(&account),
+            label: account.label.clone(),
+            account_id: account.account_id.clone(),
+            credential_file: account.file_name.clone(),
+            enabled: account.enabled,
+        });
+    }
+    for account in state.deepseek_accounts.lock().unwrap().clone() {
+        out.push(notifications::NotificationAccountOption {
+            provider: "deepseek".to_string(),
+            provider_label: "DeepSeek".to_string(),
+            key: deepseek_stats_key(&account),
+            label: account.label.clone(),
+            account_id: account.account_id.clone(),
+            credential_file: account.file_name.clone(),
+            enabled: account.enabled,
+        });
+    }
+    for account in state.minimax_accounts.lock().unwrap().clone() {
+        out.push(notifications::NotificationAccountOption {
+            provider: "minimax".to_string(),
+            provider_label: "MiniMax".to_string(),
+            key: minimax_stats_key(&account),
+            label: account.label.clone(),
+            account_id: account.account_id.clone(),
+            credential_file: account.file_name.clone(),
+            enabled: account.enabled,
+        });
+    }
+    for account in state.grok_accounts.lock().unwrap().clone() {
+        out.push(notifications::NotificationAccountOption {
+            provider: "grok".to_string(),
+            provider_label: "Grok".to_string(),
+            key: grok_stats_key(&account),
+            label: account.label.clone(),
+            account_id: account
+                .user_id
+                .clone()
+                .or_else(|| account.email.clone())
+                .unwrap_or_default(),
+            credential_file: account.file_name.clone(),
+            enabled: account.enabled,
+        });
+    }
+    for account in state.copilot_accounts.lock().unwrap().clone() {
+        out.push(notifications::NotificationAccountOption {
+            provider: "copilot".to_string(),
+            provider_label: "GitHub Copilot".to_string(),
+            key: copilot_stats_key(&account),
+            label: account.label.clone(),
+            account_id: account.account_id.clone(),
+            credential_file: account.file_name.clone(),
+            enabled: account.enabled,
+        });
+    }
+    for account in state.claude_accounts.lock().unwrap().clone() {
+        out.push(notifications::NotificationAccountOption {
+            provider: "claude".to_string(),
+            provider_label: "Claude".to_string(),
+            key: claude_stats_key(&account),
+            label: account.label.clone(),
+            account_id: account.account_id.clone(),
+            credential_file: account.file_name.clone(),
+            enabled: account.enabled,
+        });
+    }
+    for account in state.glm_accounts.lock().unwrap().clone() {
+        out.push(notifications::NotificationAccountOption {
+            provider: "glm".to_string(),
+            provider_label: "GLM (Z.AI)".to_string(),
+            key: glm_stats_key(&account),
+            label: account.label.clone(),
+            account_id: account.account_id.clone(),
+            credential_file: account.file_name.clone(),
+            enabled: account.enabled,
+        });
+    }
+
+    out.sort_by(|a, b| {
+        a.provider
+            .cmp(&b.provider)
+            .then_with(|| a.label.cmp(&b.label))
+            .then_with(|| a.key.cmp(&b.key))
+    });
+    out
 }
 
 fn parse_custom_model_save(
@@ -10350,6 +10889,7 @@ fn record_request_started(state: &AppState, context: &UsageContext) {
 
 fn record_request_error(state: &AppState, context: &UsageContext, message: impl Into<String>) {
     let observed_at = now_rfc3339();
+    let message = message.into();
     update_account_counters(
         state,
         context.provider,
@@ -10364,6 +10904,7 @@ fn record_request_error(state: &AppState, context: &UsageContext, message: impl 
             ..Default::default()
         },
     );
+    notifications::notify_error(state, context, &message, &observed_at);
     if context.prompt.is_prompt {
         append_usage_history(
             state,
@@ -10388,7 +10929,7 @@ fn record_request_error(state: &AppState, context: &UsageContext, message: impl 
                 reasoning_tokens: 0,
                 input_chars: context.prompt.input_chars,
                 prompt_items: context.prompt.prompt_items,
-                error_message: Some(message.into()),
+                error_message: Some(message),
                 raw_usage: None,
             },
         );

@@ -316,6 +316,9 @@ mod tests {
                 copilot_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 claude_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 admin_sessions: Arc::new(Mutex::new(HashMap::new())),
+                notification_settings: Arc::new(Mutex::new(
+                    crate::notifications::NotificationSettings::default(),
+                )),
                 disabled: Arc::new(Mutex::new(HashSet::new())),
                 usage_history_lock: Arc::new(Mutex::new(())),
             };
