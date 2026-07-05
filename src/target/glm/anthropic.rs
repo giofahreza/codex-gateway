@@ -483,6 +483,10 @@ fn anthropic_messages_to_chat_completions(payload: &Value, model: &str) -> Resul
     if let Some(tool_choice) = translate_anthropic_tool_choice(payload.get("tool_choice")) {
         out.insert("tool_choice".to_string(), tool_choice);
     }
+    out.insert(
+        "thinking".to_string(),
+        translate_anthropic_thinking(payload.get("thinking")),
+    );
     out.insert("stream".to_string(), Value::Bool(false));
     Ok(Value::Object(out))
 }
@@ -709,6 +713,16 @@ fn translate_anthropic_tool_choice(value: Option<&Value>) -> Option<Value> {
             .and_then(|name| name.as_str())
             .map(|name| json!({"type": "function", "function": { "name": name }})),
         _ => None,
+    }
+}
+
+fn translate_anthropic_thinking(value: Option<&Value>) -> Value {
+    match value
+        .and_then(|value| value.get("type"))
+        .and_then(|value| value.as_str())
+    {
+        Some("enabled") => json!({"type": "enabled"}),
+        _ => json!({"type": "disabled"}),
     }
 }
 
@@ -1020,5 +1034,6 @@ mod tests {
         assert_eq!(out["messages"][2]["tool_calls"][0]["id"], "toolu_1");
         assert_eq!(out["messages"][3]["role"], "tool");
         assert_eq!(out["tools"][0]["function"]["name"], "lookup");
+        assert_eq!(out["thinking"]["type"], "disabled");
     }
 }

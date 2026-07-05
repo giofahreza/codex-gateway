@@ -11,10 +11,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use uuid::Uuid;
 
-use super::{
-    DEFAULT_API_USAGE_OPENAI_BASE_URL, DEFAULT_OPENAI_BASE_URL,
-    DEFAULT_SUBSCRIPTION_OPENAI_BASE_URL,
-};
+use super::{DEFAULT_API_USAGE_OPENAI_BASE_URL, DEFAULT_SUBSCRIPTION_OPENAI_BASE_URL};
 
 const MODEL_FALLBACKS: &[&str] = &[
     "glm-5.2",
@@ -1724,7 +1721,7 @@ mod tests {
 
     #[test]
     fn normalize_base_url_defaults_to_official() {
-        assert_eq!(normalize_base_url(None), DEFAULT_OPENAI_BASE_URL);
+        assert_eq!(normalize_base_url(None), DEFAULT_API_USAGE_OPENAI_BASE_URL);
         assert_eq!(
             normalize_base_url(Some("https://example.com/")),
             "https://example.com"
