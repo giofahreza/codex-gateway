@@ -4875,14 +4875,9 @@ async fn dashboard() -> impl IntoResponse {
         refreshCredentialViews();
       }
       function toggleCred(fileName, enabled, label) {
-        const display = label || fileName || 'this credential';
-        const action = enabled ? 'Enable' : 'Disable';
-        openCredentialActionConfirm({
-          title: action + ' credential?',
-          message: action + ' ' + display + '?',
-          approveLabel: action,
-          danger: !enabled,
-          run: function() { return performToggleCred(fileName, enabled); }
+        closeAccountActionMenus();
+        performToggleCred(fileName, enabled).catch(function(err) {
+          notify(err && err.message ? err.message : 'Failed to update credential', 'error');
         });
       }
       async function performToggleCred(fileName, enabled) {
