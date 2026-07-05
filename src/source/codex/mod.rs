@@ -292,6 +292,30 @@ mod tests {
     }
 
     #[test]
+    fn codex_spark_responses_strips_unsupported_image_generation_tool() {
+        let uri: Uri = "/codex/responses".parse().unwrap();
+        let routed = route_to_target(
+            "/codex/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(
+                br#"{"model":"cod:gpt-5.3-codex-spark","input":"qa only","tools":[{"type":"image_generation"},{"type":"function","name":"shell","parameters":{"type":"object"}}]}"#,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::Codex);
+        let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "gpt-5.3-codex-spark");
+        assert_eq!(body["input"], "qa only");
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["name"], "shell");
+    }
+
+    #[test]
     fn codex_responses_rejects_invalid_provider_prefix_syntax() {
         let uri: Uri = "/codex/responses".parse().unwrap();
         let err = route_to_target(
