@@ -37,6 +37,15 @@ pub fn route_to_target(
         }
     }
 
+    if upstream_path == "chat/completions" && *method == Method::POST {
+        provider::validate_provider_prefix_in_body(&body)?;
+        let target =
+            provider::target_from_request_body(&body).unwrap_or(crate::source::TargetModel::Codex);
+        if target != crate::source::TargetModel::Codex {
+            return Ok(provider::convert(target, upstream_path, uri, body));
+        }
+    }
+
     if (upstream_path == "images/generations" || upstream_path == "videos/generations")
         && *method == Method::POST
     {
@@ -220,6 +229,27 @@ mod tests {
 
         assert_eq!(routed.target, crate::source::TargetModel::Qwen);
         assert_eq!(routed.upstream_path, "responses");
+    }
+
+    #[test]
+    fn route_to_target_uses_glm_for_openai_chat_completions() {
+        let uri: Uri = "/v1/chat/completions".parse().unwrap();
+        let body = Bytes::from_static(
+            br#"{"model":"glm:glm-5.2","messages":[{"role":"user","content":"hi"}]}"#,
+        );
+        let routed = route_to_target(
+            "/v1/chat/completions",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            body,
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, crate::source::TargetModel::Glm);
+        assert_eq!(routed.upstream_path, "chat/completions");
+        let body: serde_json::Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "glm-5.2");
     }
 
     #[test]

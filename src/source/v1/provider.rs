@@ -46,6 +46,8 @@ fn target_from_unprefixed_model(model: &str) -> TargetModel {
         TargetModel::MiniMax
     } else if lower.starts_with("claude") {
         TargetModel::Claude
+    } else if lower.starts_with("glm") {
+        TargetModel::Glm
     } else if lower.starts_with("gemini") {
         if is_antigravity_gemini_model(&lower) {
             TargetModel::Antigravity
@@ -88,6 +90,7 @@ fn target_from_provider_prefix(provider: &str) -> Option<TargetModel> {
         "min" => Some(TargetModel::MiniMax),
         "cop" => Some(TargetModel::Copilot),
         "cld" => Some(TargetModel::Claude),
+        "glm" => Some(TargetModel::Glm),
         "cod" => Some(TargetModel::Codex),
         "ctm" => Some(TargetModel::Custom),
         _ => None,
@@ -156,6 +159,7 @@ mod tests {
         assert_eq!(target_from_model("abab6.5s-chat"), TargetModel::MiniMax);
         assert_eq!(target_from_model("minimax-text-01"), TargetModel::MiniMax);
         assert_eq!(target_from_model("claude-sonnet-4-5"), TargetModel::Claude);
+        assert_eq!(target_from_model("glm-5.2"), TargetModel::Glm);
         assert_eq!(target_from_model("gemini-2.5-pro"), TargetModel::Gemini);
         assert_eq!(
             target_from_model("agw:gemini-2.5-pro"),
@@ -174,6 +178,7 @@ mod tests {
             target_from_model("cld:claude-sonnet-4-20250514"),
             TargetModel::Claude
         );
+        assert_eq!(target_from_model("glm:glm-5.2"), TargetModel::Glm);
         assert_eq!(target_from_model("cod:gpt-5.4"), TargetModel::Codex);
         assert_eq!(target_from_model("ctm:default"), TargetModel::Custom);
         assert_eq!(

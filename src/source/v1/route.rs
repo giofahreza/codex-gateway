@@ -41,6 +41,16 @@ pub fn resolve(path: &str, method: &Method) -> Result<String, RouteError> {
             })
         };
     }
+    if upstream_path == "chat/completions" {
+        return if *method == Method::POST {
+            Ok(upstream_path)
+        } else {
+            Err(RouteError {
+                status: StatusCode::METHOD_NOT_ALLOWED,
+                message: "method not allowed for v1 endpoint",
+            })
+        };
+    }
     if upstream_path.starts_with("responses/") {
         return if *method == Method::GET || *method == Method::DELETE {
             Ok(upstream_path)

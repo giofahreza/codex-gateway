@@ -48,6 +48,7 @@ struct AppState {
     grok_rr: Arc<Mutex<usize>>,
     copilot_rr: Arc<Mutex<usize>>,
     claude_rr: Arc<Mutex<usize>>,
+    glm_rr: Arc<Mutex<usize>>,
     custom_model_rr: Arc<Mutex<HashMap<String, usize>>>,
     client: reqwest::Client,
     tokens: Arc<Mutex<Vec<UpstreamToken>>>,
@@ -59,6 +60,7 @@ struct AppState {
     grok_accounts: Arc<Mutex<Vec<target::grok::accounts::GrokAccount>>>,
     copilot_accounts: Arc<Mutex<Vec<target::copilot::accounts::CopilotAccount>>>,
     claude_accounts: Arc<Mutex<Vec<target::claude::accounts::ClaudeAccount>>>,
+    glm_accounts: Arc<Mutex<Vec<target::glm::accounts::GlmAccount>>>,
     custom_models: Arc<Mutex<Vec<custom_models::CustomModel>>>,
     stats: Arc<Mutex<UsageStats>>,
     persisted_stats: Arc<Mutex<StatsStore>>,
@@ -69,6 +71,7 @@ struct AppState {
     minimax_quota_cache: Arc<Mutex<HashMap<String, target::minimax::quota::QuotaCacheEntry>>>,
     deepseek_quota_cache: Arc<Mutex<HashMap<String, target::deepseek::quota::QuotaCacheEntry>>>,
     claude_quota_cache: Arc<Mutex<HashMap<String, target::claude::quota::QuotaCacheEntry>>>,
+    glm_quota_cache: Arc<Mutex<HashMap<String, target::glm::quota::QuotaCacheEntry>>>,
     oauth_pending: Arc<Mutex<HashMap<String, PendingOAuth>>>,
     agw_oauth_pending: Arc<Mutex<HashMap<String, target::antigravity::auth::PendingOAuth>>>,
     gemini_oauth_pending: Arc<Mutex<HashSet<String>>>,
@@ -119,6 +122,7 @@ struct UsageStats {
     grok_accounts: Vec<AccountUsage>,
     copilot_accounts: Vec<AccountUsage>,
     claude_accounts: Vec<AccountUsage>,
+    glm_accounts: Vec<AccountUsage>,
     total_requests: u64,
     total_errors: u64,
     total_prompt_total: u64,
@@ -217,6 +221,7 @@ async fn main() {
     let minimax_accounts = target::minimax::accounts::load_accounts(&cfg, &disabled);
     let copilot_accounts = target::copilot::accounts::load_accounts(&cfg, &disabled);
     let claude_accounts = target::claude::accounts::load_accounts(&cfg, &disabled);
+    let glm_accounts = target::glm::accounts::load_accounts(&cfg, &disabled);
     let custom_models = custom_models::load(&cfg);
     let persisted_stats = stats_store::load(&cfg);
     let admin_sessions = admin_auth::load_sessions(&admin_session_path(&cfg));
@@ -230,6 +235,7 @@ async fn main() {
         &minimax_accounts,
         &copilot_accounts,
         &claude_accounts,
+        &glm_accounts,
         &persisted_stats,
     );
     let quota_cache = vec![None; tokens.len()];
@@ -256,6 +262,7 @@ async fn main() {
         minimax_rr: Arc::new(Mutex::new(0)),
         copilot_rr: Arc::new(Mutex::new(0)),
         claude_rr: Arc::new(Mutex::new(0)),
+        glm_rr: Arc::new(Mutex::new(0)),
         custom_model_rr: Arc::new(Mutex::new(HashMap::new())),
         client,
         tokens: Arc::new(Mutex::new(tokens)),
@@ -267,6 +274,7 @@ async fn main() {
         minimax_accounts: Arc::new(Mutex::new(minimax_accounts)),
         copilot_accounts: Arc::new(Mutex::new(copilot_accounts)),
         claude_accounts: Arc::new(Mutex::new(claude_accounts)),
+        glm_accounts: Arc::new(Mutex::new(glm_accounts)),
         custom_models: Arc::new(Mutex::new(custom_models)),
         stats: Arc::new(Mutex::new(stats)),
         persisted_stats: Arc::new(Mutex::new(persisted_stats)),
@@ -277,6 +285,7 @@ async fn main() {
         minimax_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         deepseek_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         claude_quota_cache: Arc::new(Mutex::new(HashMap::new())),
+        glm_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         agw_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),
@@ -339,6 +348,9 @@ async fn main() {
         .route("/claude/quota.json", any(claude_quota_json_route))
         .route("/login/claude/start", any(claude_login_start_route))
         .route("/login/claude/submit", any(claude_login_submit_route))
+        .route("/glm/accounts.json", any(glm_accounts_route))
+        .route("/glm/quota.json", any(glm_quota_json_route))
+        .route("/login/glm/start", any(glm_login_start_route))
         .route("/custom-models.json", any(custom_models_json_route))
         .route("/custom-models/save", any(custom_models_save_route))
         .route("/custom-models/delete", any(custom_models_delete_route))
@@ -1709,6 +1721,7 @@ async fn dashboard() -> impl IntoResponse {
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="grok">Grok (xAI)</button>
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="copilot">GitHub Copilot</button>
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="claude">Claude</button>
+              <button type="button" class="provider-menu-item" role="menuitem" data-provider="glm">GLM (Z.AI)</button>
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="custom-model">Custom model</button>
             </div>
           </div>
@@ -1850,6 +1863,13 @@ async fn dashboard() -> impl IntoResponse {
         </div>
         <div id="claudeCards"></div>
       </section>
+      <section class="provider-section" data-provider-section="glm" aria-labelledby="glmProviderTitle">
+        <div class="provider-badge">
+          <span id="glmProviderTitle">GLM (Z.AI)</span>
+          <span class="provider-badge-count" id="glmBadgeCount">0 accounts</span>
+        </div>
+        <div id="glmCards"></div>
+      </section>
       </div>
     </main>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
@@ -1874,6 +1894,7 @@ async fn dashboard() -> impl IntoResponse {
       let lastQwenQuota = new Map();
       let lastCopilotQuota = new Map();
       let lastClaudeQuota = new Map();
+      let lastGlmQuota = new Map();
       let openAgwRows = new Set();
       let openGeminiRows = new Set();
       let openQwenRows = new Set();
@@ -1898,7 +1919,8 @@ async fn dashboard() -> impl IntoResponse {
         'minimax',
         'grok',
         'copilot',
-        'claude'
+        'claude',
+        'glm'
       ];
       let pendingCredentialAction = null;
       const modalIds = [
@@ -1911,6 +1933,7 @@ async fn dashboard() -> impl IntoResponse {
         'addGrokModal',
         'addCopilotModal',
         'addClaudeModal',
+        'addGlmModal',
         'appSettingsModal',
         'customModelModal',
         'confirmActionModal'
@@ -1927,7 +1950,8 @@ async fn dashboard() -> impl IntoResponse {
           minimax: [],
           grok: [],
           copilot: [],
-          claude: []
+          claude: [],
+          glm: []
         },
         customModels: [],
         providerSettings: readProviderDashboardSettings(),
@@ -1940,7 +1964,8 @@ async fn dashboard() -> impl IntoResponse {
           minimax: new Map(),
           grok: new Map(),
           copilot: new Map(),
-          claude: new Map()
+          claude: new Map(),
+          glm: new Map()
         }
       };
       const providerLabels = {
@@ -1952,7 +1977,8 @@ async fn dashboard() -> impl IntoResponse {
         minimax: 'MiniMax',
         grok: 'Grok',
         copilot: 'GitHub Copilot',
-        claude: 'Claude'
+        claude: 'Claude',
+        glm: 'GLM (Z.AI)'
       };
       function normalizeProviderDashboardSettings(value) {
         var known = new Set(dashboardProviderKeys);
@@ -2295,6 +2321,8 @@ async fn dashboard() -> impl IntoResponse {
         refreshCopilotAccounts();
         refreshClaudeQuota();
         refreshClaudeAccounts();
+        refreshGlmQuota();
+        refreshGlmAccounts();
         refreshCustomModels();
       }
       function accountActionMenuId(fileName) {
@@ -2910,6 +2938,8 @@ async fn dashboard() -> impl IntoResponse {
         rows.push(renderMetaLine('account type', firstPresent(a, ['account_type']), false));
         rows.push(renderMetaLine('project id', firstPresent(a, ['project_id']), true));
         rows.push(renderMetaLine('resource URL', firstPresent(a, ['resource_url', 'base_url', 'api_base_url']), true));
+        rows.push(renderMetaLine('openai base URL', firstPresent(a, ['openai_base_url']), true));
+        rows.push(renderMetaLine('anthropic base URL', firstPresent(a, ['anthropic_base_url']), true));
         rows.push(renderMetaLine('saved token expiry', firstPresent(a, ['expired_at']), false));
         rows.push(renderMetaLine('copilot token expiry', firstPresent(a, ['copilot_expires_at']), false));
         rows.push(renderMetaLine('last success', firstPresent(a, ['last_success_at']), false));
@@ -3405,6 +3435,50 @@ async fn dashboard() -> impl IntoResponse {
         dashboardState.quotas.claude = quotaMap;
         updateOverview();
         refreshClaudeAccounts();
+      }
+      function buildGlmCard(a, quota) {
+        var usage = '';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.prompt_total || 0) + '</span><span class="stat-pill-label">prompt</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.input_tokens || 0) + '</span><span class="stat-pill-label">in tok</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.output_tokens || 0) + '</span><span class="stat-pill-label">out tok</span></span>';
+        usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.total_tokens || 0) + '</span><span class="stat-pill-label">total tok</span></span>';
+        return '<div class="card">'
+          + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.account_id || 'GLM') + '</span>' + renderAccountState(a) + renderAttentionBadge('glm', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
+          + '<div class="stat-pills">' + usage + '</div>'
+          + renderQuotaBars(quota, { provider: 'glm', key: a.file_name || a.label || a.account_id || '' })
+          + renderAccountModels(a, quota, 'glm', a.file_name || a.label || a.account_id || '')
+          + renderMetaDetails(connectionRows('glm', a), 'Connection details', 'glm', a, a.file_name || a.label || a.account_id || '')
+          + '</div>';
+      }
+      async function refreshGlmAccounts() {
+        var res = await adminFetch('/glm/accounts.json');
+        if (!res) return;
+        var data = await res.json();
+        var accounts = data.accounts || [];
+        dashboardState.providers.glm = accounts;
+        var cards = accounts.map(function(a) {
+          return buildGlmCard(a, lastGlmQuota.get(a.file_name || a.label) || lastGlmQuota.get(a.account_id) || null);
+        }).join('');
+        document.getElementById('glmCards').innerHTML = cards || '<div class="empty-state">No GLM accounts</div>';
+        document.getElementById('glmBadgeCount').textContent = accounts.length + ' accounts';
+        updateOverview();
+      }
+      async function refreshGlmQuota() {
+        const res = await adminFetch('/glm/quota.json');
+        if (!res) return;
+        const quota = await res.json();
+        const quotaMap = new Map();
+        (quota.accounts || []).forEach(q => {
+          if (q.file_name || q.label) quotaMap.set(q.file_name || q.label, q);
+          if (q.label) quotaMap.set(q.label, q);
+          if (q.account_id) quotaMap.set(q.account_id, q);
+        });
+        lastGlmQuota = quotaMap;
+        dashboardState.quotas.glm = quotaMap;
+        updateOverview();
+        refreshGlmAccounts();
       }
       function normalizeCustomAlias(alias) {
         return String(alias || '').trim().replace(/^ctm:/i, '');
@@ -4045,6 +4119,28 @@ async fn dashboard() -> impl IntoResponse {
         </div>
       </div>
     </div>
+    <div id="addGlmModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addGlmTitle" aria-hidden="true" style="display:none;">
+      <div class="modal-card">
+        <h2 id="addGlmTitle" style="margin-top:0;">Add GLM Account</h2>
+        <p>Paste a Z.AI GLM Coding Plan API key. The gateway validates it against the OpenAI-compatible model catalog before saving it.</p>
+        <div class="modal-actions" style="margin-top:8px;">
+          <button type="button" onclick="window.open('/login/glm/start', '_blank', 'noopener')">Open Helper</button>
+        </div>
+        <label for="glmKeyInput" style="margin-top:12px;">API Key</label>
+        <textarea id="glmKeyInput" rows="6" placeholder="Paste Z.AI API key here"></textarea>
+        <label for="glmLabelInput" style="margin-top:12px;">Label</label>
+        <input id="glmLabelInput" placeholder="optional label">
+        <label for="glmOpenAiBaseUrlInput" style="margin-top:12px;">OpenAI/Codex Base URL</label>
+        <input id="glmOpenAiBaseUrlInput" placeholder="https://api.z.ai/api/coding/paas/v4">
+        <label for="glmAnthropicBaseUrlInput" style="margin-top:12px;">Claude Code Base URL</label>
+        <input id="glmAnthropicBaseUrlInput" placeholder="https://api.z.ai/api/anthropic">
+        <button onclick="submitGlmKey()" style="margin-top:12px;">Save Key</button>
+        <div id="glmStatus" class="muted" style="margin-top:8px;"></div>
+        <div class="modal-actions" style="margin-top:16px;">
+          <button type="button" id="closeGlmModalBtn" class="secondary-button">Close</button>
+        </div>
+      </div>
+    </div>
     <div id="addGrokModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addGrokTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
         <h2 id="addGrokTitle" style="margin-top:0;">Add Grok Account</h2>
@@ -4245,6 +4341,7 @@ async fn dashboard() -> impl IntoResponse {
           else if (provider === 'grok') openModal('addGrokModal');
           else if (provider === 'copilot') openModal('addCopilotModal');
           else if (provider === 'claude') openModal('addClaudeModal');
+          else if (provider === 'glm') openModal('addGlmModal');
           else if (provider === 'custom-model') openCustomModelModal();
         });
       });
@@ -4435,6 +4532,51 @@ async fn dashboard() -> impl IntoResponse {
       document.getElementById('addMiniMaxModal').addEventListener('click', (e) => {
         if (e.target.id === 'addMiniMaxModal') {
           closeMiniMaxModal();
+        }
+      });
+      function closeGlmModal() {
+        closeModal('addGlmModal');
+      }
+      async function submitGlmKey() {
+        const apiKey = document.getElementById('glmKeyInput').value.trim();
+        const label = document.getElementById('glmLabelInput').value.trim();
+        const openaiBaseUrl = document.getElementById('glmOpenAiBaseUrlInput').value.trim();
+        const anthropicBaseUrl = document.getElementById('glmAnthropicBaseUrlInput').value.trim();
+        if (!apiKey) {
+          document.getElementById('glmStatus').textContent = 'Paste a GLM API key first.';
+          return;
+        }
+        const res = await adminFetch('/login/glm/start', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            api_key: apiKey,
+            label: label || undefined,
+            openai_base_url: openaiBaseUrl || undefined,
+            anthropic_base_url: anthropicBaseUrl || undefined
+          })
+        });
+        if (!res) return;
+        const data = await res.json();
+        document.getElementById('glmStatus').textContent = data.message || 'Failed to save GLM key';
+        if (!data.ok) {
+          return;
+        }
+        document.getElementById('glmKeyInput').value = '';
+        document.getElementById('glmLabelInput').value = '';
+        document.getElementById('glmOpenAiBaseUrlInput').value = '';
+        document.getElementById('glmAnthropicBaseUrlInput').value = '';
+        refreshGlmQuota();
+        refreshGlmAccounts();
+      }
+      document.getElementById('closeGlmModalBtn').addEventListener('click', () => {
+        closeGlmModal();
+      });
+      document.getElementById('addGlmModal').addEventListener('click', (e) => {
+        if (e.target.id === 'addGlmModal') {
+          closeGlmModal();
         }
       });
       // Grok modal
@@ -4927,6 +5069,7 @@ async fn dashboard() -> impl IntoResponse {
         refreshMiniMaxQuota();
         refreshCopilotQuota().then(() => refreshCopilotAccounts());
         refreshClaudeQuota().then(() => refreshClaudeAccounts());
+        refreshGlmQuota().then(() => refreshGlmAccounts());
         refreshCustomModels();
         if (dashboardIntervalsStarted) {
           return;
@@ -4942,6 +5085,7 @@ async fn dashboard() -> impl IntoResponse {
         setInterval(() => { if (adminAuthenticated) refreshMiniMaxQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshCopilotQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshClaudeQuota(); }, 60000);
+        setInterval(() => { if (adminAuthenticated) refreshGlmQuota(); }, 60000);
         setInterval(() => { if (adminAuthenticated) refreshAgwAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshGeminiAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshQwenAccounts(); }, 10000);
@@ -4950,6 +5094,7 @@ async fn dashboard() -> impl IntoResponse {
         setInterval(() => { if (adminAuthenticated) refreshGrokAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshCopilotAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshClaudeAccounts(); }, 10000);
+        setInterval(() => { if (adminAuthenticated) refreshGlmAccounts(); }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshContextChart(); }, 60000);
       }
       document.getElementById('adminLoginForm').addEventListener('submit', async (e) => {
@@ -5838,6 +5983,38 @@ async fn claude_login_submit_route(
         .into_response()
 }
 
+async fn glm_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::glm::admin::accounts_json(State(state))
+        .await
+        .into_response()
+}
+
+async fn glm_quota_json_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::glm::admin::quota_json(State(state))
+        .await
+        .into_response()
+}
+
+async fn glm_login_start_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    method: Method,
+    body: Bytes,
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    target::glm::admin::login_start(State(state), method, body)
+        .await
+        .into_response()
+}
+
 async fn deepseek_login_start_route(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -5955,6 +6132,11 @@ async fn usage_summary_route(State(state): State<AppState>, headers: HeaderMap) 
         .into_iter()
         .map(|(key, usage)| serde_json::json!({ "key": key, "usage": usage }))
         .collect::<Vec<_>>();
+    let mut glm = persisted
+        .glm
+        .into_iter()
+        .map(|(key, usage)| serde_json::json!({ "key": key, "usage": usage }))
+        .collect::<Vec<_>>();
     codex.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     antigravity.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     gemini.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
@@ -5964,6 +6146,7 @@ async fn usage_summary_route(State(state): State<AppState>, headers: HeaderMap) 
     minimax.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     copilot.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     claude.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+    glm.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     axum::Json(serde_json::json!({
         "totals": {
             "requests": persisted.total_requests,
@@ -5987,7 +6170,8 @@ async fn usage_summary_route(State(state): State<AppState>, headers: HeaderMap) 
             "grok": grok,
             "minimax": minimax,
             "copilot": copilot,
-            "claude": claude
+            "claude": claude,
+            "glm": glm
         }
     }))
     .into_response()
@@ -6743,6 +6927,23 @@ async fn proxy(
                     .into_response(),
             };
         }
+        TargetModel::Glm => {
+            return match routed.upstream_path.as_str() {
+                "anthropic/v1/messages" => {
+                    target::glm::anthropic::messages(State(state), headers, routed.upstream_body)
+                        .await
+                        .into_response()
+                }
+                "chat/completions" => {
+                    target::glm::api::chat_completions(State(state), headers, routed.upstream_body)
+                        .await
+                        .into_response()
+                }
+                _ => target::glm::api::responses(State(state), headers, routed.upstream_body)
+                    .await
+                    .into_response(),
+            };
+        }
         TargetModel::Codex => {}
     }
     let upstream = match routed.target {
@@ -6759,6 +6960,7 @@ async fn proxy(
         | TargetModel::MiniMax
         | TargetModel::Copilot
         | TargetModel::Claude
+        | TargetModel::Glm
         | TargetModel::Custom
         | TargetModel::CodexModels
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
@@ -7424,6 +7626,14 @@ fn best_provider_score_for_model(state: &AppState, model: &str) -> AccountSelect
                 |idx| claude_account_selection_score(state, &accounts[idx]),
             )
         }
+        TargetModel::Glm => {
+            let accounts = state.glm_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| accounts[idx].enabled,
+                |idx| glm_account_selection_score(state, &accounts[idx]),
+            )
+        }
         TargetModel::Custom | TargetModel::CodexModels | TargetModel::UnifiedV1Models => {
             AccountSelectionScore {
                 quota_pressure: Some(f64::INFINITY),
@@ -7567,6 +7777,19 @@ async fn dispatch_custom_target(
         TargetModel::Claude => target::claude::api::responses(State(state), headers, body)
             .await
             .into_response(),
+        TargetModel::Glm => match upstream_path {
+            "chat/completions" => target::glm::api::chat_completions(State(state), headers, body)
+                .await
+                .into_response(),
+            "anthropic/v1/messages" => {
+                target::glm::anthropic::messages(State(state), headers, body)
+                    .await
+                    .into_response()
+            }
+            _ => target::glm::api::responses(State(state), headers, body)
+                .await
+                .into_response(),
+        },
         TargetModel::Custom | TargetModel::CodexModels | TargetModel::UnifiedV1Models => (
             StatusCode::BAD_REQUEST,
             [("Content-Type", "application/json")],
@@ -7858,6 +8081,7 @@ fn preferred_model_provider_prefix(model_id: &str) -> &'static str {
         TargetModel::MiniMax => "min",
         TargetModel::Copilot => "cop",
         TargetModel::Claude => "cld",
+        TargetModel::Glm => "glm",
         TargetModel::Custom => "ctm",
         TargetModel::Codex | TargetModel::CodexModels | TargetModel::UnifiedV1Models => "cod",
     }
@@ -7987,6 +8211,21 @@ async fn collect_unified_v1_models(
             "cld",
         ),
     );
+    append_unique_models(
+        &mut models,
+        &mut seen,
+        provider_prefixed_models(
+            fetch_openai_models_from_response(if has_enabled_glm_account(state) {
+                target::glm::api::models(State(state.clone()), headers.clone())
+                    .await
+                    .into_response()
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
+            })
+            .await,
+            "glm",
+        ),
+    );
     append_unique_models(&mut models, &mut seen, custom_model_openai_entries(state));
 
     models
@@ -8084,7 +8323,7 @@ fn split_provider_prefixed_model_id(model: &str) -> Option<(&str, &str)> {
 fn is_supported_provider_prefix(prefix: &str) -> bool {
     matches!(
         prefix.to_ascii_lowercase().as_str(),
-        "agw" | "gem" | "qwn" | "dsk" | "grk" | "min" | "cop" | "cld" | "cod" | "ctm"
+        "agw" | "gem" | "qwn" | "dsk" | "grk" | "min" | "cop" | "cld" | "glm" | "cod" | "ctm"
     )
 }
 
@@ -8131,6 +8370,10 @@ mod unified_model_catalog_tests {
         assert_eq!(
             split_provider_prefixed_model_id("min:MiniMax-M3"),
             Some(("min", "MiniMax-M3"))
+        );
+        assert_eq!(
+            split_provider_prefixed_model_id("glm:glm-5.2"),
+            Some(("glm", "glm-5.2"))
         );
         assert_eq!(split_provider_prefixed_model_id("openai:gpt-5.4"), None);
         assert_eq!(
@@ -8188,6 +8431,15 @@ fn has_enabled_copilot_account(state: &AppState) -> bool {
 fn has_enabled_claude_account(state: &AppState) -> bool {
     state
         .claude_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|account| account.enabled)
+}
+
+fn has_enabled_glm_account(state: &AppState) -> bool {
+    state
+        .glm_accounts
         .lock()
         .unwrap()
         .iter()
@@ -8572,6 +8824,7 @@ fn build_usage_stats(
     minimax_accounts: &[target::minimax::accounts::MiniMaxAccount],
     copilot_accounts: &[target::copilot::accounts::CopilotAccount],
     claude_accounts: &[target::claude::accounts::ClaudeAccount],
+    glm_accounts: &[target::glm::accounts::GlmAccount],
     persisted_stats: &StatsStore,
 ) -> UsageStats {
     let codex_accounts = tokens
@@ -8839,6 +9092,35 @@ fn build_usage_stats(
         })
         .collect();
 
+    let glm_accounts = glm_accounts
+        .iter()
+        .map(|account| {
+            let key = glm_stats_key(account);
+            let stored = persisted_stats
+                .account_usage(Provider::Glm, &key)
+                .cloned()
+                .unwrap_or_default();
+            AccountUsage {
+                key,
+                label: account.label.clone(),
+                account_id: account.account_id.clone(),
+                requests: stored.requests,
+                errors: stored.errors,
+                prompt_total: stored.prompt_total,
+                prompt_error_total: stored.prompt_error_total,
+                input_tokens: stored.input_tokens,
+                output_tokens: stored.output_tokens,
+                total_tokens: stored.total_tokens,
+                cache_tokens: stored.cache_tokens,
+                reasoning_tokens: stored.reasoning_tokens,
+                first_seen_at: stored.first_seen_at,
+                last_seen_at: stored.last_seen_at,
+                last_success_at: stored.last_success_at,
+                last_error_at: stored.last_error_at,
+            }
+        })
+        .collect();
+
     UsageStats {
         codex_accounts,
         agw_accounts,
@@ -8849,6 +9131,7 @@ fn build_usage_stats(
         minimax_accounts,
         copilot_accounts,
         claude_accounts,
+        glm_accounts,
         total_requests: persisted_stats.total_requests,
         total_errors: persisted_stats.total_errors,
         total_prompt_total: persisted_stats.total_prompt_total,
@@ -8873,6 +9156,7 @@ pub(crate) fn sync_usage_stats(state: &AppState) {
     let minimax_accounts = state.minimax_accounts.lock().unwrap().clone();
     let copilot_accounts = state.copilot_accounts.lock().unwrap().clone();
     let claude_accounts = state.claude_accounts.lock().unwrap().clone();
+    let glm_accounts = state.glm_accounts.lock().unwrap().clone();
     let persisted_stats = state.persisted_stats.lock().unwrap().clone();
     let mut stats = state.stats.lock().unwrap();
     *stats = build_usage_stats(
@@ -8885,6 +9169,7 @@ pub(crate) fn sync_usage_stats(state: &AppState) {
         &minimax_accounts,
         &copilot_accounts,
         &claude_accounts,
+        &glm_accounts,
         &persisted_stats,
     );
 }
@@ -9135,6 +9420,20 @@ pub(crate) fn claude_stats_key(account: &target::claude::accounts::ClaudeAccount
         return format!("claude:file:{}", file_name);
     }
     format!("claude:label:{}", account.label)
+}
+
+pub(crate) fn glm_stats_key(account: &target::glm::accounts::GlmAccount) -> String {
+    if !account.account_id.trim().is_empty() {
+        return format!("glm:account_id:{}", account.account_id);
+    }
+    if let Some(file_name) = account
+        .file_name
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return format!("glm:file:{}", file_name);
+    }
+    format!("glm:label:{}", account.label)
 }
 
 const ACCOUNT_SELECTION_QUOTA_EPSILON: f64 = 0.01;
@@ -9428,6 +9727,13 @@ pub(crate) fn claude_account_selection_score(
     account: &target::claude::accounts::ClaudeAccount,
 ) -> AccountSelectionScore {
     usage_backed_selection_score(state, Provider::Claude, claude_stats_key(account), None)
+}
+
+pub(crate) fn glm_account_selection_score(
+    state: &AppState,
+    account: &target::glm::accounts::GlmAccount,
+) -> AccountSelectionScore {
+    usage_backed_selection_score(state, Provider::Glm, glm_stats_key(account), None)
 }
 
 fn codex_quota_pressure(summary: &target::codex::quota::QuotaSummary) -> Option<f64> {
@@ -9812,6 +10118,25 @@ pub(crate) fn claude_usage_context(
         provider: Provider::Claude,
         provider_name: "claude",
         key: claude_stats_key(account),
+        label: account.label.clone(),
+        account_id: account.account_id.clone(),
+        credential_file: account.file_name.clone(),
+        model,
+        request_path: request_path.into(),
+        prompt,
+    }
+}
+
+pub(crate) fn glm_usage_context(
+    account: &target::glm::accounts::GlmAccount,
+    model: Option<String>,
+    request_path: impl Into<String>,
+    prompt: PromptMetrics,
+) -> UsageContext {
+    UsageContext {
+        provider: Provider::Glm,
+        provider_name: "glm",
+        key: glm_stats_key(account),
         label: account.label.clone(),
         account_id: account.account_id.clone(),
         credential_file: account.file_name.clone(),
@@ -10273,6 +10598,22 @@ pub(crate) fn record_claude_success(
     record_usage_success(state, context, metrics);
 }
 
+pub(crate) fn record_glm_request(state: &AppState, context: &UsageContext) {
+    record_request_started(state, context);
+}
+
+pub(crate) fn record_glm_error(
+    state: &AppState,
+    context: &UsageContext,
+    message: impl Into<String>,
+) {
+    record_request_error(state, context, message);
+}
+
+pub(crate) fn record_glm_success(state: &AppState, context: &UsageContext, metrics: &UsageMetrics) {
+    record_usage_success(state, context, metrics);
+}
+
 fn is_hop_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -10488,6 +10829,38 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             "GitHub Copilot Claude Opus 4.6 1M",
             "GitHub Copilot Claude model routed through the configured Copilot account.",
             1_000_000,
+            true,
+            true,
+        ));
+    }
+    if state
+        .glm_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|account| account.enabled)
+    {
+        models.push(codex_provider_model(
+            "glm:glm-5.2",
+            "GLM 5.2",
+            "GLM Coding Plan model routed through the configured Z.AI account.",
+            256_000,
+            true,
+            true,
+        ));
+        models.push(codex_provider_model(
+            "glm:glm-5.1",
+            "GLM 5.1",
+            "GLM Coding Plan model routed through the configured Z.AI account.",
+            256_000,
+            true,
+            true,
+        ));
+        models.push(codex_provider_model(
+            "glm:glm-4.6",
+            "GLM 4.6",
+            "GLM Coding Plan model routed through the configured Z.AI account.",
+            128_000,
             true,
             true,
         ));

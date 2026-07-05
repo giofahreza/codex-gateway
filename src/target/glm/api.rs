@@ -1,0 +1,2139 @@
+use crate::source::v1::multimodal::openai_chat_content;
+use axum::{
+    body::Body,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+};
+use bytes::Bytes;
+use futures_util::StreamExt;
+use serde_json::{json, Value};
+use std::time::Duration;
+use uuid::Uuid;
+
+use super::DEFAULT_OPENAI_BASE_URL;
+
+const MODEL_FALLBACKS: &[&str] = &[
+    "glm-5.2",
+    "glm-5.1",
+    "glm-4.7",
+    "glm-4.6",
+    "glm-4.5",
+    "glm-4.5-air",
+];
+
+pub fn normalize_base_url(base_url: Option<&str>) -> String {
+    base_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_OPENAI_BASE_URL)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+pub(super) fn chat_completions_url(base_url: &str) -> String {
+    let base = normalize_base_url(Some(base_url));
+    if base.ends_with("/chat/completions") {
+        return base;
+    }
+    format!("{}/chat/completions", base)
+}
+
+fn models_url(base_url: &str) -> String {
+    let base = normalize_base_url(Some(base_url));
+    if base.ends_with("/models") {
+        return base;
+    }
+    if let Some(stripped) = base.strip_suffix("/chat/completions") {
+        return format!("{}/models", stripped.trim_end_matches('/'));
+    }
+    format!("{}/models", base)
+}
+
+pub async fn validate_api_key(
+    client: &reqwest::Client,
+    api_key: &str,
+    base_url: &str,
+) -> Result<(), String> {
+    let resp = client
+        .get(models_url(base_url))
+        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .header("Accept", "application/json")
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("GLM models request failed: {}", e))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("GLM models body read failed: {}", e))?;
+    if !status.is_success() {
+        return Err(format!("GLM models returned {}: {}", status, text));
+    }
+    Ok(())
+}
+
+pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [("Content-Type", "application/json")],
+            crate::source::v1::response::openai_error_body(
+                "Invalid proxy API key",
+                "authentication_error",
+                Some("invalid_api_key"),
+            ),
+        )
+            .into_response();
+    }
+
+    let account = match super::accounts::first_enabled(&state) {
+        Some(account) => account,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [("Content-Type", "application/json")],
+                crate::source::v1::response::openai_error_body(
+                    "No GLM accounts configured",
+                    "server_error",
+                    None,
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    let api_key = account.api_key.clone();
+    let base_url = normalize_base_url(account.base_url.as_deref());
+    match fetch_models_json(&state.client, &api_key, &base_url).await {
+        Ok(value) => match models_to_openai_json(&value) {
+            Ok(body) => {
+                (StatusCode::OK, [("Content-Type", "application/json")], body).into_response()
+            }
+            Err(err) => (
+                StatusCode::BAD_GATEWAY,
+                [("Content-Type", "application/json")],
+                crate::source::v1::response::openai_error_body(&err, "server_error", None),
+            )
+                .into_response(),
+        },
+        Err(err) => {
+            let data = MODEL_FALLBACKS
+                .iter()
+                .map(|id| {
+                    json!({
+                        "id": id,
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "glm"
+                    })
+                })
+                .collect::<Vec<_>>();
+            let body = serde_json::to_vec(&json!({
+                "object": "list",
+                "data": data,
+                "models": data,
+                "warning": err
+            }))
+            .unwrap_or_default();
+            (StatusCode::OK, [("Content-Type", "application/json")], body).into_response()
+        }
+    }
+}
+
+pub async fn responses(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [("Content-Type", "application/json")],
+            crate::source::v1::response::openai_error_body(
+                "Invalid proxy API key",
+                "authentication_error",
+                Some("invalid_api_key"),
+            ),
+        )
+            .into_response();
+    }
+
+    let raw: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("Content-Type", "application/json")],
+                crate::source::v1::response::openai_error_body(
+                    "Invalid request body",
+                    "invalid_request_error",
+                    None,
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    let model = match raw.get("model").and_then(|v| v.as_str()) {
+        Some(model) if !model.trim().is_empty() => model.to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("Content-Type", "application/json")],
+                crate::source::v1::response::openai_error_body(
+                    "model is required",
+                    "invalid_request_error",
+                    None,
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    let wants_stream = crate::source::wants_stream(&headers, &body);
+
+    let chat_payload = match build_chat_completions_payload(&raw, &model) {
+        Ok(payload) => payload,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("Content-Type", "application/json")],
+                crate::source::v1::response::openai_error_body(&err, "invalid_request_error", None),
+            )
+                .into_response();
+        }
+    };
+
+    let accounts = super::accounts::candidate_accounts(&state);
+    if accounts.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Content-Type", "application/json")],
+            crate::source::v1::response::openai_error_body(
+                "No GLM accounts configured",
+                "server_error",
+                None,
+            ),
+        )
+            .into_response();
+    }
+
+    let prompt_metrics = crate::prompt_metrics_from_request_value(&raw);
+    let mut last_error: Option<(StatusCode, String)> = None;
+
+    for (attempt_idx, account) in accounts.iter().enumerate() {
+        let context = crate::glm_usage_context(
+            account,
+            Some(model.clone()),
+            "/glm/v1/chat/completions",
+            prompt_metrics.clone(),
+        );
+        crate::record_glm_request(&state, &context);
+
+        let base_url = normalize_base_url(account.base_url.as_deref());
+
+        if wants_stream {
+            match stream_chat_completions(
+                &state,
+                &account.api_key,
+                &base_url,
+                &chat_payload,
+                &context,
+                &model,
+                &headers,
+            )
+            .await
+            {
+                Ok(response) => return response,
+                Err((status, message)) => {
+                    crate::record_glm_error(&state, &context, &message);
+                    if attempt_idx + 1 < accounts.len()
+                        && crate::should_retry_account_error(status, &message)
+                    {
+                        last_error = Some((status, message));
+                        continue;
+                    }
+                    return (
+                        status,
+                        [("Content-Type", "application/json")],
+                        crate::source::v1::response::openai_error_body(
+                            &message,
+                            if status.is_client_error() {
+                                "invalid_request_error"
+                            } else {
+                                "server_error"
+                            },
+                            None,
+                        ),
+                    )
+                        .into_response();
+                }
+            }
+        }
+
+        let resp = match state
+            .client
+            .post(chat_completions_url(&base_url))
+            .header(
+                "Authorization",
+                format!("Bearer {}", account.api_key.trim()),
+            )
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .body(chat_payload.to_string())
+            .timeout(Duration::from_secs(180))
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                let message = format!("GLM request failed: {}", err);
+                crate::record_glm_error(&state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        let status = resp.status();
+        let text = match resp.text().await {
+            Ok(text) => text,
+            Err(err) => {
+                let message = format!("GLM body read failed: {}", err);
+                crate::record_glm_error(&state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        if !status.is_success() {
+            let message = format!("GLM returned {}: {}", status, text);
+            crate::record_glm_error(&state, &context, &message);
+            if attempt_idx + 1 < accounts.len()
+                && crate::should_retry_account_error(status, &message)
+            {
+                last_error = Some((status, message));
+                continue;
+            }
+            return (
+                status,
+                [("Content-Type", "application/json")],
+                crate::source::v1::response::openai_error_body(
+                    &message,
+                    if status.is_client_error() {
+                        "invalid_request_error"
+                    } else {
+                        "server_error"
+                    },
+                    None,
+                ),
+            )
+                .into_response();
+        }
+
+        let chat_response: Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(err) => {
+                let message = format!("invalid GLM response: {}", err);
+                crate::record_glm_error(&state, &context, &message);
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    [("Content-Type", "application/json")],
+                    crate::source::v1::response::openai_error_body(&message, "server_error", None),
+                )
+                    .into_response();
+            }
+        };
+
+        let response = chat_completion_to_responses(&chat_response, &model);
+        let usage = crate::usage_metrics_from_response_value(&response);
+        crate::record_glm_success(&state, &context, &usage);
+
+        let body = serde_json::to_vec(&response).unwrap_or_default();
+        return (StatusCode::OK, [("Content-Type", "application/json")], body).into_response();
+    }
+
+    let (status, message) = last_error.unwrap_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "All GLM accounts failed".to_string(),
+        )
+    });
+    (
+        status,
+        [("Content-Type", "application/json")],
+        crate::source::v1::response::openai_error_body(
+            &format!("All GLM accounts failed; last error: {}", message),
+            "server_error",
+            None,
+        ),
+    )
+        .into_response()
+}
+
+pub async fn chat_completions(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [("Content-Type", "application/json")],
+            crate::source::v1::response::openai_error_body(
+                "Invalid proxy API key",
+                "authentication_error",
+                Some("invalid_api_key"),
+            ),
+        )
+            .into_response();
+    }
+
+    let raw: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("Content-Type", "application/json")],
+                crate::source::v1::response::openai_error_body(
+                    "Invalid request body",
+                    "invalid_request_error",
+                    None,
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    let model = match raw.get("model").and_then(|v| v.as_str()) {
+        Some(model) if !model.trim().is_empty() => model.to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("Content-Type", "application/json")],
+                crate::source::v1::response::openai_error_body(
+                    "model is required",
+                    "invalid_request_error",
+                    None,
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    let accounts = super::accounts::candidate_accounts(&state);
+    if accounts.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Content-Type", "application/json")],
+            crate::source::v1::response::openai_error_body(
+                "No GLM accounts configured",
+                "server_error",
+                None,
+            ),
+        )
+            .into_response();
+    }
+
+    let wants_stream = crate::source::wants_stream(&headers, &body);
+    let prompt_metrics = crate::prompt_metrics_from_request_value(&raw);
+    let mut last_error: Option<(StatusCode, String)> = None;
+
+    for (attempt_idx, account) in accounts.iter().enumerate() {
+        let context = crate::glm_usage_context(
+            account,
+            Some(model.clone()),
+            "/glm/v1/chat/completions",
+            prompt_metrics.clone(),
+        );
+        crate::record_glm_request(&state, &context);
+
+        let base_url = normalize_base_url(account.base_url.as_deref());
+        let mut request = state
+            .client
+            .post(chat_completions_url(&base_url))
+            .header(
+                "Authorization",
+                format!("Bearer {}", account.api_key.trim()),
+            )
+            .header("Content-Type", "application/json")
+            .header(
+                "Accept",
+                if wants_stream {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                },
+            )
+            .body(body.clone())
+            .timeout(Duration::from_secs(180));
+
+        if !headers.contains_key("user-agent") {
+            request = request.header("User-Agent", "codex-gateway/1.0");
+        }
+
+        let resp = match request.send().await {
+            Ok(resp) => resp,
+            Err(err) => {
+                let message = format!("GLM chat completions request failed: {}", err);
+                crate::record_glm_error(&state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        let status = resp.status();
+        if wants_stream && status.is_success() {
+            return stream_chat_completions_passthrough(&state, &context, resp, model.clone())
+                .await;
+        }
+
+        let text = match resp.text().await {
+            Ok(text) => text,
+            Err(err) => {
+                let message = format!("GLM chat completions body read failed: {}", err);
+                crate::record_glm_error(&state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        if !status.is_success() {
+            let message = format!("GLM chat completions returned {}: {}", status, text);
+            crate::record_glm_error(&state, &context, &message);
+            if attempt_idx + 1 < accounts.len()
+                && crate::should_retry_account_error(status, &message)
+            {
+                last_error = Some((status, message));
+                continue;
+            }
+            return (status, [("Content-Type", "application/json")], text).into_response();
+        }
+
+        let usage = serde_json::from_str::<Value>(&text)
+            .map(|value| crate::usage_metrics_from_response_value(&value))
+            .unwrap_or_default();
+        crate::record_glm_success(&state, &context, &usage);
+        return (
+            StatusCode::OK,
+            [("Content-Type", "application/json")],
+            Bytes::from(text),
+        )
+            .into_response();
+    }
+
+    let (status, message) = last_error.unwrap_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "All GLM accounts failed".to_string(),
+        )
+    });
+    (
+        status,
+        [("Content-Type", "application/json")],
+        crate::source::v1::response::openai_error_body(
+            &format!("All GLM accounts failed; last error: {}", message),
+            "server_error",
+            None,
+        ),
+    )
+        .into_response()
+}
+
+pub(super) async fn stream_chat_completions(
+    state: &crate::AppState,
+    api_key: &str,
+    base_url: &str,
+    payload: &Value,
+    context: &crate::UsageContext,
+    model: &str,
+    _headers: &HeaderMap,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let mut payload = payload.clone();
+    payload["stream"] = json!(true);
+    if payload.get("stream_options").is_none() {
+        payload["stream_options"] = json!({ "include_usage": true });
+    }
+
+    let resp = match state
+        .client
+        .post(chat_completions_url(base_url))
+        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
+        .body(payload.to_string())
+        .timeout(Duration::from_secs(180))
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(err) => {
+            let message = format!("GLM stream request failed: {}", err);
+            return Err((StatusCode::BAD_GATEWAY, message));
+        }
+    };
+
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err((status, format!("GLM stream returned {}: {}", status, text)));
+    }
+
+    let usage_state = state.clone();
+    let usage_context = context.clone();
+    let model = model.to_string();
+    let stream = async_stream::stream! {
+        let mut upstream = resp.bytes_stream();
+        let mut parser = GLMSseParser::default();
+        let mut accumulator = GLMStreamAccumulator::new(model.clone());
+        yield Ok::<Bytes, std::io::Error>(response_sse_event(&json!({
+            "type": "response.created",
+            "response": accumulator.in_progress_response()
+        })));
+
+        while let Some(chunk) = upstream.next().await {
+            let bytes = match chunk {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    let message = format!("GLM stream body read failed: {}", err);
+                    crate::record_glm_error(&usage_state, &usage_context, &message);
+                    yield Ok(response_sse_event(&json!({
+                        "type": "response.failed",
+                        "error": {
+                            "message": message,
+                            "type": "server_error"
+                        }
+                    })));
+                    yield Ok(done_sse_event());
+                    return;
+                }
+            };
+
+            for event in parser.push(&bytes) {
+                accumulator.absorb_sse_data(&event);
+            }
+        }
+
+        for event in parser.finish() {
+            accumulator.absorb_sse_data(&event);
+        }
+
+        let response = accumulator.to_response();
+        let metrics = crate::usage_metrics_from_response_value(&response);
+        crate::record_glm_success(&usage_state, &usage_context, &metrics);
+        for event in response_output_events(&response) {
+            yield Ok(event);
+        }
+        yield Ok(response_sse_event(&json!({
+            "type": "response.completed",
+            "response": response
+        })));
+        yield Ok(done_sse_event());
+    };
+
+    Ok((
+        StatusCode::OK,
+        [
+            ("Content-Type", "text/event-stream"),
+            ("Cache-Control", "no-store"),
+        ],
+        Body::from_stream(stream),
+    )
+        .into_response())
+}
+
+async fn stream_chat_completions_passthrough(
+    state: &crate::AppState,
+    context: &crate::UsageContext,
+    resp: reqwest::Response,
+    model: String,
+) -> axum::response::Response {
+    let usage_state = state.clone();
+    let usage_context = context.clone();
+    let stream = async_stream::stream! {
+        let mut upstream = resp.bytes_stream();
+        let mut parser = GLMSseParser::default();
+        let mut accumulator = GLMStreamAccumulator::new(model);
+        while let Some(chunk) = upstream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    for event in parser.push(&bytes) {
+                        accumulator.absorb_sse_data(&event);
+                    }
+                    yield Ok::<Bytes, std::io::Error>(bytes);
+                }
+                Err(err) => {
+                    let message = format!("GLM chat completions stream read failed: {}", err);
+                    crate::record_glm_error(&usage_state, &usage_context, &message);
+                    yield Err(std::io::Error::new(std::io::ErrorKind::Other, "stream"));
+                    return;
+                }
+            }
+        }
+        for event in parser.finish() {
+            accumulator.absorb_sse_data(&event);
+        }
+        let response = accumulator.to_response();
+        let metrics = crate::usage_metrics_from_response_value(&response);
+        crate::record_glm_success(&usage_state, &usage_context, &metrics);
+    };
+
+    (
+        StatusCode::OK,
+        [
+            ("Content-Type", "text/event-stream"),
+            ("Cache-Control", "no-store"),
+        ],
+        Body::from_stream(stream),
+    )
+        .into_response()
+}
+
+async fn fetch_models_json(
+    client: &reqwest::Client,
+    api_key: &str,
+    base_url: &str,
+) -> Result<Value, String> {
+    let resp = client
+        .get(models_url(base_url))
+        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .header("Accept", "application/json")
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("GLM models request failed: {}", e))?;
+
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("GLM models body read failed: {}", e))?;
+    if !status.is_success() {
+        return Err(format!("GLM models returned {}: {}", status, text));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("invalid GLM models JSON: {}", e))
+}
+
+fn models_to_openai_json(value: &Value) -> Result<Vec<u8>, String> {
+    let models = value
+        .get("data")
+        .and_then(|v| v.as_array())
+        .or_else(|| value.as_array())
+        .ok_or_else(|| "GLM models response was missing data".to_string())?;
+
+    let data = models
+        .iter()
+        .filter_map(|model| {
+            let id = model
+                .get("id")
+                .and_then(|v| v.as_str())
+                .or_else(|| model.get("model").and_then(|v| v.as_str()))?;
+            Some(json!({
+                "id": id,
+                "object": "model",
+                "created": 0,
+                "owned_by": model.get("owned_by").and_then(|v| v.as_str()).unwrap_or("glm")
+            }))
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::to_vec(&json!({
+        "object": "list",
+        "data": data,
+        "models": data
+    }))
+    .map_err(|e| e.to_string())
+}
+
+pub(super) fn build_chat_completions_payload(raw: &Value, model: &str) -> Result<Value, String> {
+    let mut out = json!({
+        "model": model,
+        "stream": false,
+    });
+
+    if let Some(messages) = build_chat_messages(raw)? {
+        out["messages"] = messages;
+    } else {
+        return Err("request did not contain any messages or input".to_string());
+    }
+
+    if let Some(max_tokens) = raw
+        .get("max_output_tokens")
+        .or_else(|| raw.get("max_tokens"))
+        .and_then(|v| v.as_u64())
+    {
+        out["max_tokens"] = json!(max_tokens);
+    }
+    if let Some(temperature) = raw.get("temperature").and_then(|v| v.as_f64()) {
+        out["temperature"] = json!(temperature);
+    }
+    if let Some(top_p) = raw.get("top_p").and_then(|v| v.as_f64()) {
+        out["top_p"] = json!(top_p);
+    }
+    if let Some(tools) = build_chat_tools(raw) {
+        out["tools"] = tools;
+    }
+    if let Some(tool_choice) = build_chat_tool_choice(raw) {
+        out["tool_choice"] = tool_choice;
+    }
+    if let Some(stop) = raw.get("stop").cloned() {
+        out["stop"] = stop;
+    }
+    if let Some(stream) = raw.get("stream").cloned() {
+        out["stream"] = stream;
+    }
+    if let Some(thinking) = build_chat_thinking(raw) {
+        out["thinking"] = thinking;
+    }
+    Ok(out)
+}
+
+/// Map the Codex SDK's `reasoning: {effort: ...}` field to GLM's
+/// `thinking: {type: ...}` field for the chat-completions endpoint.
+///
+/// * `effort: "none"` — explicit no-thinking → `thinking: {type: "disabled"}`.
+/// * Any other value — thinking enabled → `thinking: {type: "enabled"}`.
+/// * `reasoning_effort: "low|medium|high|minimal"` (top-level alias) — same
+///   translation as above.
+fn build_chat_thinking(raw: &Value) -> Option<Value> {
+    if let Some(reasoning) = raw.get("reasoning") {
+        if let Some(obj) = reasoning.as_object() {
+            let effort = obj.get("effort").and_then(|v| v.as_str()).unwrap_or("none");
+            return Some(match effort {
+                "none" => json!({ "type": "disabled" }),
+                _ => json!({ "type": "enabled" }),
+            });
+        }
+    }
+
+    if let Some(effort) = raw.get("reasoning_effort").and_then(|v| v.as_str()) {
+        return Some(match effort {
+            "none" => json!({ "type": "disabled" }),
+            _ => json!({ "type": "enabled" }),
+        });
+    }
+
+    None
+}
+
+fn build_chat_messages(raw: &Value) -> Result<Option<Value>, String> {
+    if let Some(messages) = raw.get("messages").and_then(|v| v.as_array()) {
+        let mut out = Vec::new();
+        for message in messages {
+            let role = message
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("user")
+                .trim()
+                .to_ascii_lowercase();
+            let role = match role.as_str() {
+                "system" | "developer" => "system",
+                "assistant" => "assistant",
+                "user" => "user",
+                "tool" => "tool",
+                other => other,
+            };
+            let content = openai_chat_content(message.get("content"));
+            let mut entry = json!({
+                "role": role,
+                "content": content.unwrap_or(Value::String(String::new()))
+            });
+            if let Some(name) = message.get("name").and_then(|v| v.as_str()) {
+                entry["name"] = json!(name);
+            }
+            if let Some(tool_call_id) = message.get("tool_call_id").and_then(|v| v.as_str()) {
+                entry["tool_call_id"] = json!(tool_call_id);
+            }
+            if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+                entry["tool_calls"] = Value::Array(tool_calls.clone());
+            }
+            out.push(entry);
+        }
+        return Ok(Some(Value::Array(sanitize_chat_messages(out))));
+    }
+
+    if let Some(prompt) = raw.get("prompt") {
+        if let Some(text) = prompt.as_str() {
+            return Ok(Some(json!([
+                { "role": "user", "content": text }
+            ])));
+        }
+    }
+
+    if let Some(input) = raw.get("input") {
+        if let Some(text) = input.as_str() {
+            let mut out = Vec::new();
+            if let Some(instructions) = raw
+                .get("instructions")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                out.push(json!({ "role": "system", "content": instructions }));
+            }
+            out.push(json!({ "role": "user", "content": text }));
+            return Ok(Some(Value::Array(out)));
+        }
+
+        if let Some(items) = input.as_array() {
+            let mut out = Vec::new();
+            if let Some(instructions) = raw
+                .get("instructions")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                out.push(json!({ "role": "system", "content": instructions }));
+            }
+            for item in items {
+                if let Some(entry) = input_item_to_chat_message(item)? {
+                    out.push(entry);
+                }
+            }
+            if out.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(Value::Array(sanitize_chat_messages(out))));
+        }
+    }
+
+    Ok(None)
+}
+
+fn sanitize_chat_messages(messages: Vec<Value>) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut index = 0;
+
+    while index < messages.len() {
+        let message = &messages[index];
+        let role = chat_message_role(message);
+        if role == Some("tool") {
+            index += 1;
+            continue;
+        }
+
+        let has_tool_calls = message
+            .get("tool_calls")
+            .and_then(|v| v.as_array())
+            .map(|calls| !calls.is_empty())
+            .unwrap_or(false);
+        if role == Some("assistant") && has_tool_calls {
+            let mut pending_ids = chat_message_tool_call_ids(message);
+            if pending_ids.is_empty() {
+                index += 1;
+                continue;
+            }
+
+            let mut tool_messages = Vec::new();
+            let mut next = index + 1;
+            while next < messages.len() && chat_message_role(&messages[next]) == Some("tool") {
+                if let Some(tool_call_id) = chat_message_tool_call_id(&messages[next]) {
+                    if let Some(pos) = pending_ids.iter().position(|id| id == tool_call_id) {
+                        pending_ids.remove(pos);
+                        tool_messages.push(messages[next].clone());
+                    }
+                }
+                next += 1;
+            }
+
+            if !tool_messages.is_empty() {
+                out.push(message.clone());
+                out.extend(tool_messages);
+            }
+            index = next;
+            continue;
+        }
+
+        out.push(message.clone());
+        index += 1;
+    }
+
+    out
+}
+
+fn chat_message_role(message: &Value) -> Option<&str> {
+    message.get("role").and_then(|v| v.as_str())
+}
+
+fn chat_message_tool_call_ids(message: &Value) -> Vec<String> {
+    message
+        .get("tool_calls")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|call| call.get("id").and_then(|v| v.as_str()))
+        .filter(|id| !id.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn chat_message_tool_call_id(message: &Value) -> Option<&str> {
+    message
+        .get("tool_call_id")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.is_empty())
+}
+
+fn input_item_to_chat_message(item: &Value) -> Result<Option<Value>, String> {
+    let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let role = item
+        .get("role")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+
+    match item_type {
+        "message" | "" => {
+            let role = match role.as_str() {
+                "system" | "developer" => "system",
+                "assistant" => "assistant",
+                "user" | "" => "user",
+                "tool" => "tool",
+                other => other,
+            };
+            let content = openai_chat_content(item.get("content"));
+            let mut entry =
+                json!({ "role": role, "content": content.unwrap_or(Value::String(String::new())) });
+            if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                entry["name"] = json!(name);
+            }
+            if let Some(tool_call_id) = item.get("tool_call_id").and_then(|v| v.as_str()) {
+                entry["tool_call_id"] = json!(tool_call_id);
+            }
+            if let Some(tool_calls) = item.get("tool_calls").and_then(|v| v.as_array()) {
+                entry["tool_calls"] = Value::Array(tool_calls.clone());
+            }
+            Ok(Some(entry))
+        }
+        "function_call" => {
+            let call_id = item
+                .get("call_id")
+                .or_else(|| item.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let arguments = item
+                .get("arguments")
+                .and_then(|v| v.as_str())
+                .unwrap_or("{}");
+            if name.is_empty() {
+                return Ok(None);
+            }
+            let tool_call = json!({
+                "id": call_id,
+                "type": "function",
+                "function": { "name": name, "arguments": arguments }
+            });
+            let assistant_text = item.get("arguments").and_then(|v| v.as_str()).unwrap_or("");
+            let content = if assistant_text.is_empty() {
+                Value::String(String::new())
+            } else {
+                Value::String(assistant_text.to_string())
+            };
+            Ok(Some(json!({
+                "role": "assistant",
+                "content": content,
+                "tool_calls": [tool_call]
+            })))
+        }
+        "function_call_output" => {
+            let call_id = item
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let output = item
+                .get("output")
+                .cloned()
+                .unwrap_or(Value::String(String::new()));
+            let output_text = match output {
+                Value::String(s) => s,
+                other => serde_json::to_string(&other).unwrap_or_default(),
+            };
+            Ok(Some(json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": output_text
+            })))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn build_chat_tools(raw: &Value) -> Option<Value> {
+    let tools = raw.get("tools")?.as_array()?;
+    let mut out = Vec::new();
+    for tool in tools {
+        if let Some(function) = tool.get("function") {
+            if unsupported_tool_name(function.get("name").and_then(|v| v.as_str())) {
+                continue;
+            }
+            let mut mapped = json!({
+                "type": "function",
+                "function": {
+                    "name": function.get("name").cloned().unwrap_or(Value::String(String::new())),
+                    "description": function.get("description").cloned().unwrap_or(Value::String(String::new())),
+                    "parameters": function.get("parameters").cloned().unwrap_or(json!({ "type": "object" }))
+                }
+            });
+            if let Some(strict) = function.get("strict").and_then(|v| v.as_bool()) {
+                mapped["function"]["strict"] = json!(strict);
+            }
+            out.push(mapped);
+        } else if let Some(name) = tool.get("name").and_then(|v| v.as_str()) {
+            if unsupported_tool_name(Some(name)) {
+                continue;
+            }
+            out.push(json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": tool.get("description").cloned().unwrap_or(Value::String(String::new())),
+                    "parameters": tool.get("parameters").cloned().unwrap_or(json!({ "type": "object" }))
+                }
+            }));
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(Value::Array(out))
+    }
+}
+
+fn unsupported_tool_name(name: Option<&str>) -> bool {
+    matches!(name, Some("apply_patch"))
+}
+
+fn build_chat_tool_choice(raw: &Value) -> Option<Value> {
+    let choice = raw.get("tool_choice")?;
+    if let Some(value) = choice.as_str() {
+        return match value {
+            "auto" | "none" | "required" => Some(json!(value)),
+            other => Some(json!(other)),
+        };
+    }
+    if choice
+        .get("function")
+        .and_then(|function| function.get("name"))
+        .and_then(|name| name.as_str())
+        .map(|name| unsupported_tool_name(Some(name)))
+        .unwrap_or(false)
+        || choice
+            .get("name")
+            .and_then(|name| name.as_str())
+            .map(|name| unsupported_tool_name(Some(name)))
+            .unwrap_or(false)
+    {
+        return None;
+    }
+    Some(choice.clone())
+}
+
+#[derive(Default)]
+struct GLMSseParser {
+    buffer: Vec<u8>,
+}
+
+impl GLMSseParser {
+    fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.buffer.extend_from_slice(chunk);
+        let mut events = Vec::new();
+        while let Some((event_end, delimiter_len)) = find_glm_sse_boundary(&self.buffer) {
+            let raw = self
+                .buffer
+                .drain(..event_end + delimiter_len)
+                .collect::<Vec<_>>();
+            if let Some(data) = parse_glm_sse_data(&raw[..event_end]) {
+                events.push(data);
+            }
+        }
+        events
+    }
+
+    fn finish(&mut self) -> Vec<String> {
+        if self.buffer.is_empty() {
+            return Vec::new();
+        }
+        let raw = std::mem::take(&mut self.buffer);
+        parse_glm_sse_data(&raw).into_iter().collect()
+    }
+}
+
+fn find_glm_sse_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
+    buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|idx| (idx, 4))
+        .or_else(|| {
+            buffer
+                .windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|idx| (idx, 2))
+        })
+}
+
+fn parse_glm_sse_data(raw_event: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(raw_event);
+    let mut data_lines = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        if let Some(value) = line.strip_prefix("data:") {
+            data_lines.push(value.trim_start().to_string());
+        }
+    }
+    if data_lines.is_empty() {
+        None
+    } else {
+        Some(data_lines.join("\n"))
+    }
+}
+
+#[derive(Clone, Default)]
+struct StreamToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+struct GLMStreamAccumulator {
+    id: String,
+    model: String,
+    created: u64,
+    content: String,
+    reasoning_content: String,
+    tool_calls: Vec<StreamToolCall>,
+    usage: Option<Value>,
+}
+
+impl GLMStreamAccumulator {
+    fn new(model: String) -> Self {
+        Self {
+            id: format!("chatcmpl-{}", Uuid::new_v4().simple()),
+            model,
+            created: chrono::Utc::now().timestamp() as u64,
+            content: String::new(),
+            reasoning_content: String::new(),
+            tool_calls: Vec::new(),
+            usage: None,
+        }
+    }
+
+    fn in_progress_response(&self) -> Value {
+        json!({
+            "id": self.response_id(),
+            "object": "response",
+            "created": self.created,
+            "model": self.model,
+            "status": "in_progress",
+            "output": [],
+            "output_text": ""
+        })
+    }
+
+    fn absorb_sse_data(&mut self, data: &str) {
+        if data.trim() == "[DONE]" {
+            return;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            return;
+        };
+        self.absorb_chat_value(&value);
+    }
+
+    fn absorb_chat_value(&mut self, value: &Value) {
+        if let Some(id) = value.get("id").and_then(|v| v.as_str()) {
+            self.id = id.to_string();
+        }
+        if let Some(created) = value.get("created").and_then(|v| v.as_u64()) {
+            self.created = created;
+        }
+        if let Some(usage) = value.get("usage").filter(|usage| !usage.is_null()) {
+            self.usage = Some(usage.clone());
+        }
+
+        let Some(choices) = value.get("choices").and_then(|v| v.as_array()) else {
+            return;
+        };
+        for choice in choices {
+            if let Some(delta) = choice.get("delta") {
+                self.absorb_delta(delta);
+            }
+            if let Some(message) = choice.get("message") {
+                self.absorb_delta(message);
+            }
+        }
+    }
+
+    fn absorb_delta(&mut self, delta: &Value) {
+        if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
+            self.content.push_str(text);
+        }
+        if let Some(text) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+            self.reasoning_content.push_str(text);
+        }
+        if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+            for tool_call in tool_calls {
+                self.absorb_tool_call(tool_call);
+            }
+        }
+    }
+
+    fn absorb_tool_call(&mut self, value: &Value) {
+        let index = value
+            .get("index")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(self.tool_calls.len() as u64) as usize;
+        while self.tool_calls.len() <= index {
+            self.tool_calls.push(StreamToolCall::default());
+        }
+        let tool_call = &mut self.tool_calls[index];
+        if let Some(id) = value.get("id").and_then(|v| v.as_str()) {
+            tool_call.id = id.to_string();
+        }
+        if let Some(function) = value.get("function") {
+            if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
+                tool_call.name.push_str(name);
+            }
+            if let Some(arguments) = function.get("arguments").and_then(|v| v.as_str()) {
+                tool_call.arguments.push_str(arguments);
+            }
+        }
+    }
+
+    fn to_response(&self) -> Value {
+        let mut message = json!({
+            "role": "assistant",
+            "content": self.content.clone()
+        });
+        if !self.reasoning_content.trim().is_empty() {
+            message["reasoning_content"] = json!(self.reasoning_content.clone());
+        }
+        let tool_calls = self
+            .tool_calls
+            .iter()
+            .filter(|tool_call| !tool_call.name.is_empty())
+            .map(|tool_call| {
+                let id = if tool_call.id.is_empty() {
+                    format!("call_{}", Uuid::new_v4().simple())
+                } else {
+                    tool_call.id.clone()
+                };
+                let arguments = if tool_call.arguments.is_empty() {
+                    "{}".to_string()
+                } else {
+                    tool_call.arguments.clone()
+                };
+                json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.name.clone(),
+                        "arguments": arguments
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        if !tool_calls.is_empty() {
+            message["tool_calls"] = Value::Array(tool_calls);
+        }
+
+        let chat = json!({
+            "id": self.id.clone(),
+            "created": self.created,
+            "model": self.model.clone(),
+            "choices": [{ "message": message }],
+            "usage": self.usage.clone().unwrap_or_else(|| json!({}))
+        });
+        let mut response = chat_completion_to_responses(&chat, &self.model);
+        if let Some(response_obj) = response.as_object_mut() {
+            response_obj.insert("id".to_string(), Value::String(self.response_id()));
+        }
+        response
+    }
+
+    fn response_id(&self) -> String {
+        if self.id.starts_with("resp_") {
+            self.id.clone()
+        } else {
+            format!("resp_{}", self.id)
+        }
+    }
+}
+
+fn response_sse_event(value: &Value) -> Bytes {
+    let data = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
+    let event = value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("message");
+    Bytes::from(format!("event: {}\ndata: {}\n\n", event, data))
+}
+
+fn done_sse_event() -> Bytes {
+    Bytes::from_static(b"data: [DONE]\n\n")
+}
+
+fn response_output_events(response: &Value) -> Vec<Bytes> {
+    let mut output_items = response
+        .get("output")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if output_items.is_empty() {
+        if let Some(text) = response
+            .get("output_text")
+            .and_then(|v| v.as_str())
+            .filter(|text| !text.is_empty())
+        {
+            output_items.push(json!({
+                "type": "message",
+                "id": format!("msg_{}", Uuid::new_v4().simple()),
+                "status": "completed",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": text,
+                    "annotations": []
+                }]
+            }));
+        }
+    }
+
+    let mut events = Vec::new();
+    for (output_index, item) in output_items.iter().enumerate() {
+        events.extend(response_output_item_events(output_index, item));
+    }
+    events
+}
+
+fn response_output_item_events(output_index: usize, item: &Value) -> Vec<Bytes> {
+    let mut events = vec![response_sse_event(&json!({
+        "type": "response.output_item.added",
+        "output_index": output_index,
+        "item": response_item_with_status(item, "in_progress")
+    }))];
+
+    match item.get("type").and_then(|v| v.as_str()) {
+        Some("message") => {
+            if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
+                for (content_index, part) in content.iter().enumerate() {
+                    if part.get("type").and_then(|v| v.as_str()) != Some("output_text") {
+                        continue;
+                    }
+                    let text = part.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    let item_id = response_item_id(item);
+                    let added_part = json!({
+                        "type": "output_text",
+                        "text": "",
+                        "annotations": part
+                            .get("annotations")
+                            .cloned()
+                            .unwrap_or_else(|| json!([]))
+                    });
+                    events.push(response_sse_event(&json!({
+                        "type": "response.content_part.added",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "part": added_part
+                    })));
+                    for delta in text.split_inclusive('\n').filter(|delta| !delta.is_empty()) {
+                        events.push(response_sse_event(&json!({
+                            "type": "response.output_text.delta",
+                            "item_id": item_id,
+                            "output_index": output_index,
+                            "content_index": content_index,
+                            "delta": delta
+                        })));
+                    }
+                    events.push(response_sse_event(&json!({
+                        "type": "response.output_text.done",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "text": text
+                    })));
+                    events.push(response_sse_event(&json!({
+                        "type": "response.content_part.done",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "part": part
+                    })));
+                }
+            }
+        }
+        Some("function_call") => {
+            if let Some(arguments) = item
+                .get("arguments")
+                .and_then(|v| v.as_str())
+                .filter(|arguments| !arguments.is_empty())
+            {
+                let item_id = response_item_id(item);
+                events.push(response_sse_event(&json!({
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "delta": arguments
+                })));
+                events.push(response_sse_event(&json!({
+                    "type": "response.function_call_arguments.done",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "arguments": arguments
+                })));
+            }
+        }
+        Some("reasoning") => {}
+        _ => {}
+    }
+
+    events.push(response_sse_event(&json!({
+        "type": "response.output_item.done",
+        "output_index": output_index,
+        "item": item
+    })));
+    events
+}
+
+fn response_item_with_status(item: &Value, status: &str) -> Value {
+    let mut item = item.clone();
+    if let Some(object) = item.as_object_mut() {
+        if object.contains_key("status") {
+            object.insert("status".to_string(), json!(status));
+        }
+    }
+    item
+}
+
+fn response_item_id(item: &Value) -> String {
+    item.get("id")
+        .and_then(|v| v.as_str())
+        .or_else(|| item.get("call_id").and_then(|v| v.as_str()))
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("item_{}", Uuid::new_v4().simple()))
+}
+
+pub(super) fn chat_completion_to_responses(chat: &Value, model: &str) -> Value {
+    let id = chat
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("chatcmpl-{}", Uuid::new_v4().simple()));
+    let created = chat
+        .get("created")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(|| chrono::Utc::now().timestamp() as u64);
+
+    let mut output_text = String::new();
+    let mut output: Vec<Value> = Vec::new();
+    if let Some(choices) = chat.get("choices").and_then(|v| v.as_array()) {
+        for choice in choices {
+            if let Some(message) = choice.get("message") {
+                let mut had_reasoning = false;
+                if let Some(reasoning) = message
+                    .get("reasoning_content")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    push_reasoning_output(&mut output, reasoning);
+                    had_reasoning = true;
+                }
+                let mut had_content = false;
+                if let Some(content) = message.get("content") {
+                    if let Some(text) = content.as_str() {
+                        let (inline_reasoning, visible_text) = split_inline_thinking(text);
+                        if let Some(reasoning) = inline_reasoning {
+                            if !had_reasoning {
+                                push_reasoning_output(&mut output, &reasoning);
+                            }
+                        }
+                        if !visible_text.is_empty() {
+                            output_text.push_str(&visible_text);
+                            had_content = true;
+                        }
+                    } else if let Some(parts) = content.as_array() {
+                        for part in parts {
+                            if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                                let (inline_reasoning, visible_text) = split_inline_thinking(text);
+                                if let Some(reasoning) = inline_reasoning {
+                                    if !had_reasoning {
+                                        push_reasoning_output(&mut output, &reasoning);
+                                        had_reasoning = true;
+                                    }
+                                }
+                                if !visible_text.is_empty() {
+                                    output_text.push_str(&visible_text);
+                                    had_content = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if had_content {
+                    output.push(json!({
+                        "type": "message",
+                        "id": format!("msg_{}", Uuid::new_v4().simple()),
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{
+                            "type": "output_text",
+                            "text": output_text.clone(),
+                            "annotations": []
+                        }]
+                    }));
+                }
+                if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+                    for call in tool_calls {
+                        let call_id = call
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| format!("call_{}", Uuid::new_v4().simple()));
+                        let name = call
+                            .get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("tool")
+                            .to_string();
+                        let arguments = call
+                            .get("function")
+                            .and_then(|f| f.get("arguments"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("{}")
+                            .to_string();
+                        output.push(json!({
+                            "id": call_id,
+                            "type": "function_call",
+                            "call_id": call_id,
+                            "name": name,
+                            "arguments": arguments
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    let usage = chat.get("usage").cloned().unwrap_or(json!({}));
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("completion_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(input_tokens + output_tokens);
+
+    json!({
+        "id": id,
+        "object": "response",
+        "created": created,
+        "model": model,
+        "status": "completed",
+        "output": output,
+        "output_text": output_text,
+        "usage": {
+            "input_tokens": input_tokens,
+            "input_tokens_details": { "cached_tokens": 0 },
+            "output_tokens": output_tokens,
+            "output_tokens_details": { "reasoning_tokens": 0 },
+            "total_tokens": total_tokens,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+        }
+    })
+}
+
+fn push_reasoning_output(output: &mut Vec<Value>, reasoning: &str) {
+    output.push(json!({
+        "id": format!("rs_{}", Uuid::new_v4().simple()),
+        "type": "reasoning",
+        "summary": [{
+            "type": "summary_text",
+            "text": reasoning
+        }],
+        "content": reasoning
+    }));
+}
+
+fn split_inline_thinking(text: &str) -> (Option<String>, String) {
+    let trimmed = text.trim_start();
+    let Some(rest) = trimmed.strip_prefix("<think>") else {
+        return (None, text.to_string());
+    };
+    let Some(end) = rest.find("</think>") else {
+        return (None, text.to_string());
+    };
+
+    let reasoning = rest[..end].trim().to_string();
+    let visible = rest[end + "</think>".len()..]
+        .trim_start_matches(['\r', '\n'])
+        .to_string();
+    let reasoning = if reasoning.is_empty() {
+        None
+    } else {
+        Some(reasoning)
+    };
+    (reasoning, visible)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_base_url_defaults_to_official() {
+        assert_eq!(normalize_base_url(None), DEFAULT_OPENAI_BASE_URL);
+        assert_eq!(
+            normalize_base_url(Some("https://example.com/")),
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    fn chat_completions_url_handles_known_shapes() {
+        assert_eq!(
+            chat_completions_url("https://api.z.ai/api/coding/paas/v4"),
+            "https://api.z.ai/api/coding/paas/v4/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_url("https://example.com/v1"),
+            "https://example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_url("https://example.com/v1/chat/completions"),
+            "https://example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn build_chat_completions_payload_maps_messages_and_tools() {
+        let raw = json!({
+            "model": "GLM-Text-01",
+            "messages": [
+                { "role": "system", "content": "be brief" },
+                { "role": "user", "content": "hi" }
+            ],
+            "max_output_tokens": 64,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "echo",
+                        "parameters": { "type": "object" }
+                    }
+                }
+            ]
+        });
+        let payload = build_chat_completions_payload(&raw, "GLM-Text-01").unwrap();
+        assert_eq!(payload["model"], "GLM-Text-01");
+        assert_eq!(payload["max_tokens"], 64);
+        assert_eq!(payload["messages"][0]["role"], "system");
+        assert_eq!(payload["messages"][1]["content"], "hi");
+        assert_eq!(payload["tools"][0]["function"]["name"], "echo");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_filters_apply_patch_tool() {
+        let raw = json!({
+            "model": "GLM-Text-01",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "apply_patch",
+                    "description": "patch files",
+                    "parameters": { "type": "object" }
+                },
+                {
+                    "type": "function",
+                    "name": "shell",
+                    "description": "run command",
+                    "parameters": { "type": "object" }
+                }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": { "name": "apply_patch" }
+            }
+        });
+
+        let payload = build_chat_completions_payload(&raw, "GLM-Text-01").unwrap();
+        assert_eq!(payload["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["tools"][0]["function"]["name"], "shell");
+        assert!(payload.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn build_chat_completions_payload_omits_thinking_by_default() {
+        let raw = json!({"model": "glm-5.2", "input": "hi"});
+        let payload = build_chat_completions_payload(&raw, "glm-5.2").unwrap();
+        assert!(payload.get("thinking").is_none());
+    }
+
+    #[test]
+    fn build_chat_completions_payload_respects_explicit_none_reasoning() {
+        let raw = json!({
+            "model": "glm-5.2",
+            "input": "hi",
+            "reasoning": {"effort": "none"}
+        });
+        let payload = build_chat_completions_payload(&raw, "glm-5.2").unwrap();
+        assert_eq!(payload["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_forwards_non_none_reasoning_as_enabled() {
+        let raw = json!({
+            "model": "glm-5.2",
+            "input": "hi",
+            "reasoning": {"effort": "high"}
+        });
+        let payload = build_chat_completions_payload(&raw, "glm-5.2").unwrap();
+        assert_eq!(payload["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_handles_reasoning_effort_alias() {
+        let raw = json!({
+            "model": "glm-5.2",
+            "input": "hi",
+            "reasoning_effort": "medium"
+        });
+        let payload = build_chat_completions_payload(&raw, "glm-5.2").unwrap();
+        assert_eq!(payload["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn models_to_openai_json_includes_codex_models_field() {
+        let body = models_to_openai_json(&json!({
+            "data": [{ "id": "glm-5.2", "owned_by": "glm" }]
+        }))
+        .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(value["data"][0]["id"], "glm-5.2");
+        assert_eq!(value["models"][0]["id"], "glm-5.2");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_maps_responses_input() {
+        let raw = json!({
+            "model": "GLM-Text-01",
+            "instructions": "be brief",
+            "input": [
+                { "type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}] },
+                { "type": "function_call", "call_id": "call_1", "name": "echo", "arguments": "{\"x\":1}" },
+                { "type": "function_call_output", "call_id": "call_1", "output": "ok" }
+            ]
+        });
+        let payload = build_chat_completions_payload(&raw, "GLM-Text-01").unwrap();
+        assert_eq!(payload["messages"][0]["role"], "system");
+        assert_eq!(payload["messages"][1]["role"], "user");
+        assert_eq!(payload["messages"][2]["role"], "assistant");
+        assert_eq!(payload["messages"][2]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(payload["messages"][3]["role"], "tool");
+        assert_eq!(payload["messages"][3]["tool_call_id"], "call_1");
+        assert_eq!(payload["messages"][3]["content"], "ok");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_drops_orphan_tool_outputs() {
+        let raw = json!({
+            "model": "GLM-M3",
+            "input": [
+                { "type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}] },
+                { "type": "function_call_output", "call_id": "call_missing", "output": "ok" }
+            ],
+            "tools": [
+                { "type": "function", "name": "shell", "description": "Run a shell command", "parameters": { "type": "object" } }
+            ]
+        });
+
+        let payload = build_chat_completions_payload(&raw, "GLM-M3").unwrap();
+        let messages = payload["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_drops_interrupted_tool_outputs() {
+        let raw = json!({
+            "model": "GLM-M3",
+            "input": [
+                { "type": "message", "role": "user", "content": [{"type": "input_text", "text": "run"}] },
+                { "type": "function_call", "call_id": "call_1", "name": "shell", "arguments": "{\"command\":\"echo ok\"}" },
+                { "type": "message", "role": "user", "content": [{"type": "input_text", "text": "next"}] },
+                { "type": "function_call_output", "call_id": "call_1", "output": "ok" }
+            ],
+            "tools": [
+                { "type": "function", "name": "shell", "description": "Run a shell command", "parameters": { "type": "object" } }
+            ]
+        });
+
+        let payload = build_chat_completions_payload(&raw, "GLM-M3").unwrap();
+        let messages = payload["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "user");
+        assert!(messages.iter().all(|message| message["role"] != "tool"));
+        assert!(messages
+            .iter()
+            .all(|message| message.get("tool_calls").is_none()));
+    }
+
+    #[test]
+    fn openai_chat_content_passes_through_openai_image_url() {
+        let value = json!([
+            { "type": "text", "text": "describe" },
+            { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
+        ]);
+        let out = openai_chat_content(Some(&value)).unwrap();
+        let arr = out.as_array().expect("multimodal content must be an array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "describe");
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(arr[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
+
+    #[test]
+    fn openai_chat_content_normalizes_responses_input_image() {
+        // Codex Responses API shape: input_image with image_url as a string
+        let value = json!([
+            { "type": "input_text", "text": "what is this?" },
+            { "type": "input_image", "image_url": "data:image/jpeg;base64,BBBB" }
+        ]);
+        let out = openai_chat_content(Some(&value)).unwrap();
+        let arr = out.as_array().expect("must be array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "what is this?");
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(arr[1]["image_url"]["url"], "data:image/jpeg;base64,BBBB");
+    }
+
+    #[test]
+    fn openai_chat_content_collapses_text_only_to_string() {
+        let value = json!([
+            { "type": "input_text", "text": "hello " },
+            { "type": "input_text", "text": "world" }
+        ]);
+        let out = openai_chat_content(Some(&value)).unwrap();
+        assert_eq!(out, "hello \nworld");
+    }
+
+    #[test]
+    fn openai_chat_content_handles_image_only_array() {
+        let value = json!([
+            { "type": "input_image", "image_url": "https://example.com/x.png" }
+        ]);
+        let out = openai_chat_content(Some(&value)).unwrap();
+        let arr = out.as_array().expect("must be array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "image_url");
+        assert_eq!(arr[0]["image_url"]["url"], "https://example.com/x.png");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_preserves_responses_input_image() {
+        let raw = json!({
+            "model": "GLM-Text-01",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        { "type": "input_text", "text": "describe the screenshot" },
+                        { "type": "input_image", "image_url": "data:image/png;base64,ZZZZ" }
+                    ]
+                }
+            ]
+        });
+        let payload = build_chat_completions_payload(&raw, "GLM-Text-01").unwrap();
+        let content = &payload["messages"][0]["content"];
+        let arr = content
+            .as_array()
+            .expect("multimodal content must be an array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "describe the screenshot");
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(arr[1]["image_url"]["url"], "data:image/png;base64,ZZZZ");
+    }
+
+    #[test]
+    fn build_chat_completions_payload_preserves_chat_message_image() {
+        let raw = json!({
+            "model": "GLM-M3",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "what is this?" },
+                        { "type": "image_url", "image_url": { "url": "data:image/png;base64,CCCC" } }
+                    ]
+                }
+            ]
+        });
+        let payload = build_chat_completions_payload(&raw, "GLM-M3").unwrap();
+        let content = &payload["messages"][0]["content"];
+        let arr = content
+            .as_array()
+            .expect("multimodal content must be an array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["text"], "what is this?");
+        assert_eq!(arr[1]["image_url"]["url"], "data:image/png;base64,CCCC");
+    }
+
+    #[test]
+    fn chat_completion_to_responses_maps_text_thinking_and_tool_use() {
+        let chat = json!({
+            "id": "chatcmpl-1",
+            "created": 1700000000,
+            "model": "GLM-Text-01",
+            "choices": [{
+                "message": {
+                    "reasoning_content": "think",
+                    "content": "hello",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": { "name": "echo", "arguments": "{}" }
+                    }]
+                }
+            }],
+            "usage": { "prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7 }
+        });
+        let response = chat_completion_to_responses(&chat, "GLM-Text-01");
+        let output = response["output"].as_array().unwrap();
+        assert_eq!(output[0]["type"], "reasoning");
+        assert_eq!(output[1]["type"], "message");
+        assert_eq!(output[2]["type"], "function_call");
+        assert_eq!(response["usage"]["input_tokens"], 3);
+        assert_eq!(response["usage"]["output_tokens"], 4);
+        assert_eq!(response["output_text"], "hello");
+    }
+
+    #[test]
+    fn chat_completion_to_responses_moves_inline_thinking_out_of_output_text() {
+        let chat = json!({
+            "choices": [{
+                "message": {
+                    "content": "<think>\nThe user asked for a short greeting.\n</think>\nHi"
+                }
+            }],
+            "usage": { "prompt_tokens": 3, "completion_tokens": 9, "total_tokens": 12 }
+        });
+
+        let response = chat_completion_to_responses(&chat, "GLM-M3");
+        let output = response["output"].as_array().unwrap();
+        assert_eq!(response["output_text"], "Hi");
+        assert_eq!(output[0]["type"], "reasoning");
+        assert_eq!(
+            output[0]["summary"][0]["text"],
+            "The user asked for a short greeting."
+        );
+        assert_eq!(output[1]["type"], "message");
+        assert_eq!(output[1]["content"][0]["text"], "Hi");
+    }
+
+    #[test]
+    fn glm_sse_parser_handles_split_events() {
+        let first = json!({
+            "choices": [{ "delta": { "content": "H" } }]
+        })
+        .to_string();
+        let second = json!({
+            "choices": [{ "delta": { "content": "i" } }]
+        })
+        .to_string();
+        let mut parser = GLMSseParser::default();
+
+        assert!(parser
+            .push(format!("data: {}", first).as_bytes())
+            .is_empty());
+        let events = parser.push(format!("\n\ndata: {}\n\n", second).as_bytes());
+
+        assert_eq!(events.len(), 2);
+        assert!(events[0].contains("\"H\""));
+        assert!(events[1].contains("\"i\""));
+    }
+
+    #[test]
+    fn glm_stream_accumulator_builds_completed_response() {
+        let mut accumulator = GLMStreamAccumulator::new("GLM-M3".to_string());
+        accumulator.absorb_chat_value(&json!({
+            "id": "chatcmpl_1",
+            "created": 1700000000,
+            "choices": [{
+                "delta": { "reasoning_content": "think first" }
+            }]
+        }));
+        accumulator.absorb_chat_value(&json!({
+            "choices": [{
+                "delta": { "content": "Hi" }
+            }],
+            "usage": {
+                "prompt_tokens": 3,
+                "completion_tokens": 2,
+                "total_tokens": 5
+            }
+        }));
+
+        let response = accumulator.to_response();
+        let stream_events = response_output_events(&response);
+        let completed = response_sse_event(&json!({
+            "type": "response.completed",
+            "response": response.clone()
+        }));
+        let stream_text = stream_events
+            .iter()
+            .map(|event| String::from_utf8(event.to_vec()).unwrap())
+            .collect::<Vec<_>>()
+            .join("");
+        let completed_text = String::from_utf8(completed.to_vec()).unwrap();
+        let item_added = stream_text.find("response.output_item.added").unwrap();
+        let text_delta = stream_text.find("response.output_text.delta").unwrap();
+        let item_done = stream_text.rfind("response.output_item.done").unwrap();
+
+        assert!(item_added < text_delta);
+        assert!(text_delta < item_done);
+        assert!(stream_text.contains("response.content_part.added"));
+        assert!(stream_text.contains("\"Hi\""));
+        assert!(completed_text.contains("response.completed"));
+        assert_eq!(response["id"], "resp_chatcmpl_1");
+        assert_eq!(response["output_text"], "Hi");
+        assert_eq!(response["output"][0]["type"], "reasoning");
+        assert_eq!(response["output"][1]["type"], "message");
+        assert_eq!(response["usage"]["total_tokens"], 5);
+    }
+}

@@ -4,6 +4,7 @@ pub mod codex;
 pub mod copilot;
 pub mod deepseek;
 pub mod gemini;
+pub mod glm;
 pub mod grok;
 pub mod minimax;
 pub mod oauth;

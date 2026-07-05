@@ -230,7 +230,8 @@ sed -n 's/^data: //p' "$tmp" \
 The public API surface is source-oriented:
 
 - `GET /v1/models` returns the unified model catalog across enabled providers with provider-prefixed model ids.
-- `POST /v1/responses` is the single OpenAI-compatible execution endpoint.
+- `POST /v1/responses` is the primary OpenAI-compatible execution endpoint.
+- `POST /v1/chat/completions` is also available for provider-prefixed targets that expose native chat completions, including GLM.
 - The gateway picks the target adapter from the `model` id instead of exposing provider-specific `/provider/v1/*` APIs.
 
 Current routing rules:
@@ -240,6 +241,7 @@ Current routing rules:
 - `deepseek*` goes to DeepSeek.
 - `grok*` goes to Grok.
 - `claude*` goes to the native Claude OAuth target.
+- `glm*` goes to GLM/Z.AI.
 - Standard `gemini-*` models go to the native Gemini target.
 - Antigravity-only Gemini variants such as `gemini-3-pro-image`, `gemini-3-pro-high`, `gemini-3-pro-low`, and `gemini-2.5-flash-thinking` go to Antigravity.
 
@@ -249,7 +251,7 @@ Provider prefixes can force a specific target while keeping the upstream model i
 
 - `agw:gemini-2.5-pro` routes to Antigravity with upstream model `gemini-2.5-pro`.
 - `gem:gemini-2.5-pro` routes to the native Gemini target with upstream model `gemini-2.5-pro`.
-- Supported prefixes: `agw` Antigravity, `gem` Gemini, `qwn` Qwen, `dsk` DeepSeek, `grk` Grok, `min` MiniMax, `cop` GitHub Copilot, `cld` Claude, `cod` Codex/OpenAI.
+- Supported prefixes: `agw` Antigravity, `gem` Gemini, `qwn` Qwen, `dsk` DeepSeek, `grk` Grok, `min` MiniMax, `cop` GitHub Copilot, `cld` Claude, `glm` GLM/Z.AI, `cod` Codex/OpenAI.
 - Old unprefixed model names still work exactly as before.
 
 ### Custom models
@@ -303,7 +305,7 @@ Custom model rules:
 - `alias` is normalized by trimming whitespace and removing an optional `ctm:` prefix. `workhorse` and `ctm:workhorse` refer to the same alias.
 - Aliases must not be empty and must not contain whitespace, `:`, `/`, or `\`.
 - A custom model must have at least one enabled primary target.
-- Targets may use these provider prefixes: `agw`, `gem`, `qwn`, `dsk`, `grk`, `min`, `cop`, `cld`, and `cod`. Unprefixed targets still use the normal provider routing rules.
+- Targets may use these provider prefixes: `agw`, `gem`, `qwn`, `dsk`, `grk`, `min`, `cop`, `cld`, `glm`, and `cod`. Unprefixed targets still use the normal provider routing rules.
 - Targets cannot point at another custom model, so recursive `ctm:` routes are rejected.
 - Disabled custom models are hidden from model catalogs and return `503` if called directly.
 - Disabled primary or fallback target entries are skipped.
@@ -566,6 +568,80 @@ The gateway can also stand in for MiniMax's Anthropic endpoint from the official
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "MiniMax-M3[1m]",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "MiniMax-M3[1m]",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "MiniMax-M3[1m]"
+  }
+}
+```
+
+## GLM/Z.AI provider
+
+GLM is exposed as an API-key provider for the Z.AI GLM Coding Plan. Add a GLM account from the dashboard, or submit a key directly:
+
+```bash
+curl -sS http://127.0.0.1:8319/login/glm/start \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "api_key": "ZAI_API_KEY",
+    "label": "personal",
+    "openai_base_url": "https://api.z.ai/api/coding/paas/v4",
+    "anthropic_base_url": "https://api.z.ai/api/anthropic"
+  }'
+```
+
+Routing:
+
+- Use the `glm:` prefix to force GLM, for example `glm:glm-5.2`.
+- Unprefixed `glm*` model ids also route to GLM.
+- `POST /v1/responses` and `POST /codex/responses` translate OpenAI/Codex Responses input, tools, tool output, and streaming events to GLM's OpenAI-compatible `/chat/completions` route.
+- `POST /v1/chat/completions` passes OpenAI Chat Completions requests through to GLM's OpenAI-compatible route.
+- `POST /claude/v1/messages` and `POST /claude/messages` pass Anthropic Messages requests through to GLM's Anthropic-compatible route.
+- `GET /v1/models` and `GET /codex/models` include `glm:` model ids whenever a GLM account is enabled.
+- The dashboard shows the live model catalog from `/models`. Z.AI does not currently expose a stable Coding Plan quota endpoint through this route, so account load balancing uses gateway-recorded usage first.
+
+Z.AI documents two different Coding Plan base URLs: Anthropic Messages uses `https://api.z.ai/api/anthropic`, while OpenAI Chat Completions uses `https://api.z.ai/api/coding/paas/v4`. Keep them separate in saved credentials.
+
+Example:
+
+```bash
+curl http://127.0.0.1:8319/v1/responses \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm:glm-5.2","input":"say hi in one word"}'
+```
+
+Native chat completions:
+
+```bash
+curl http://127.0.0.1:8319/v1/chat/completions \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm:glm-5.2","messages":[{"role":"user","content":"say hi"}]}'
+```
+
+### Using GLM with the Codex CLI
+
+```toml
+[model_providers.glm_via_gateway]
+name = "GLM via codex-gateway"
+base_url = "http://127.0.0.1:8319/v1"
+experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+wire_api = "responses"
+
+[profiles.glm]
+model = "glm:glm-5.2"
+model_provider = "glm_via_gateway"
+model_reasoning_effort = "high"
+```
+
+### Using GLM with Claude Code
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8319/claude",
+    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
+    "ANTHROPIC_MODEL": "glm:glm-5.2",
+    "ANTHROPIC_SMALL_FAST_MODEL": "glm:glm-5.2"
   }
 }
 ```

@@ -140,6 +140,9 @@ pub async fn delete_credential(
             super::super::deepseek::accounts::reload_state(&state);
             super::super::minimax::accounts::reload_state(&state);
             super::super::grok::accounts::reload_state(&state);
+            super::super::copilot::accounts::reload_state(&state);
+            super::super::claude::accounts::reload_state(&state);
+            super::super::glm::accounts::reload_state(&state);
             axum::Json(serde_json::json!({
                 "ok": true,
                 "message": format!("deleted {}", file_name)
@@ -192,6 +195,9 @@ pub async fn toggle_credential(
     super::super::deepseek::accounts::reload_state(&state);
     super::super::minimax::accounts::reload_state(&state);
     super::super::grok::accounts::reload_state(&state);
+    super::super::copilot::accounts::reload_state(&state);
+    super::super::claude::accounts::reload_state(&state);
+    super::super::glm::accounts::reload_state(&state);
 
     axum::Json(serde_json::json!({
         "ok": true,

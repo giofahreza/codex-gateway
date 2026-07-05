@@ -17,6 +17,7 @@ pub enum TargetModel {
     MiniMax,
     Copilot,
     Claude,
+    Glm,
     Custom,
     CodexModels,
     UnifiedV1Models,
