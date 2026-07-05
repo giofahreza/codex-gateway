@@ -11,6 +11,8 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use uuid::Uuid;
 
+const DUMMY_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
+
 const MODEL_FALLBACKS: &[&str] = &[
     "claude-sonnet-4-5-thinking",
     "claude-opus-4-5-thinking",
@@ -142,90 +144,128 @@ pub async fn responses(
         }
     };
 
-    let account = match super::accounts::pick_account(&state) {
-        Some(account) => account,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    "No Antigravity accounts configured",
-                    "server_error",
-                    None,
-                ),
-            )
-                .into_response()
-        }
-    };
-    let context = crate::antigravity_usage_context(
-        &account,
-        Some(model.clone()),
-        "/agw/v1/responses",
-        crate::prompt_metrics_from_request_value(&request_value),
-    );
-
-    let payload = match build_google_payload(&request_value, &model, account.project_id.as_deref())
-    {
-        Ok(payload) => payload,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(&err, "invalid_request_error", None),
-            )
-                .into_response()
-        }
-    };
-
-    crate::record_antigravity_request(&state, &context);
-
-    let access_token = match super::auth::ensure_access_token(&state, &account).await {
-        Ok(token) => token,
-        Err(err) => {
-            crate::record_antigravity_error(&state, &context, &err);
-            return (
-                StatusCode::BAD_GATEWAY,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(&err, "server_error", None),
-            )
-                .into_response();
-        }
-    };
-
-    let upstream = match send_generate_request(&state.client, &access_token, &payload).await {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::record_antigravity_error(&state, &context, &message);
-            return (
-                status,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(&message, "server_error", None),
-            )
-                .into_response();
-        }
-    };
-
-    let mut openai_response = google_to_openai_response(&upstream, &model);
-    let usage = crate::usage_metrics_from_response_value(&openai_response);
-    crate::record_antigravity_success(&state, &context, &usage);
-    attach_temp_downloads(&mut openai_response);
-    let wants_stream = crate::source::wants_stream(&headers, &body);
-
-    if wants_stream {
-        let sse = render_response_sse(&openai_response);
+    let accounts = super::accounts::candidate_accounts(&state);
+    if accounts.is_empty() {
         return (
-            StatusCode::OK,
-            [
-                ("Content-Type", "text/event-stream"),
-                ("Cache-Control", "no-store"),
-            ],
-            Body::from(sse),
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Content-Type", "application/json")],
+            crate::source::v1::response::openai_error_body(
+                "No Antigravity accounts configured",
+                "server_error",
+                None,
+            ),
         )
             .into_response();
     }
 
-    let body = serde_json::to_vec(&openai_response).unwrap_or_default();
-    (StatusCode::OK, [("Content-Type", "application/json")], body).into_response()
+    let wants_stream = crate::source::wants_stream(&headers, &body);
+    let prompt_metrics = crate::prompt_metrics_from_request_value(&request_value);
+    let mut last_error: Option<(StatusCode, String)> = None;
+
+    for (attempt_idx, account) in accounts.iter().enumerate() {
+        let context = crate::antigravity_usage_context(
+            account,
+            Some(model.clone()),
+            "/agw/v1/responses",
+            prompt_metrics.clone(),
+        );
+
+        let payload =
+            match build_google_payload(&request_value, &model, account.project_id.as_deref()) {
+                Ok(payload) => payload,
+                Err(err) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        [("Content-Type", "application/json")],
+                        crate::source::v1::response::openai_error_body(
+                            &err,
+                            "invalid_request_error",
+                            None,
+                        ),
+                    )
+                        .into_response();
+                }
+            };
+
+        crate::record_antigravity_request(&state, &context);
+
+        let access_token = match super::auth::ensure_access_token(&state, account).await {
+            Ok(token) => token,
+            Err(err) => {
+                crate::record_antigravity_error(&state, &context, &err);
+                last_error = Some((StatusCode::BAD_GATEWAY, err));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        let upstream = match send_generate_request(&state.client, &access_token, &payload).await {
+            Ok(value) => value,
+            Err((status, message)) => {
+                crate::record_antigravity_error(&state, &context, &message);
+                if attempt_idx + 1 < accounts.len()
+                    && crate::should_retry_account_error(status, &message)
+                {
+                    last_error = Some((status, message));
+                    continue;
+                }
+                return (
+                    status,
+                    [("Content-Type", "application/json")],
+                    crate::source::v1::response::openai_error_body(
+                        &message,
+                        if status.is_client_error() {
+                            "invalid_request_error"
+                        } else {
+                            "server_error"
+                        },
+                        None,
+                    ),
+                )
+                    .into_response();
+            }
+        };
+
+        let mut openai_response = google_to_openai_response(&upstream, &model);
+        let usage = crate::usage_metrics_from_response_value(&openai_response);
+        crate::record_antigravity_success(&state, &context, &usage);
+        attach_temp_downloads(&mut openai_response);
+
+        if wants_stream {
+            let sse = render_response_sse(&openai_response);
+            return (
+                StatusCode::OK,
+                [
+                    ("Content-Type", "text/event-stream"),
+                    ("Cache-Control", "no-store"),
+                ],
+                Body::from(sse),
+            )
+                .into_response();
+        }
+
+        let body = serde_json::to_vec(&openai_response).unwrap_or_default();
+        return (StatusCode::OK, [("Content-Type", "application/json")], body).into_response();
+    }
+
+    let (status, message) = last_error.unwrap_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "All Antigravity accounts failed".to_string(),
+        )
+    });
+    (
+        status,
+        [("Content-Type", "application/json")],
+        crate::source::v1::response::openai_error_body(
+            &format!("All Antigravity accounts failed; last error: {}", message),
+            "server_error",
+            None,
+        ),
+    )
+        .into_response()
 }
 
 async fn fetch_models(client: &reqwest::Client, access_token: &str) -> Result<Vec<u8>, String> {
@@ -505,200 +545,27 @@ fn build_google_tool_config(request_value: &serde_json::Value) -> Option<serde_j
 /// both. Accepts both `input` (string) and `messages[]` shapes.
 /// Build the Google `contents` array for a Codex/OpenAI request.
 ///
-/// Google\'s Generative AI is multi-turn. A Codex Responses-API input
-/// is a list of `function_call` / `function_call_output` / `message`
-/// items. The clean translation is to emit `model` (assistant
-/// `functionCall`) and `function` (tool result `functionResponse`)
-/// roles, but some upstream backends (notably Claude-on-Antigravity)
-/// reject the functionResponse shape with a generic 400. To stay
-/// portable we serialise the tool-call history as plain text in a
-/// single user turn before the latest user prompt. The model still
-/// sees the full conversation and can keep iterating.
+/// Codex Responses input is already an ordered transcript. Preserve it
+/// as the source of truth and translate tool calls into Google's native
+/// `functionCall` / `functionResponse` parts, otherwise agent loops lose
+/// their tool state and can repeat the same command indefinitely.
 fn build_google_contents(request_value: &Value) -> Result<Vec<Value>, String> {
     let mut entries: Vec<(String, Vec<Value>)> = Vec::new();
 
-    if let Some(prompt) = request_value.get("input").and_then(|v| v.as_str()) {
+    if let Some(items) = request_value.get("input").and_then(|v| v.as_array()) {
+        for item in items {
+            append_input_item(&mut entries, item);
+        }
+    } else if let Some(prompt) = request_value.get("input").and_then(|v| v.as_str()) {
         let trimmed = prompt.trim();
         if !trimmed.is_empty() {
             entries.push(("user".to_string(), vec![json!({ "text": trimmed })]));
         }
     }
 
-    if let Some(items) = request_value.get("input").and_then(|v| v.as_array()) {
-        let mut transcript: Vec<String> = Vec::new();
-        let mut pending_calls: Vec<(String, String, String)> = Vec::new();
-        let mut last_user_text: Option<String> = None;
-        // Walk the items, collecting them into a transcript-style
-        // summary that we\'ll attach to the final user turn.
-        for item in items {
-            let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            match item_type {
-                "function_call" => {
-                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
-                    let args = item.get("arguments").cloned().unwrap_or(json!({}));
-                    let args_str = if let Some(s) = args.as_str() {
-                        s.to_string()
-                    } else {
-                        args.to_string()
-                    };
-                    let call_id = item
-                        .get("call_id")
-                        .or_else(|| item.get("id"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    transcript.push(format!("[assistant called {name}({args_str})]"));
-                    pending_calls.push((call_id, name.to_string(), args_str));
-                }
-                "function_call_output" => {
-                    let call_id = item
-                        .get("call_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let output = item.get("output").cloned().unwrap_or(json!(""));
-                    let output_str = if let Some(s) = output.as_str() {
-                        s.to_string()
-                    } else {
-                        output.to_string()
-                    };
-                    let _name = pending_calls
-                        .iter()
-                        .find(|(cid, _, _)| cid == &call_id)
-                        .map(|(_, n, _)| n.clone())
-                        .unwrap_or_else(|| "tool".to_string());
-                    transcript.push(format!("[tool result: {}]", output_str));
-                }
-                "message" | "" => {
-                    let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
-                    let role = match role {
-                        "system" | "developer" => continue,
-                        "assistant" => "assistant",
-                        "user" | "" => "user",
-                        "tool" => "user",
-                        other => other,
-                    };
-                    let mut parts: Vec<Value> = Vec::new();
-                    if let Some(content) = item.get("content") {
-                        for part in classify_content(Some(content)) {
-                            push_google_part(&mut parts, part);
-                        }
-                    }
-                    if parts.is_empty() {
-                        continue;
-                    }
-                    if role == "user" {
-                        // Keep the full parts list (text + images) so
-                        // multimodal user turns are preserved. We also
-                        // remember the text portion so the transcript
-                        // prefix can be prepended to it later.
-                        if let Some(text) = parts
-                            .iter()
-                            .find_map(|p| p.get("text").and_then(|t| t.as_str()))
-                        {
-                            last_user_text = Some(text.to_string());
-                        }
-                        entries.push((role.to_string(), parts));
-                    } else if role == "assistant" {
-                        if let Some(text) = parts
-                            .iter()
-                            .find_map(|p| p.get("text").and_then(|t| t.as_str()))
-                        {
-                            transcript.push(format!("[assistant said: {text}]"));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        // Attach the transcript to the most recent user turn so the
-        // model sees the full history inline.
-        if !transcript.is_empty() {
-            let prefix = transcript.join("\n");
-            if let Some(text) = last_user_text.as_mut() {
-                *text = format!("{prefix}\n\n{text}");
-            } else {
-                last_user_text = Some(prefix);
-            }
-        }
-        if let Some(text) = last_user_text {
-            let prefix = transcript.join("\n");
-            let new_text = if prefix.is_empty() {
-                text.clone()
-            } else {
-                format!("{prefix}\n\n{text}")
-            };
-            // Find the existing user turn and prepend the transcript
-            // to its first text part, so any non-text parts (images,
-            // etc.) are preserved.
-            let mut found = false;
-            for (role, parts) in entries.iter_mut() {
-                if role == "user" {
-                    if let Some(first_text) = parts.iter_mut().find(|p| p.get("text").is_some()) {
-                        first_text["text"] = json!(new_text);
-                    } else {
-                        parts.insert(0, json!({ "text": new_text }));
-                    }
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                entries.push(("user".to_string(), vec![json!({ "text": new_text })]));
-            }
-        }
-    }
-
     if let Some(messages) = request_value.get("messages").and_then(|v| v.as_array()) {
         for message in messages {
-            let role = message
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("user");
-            let role = match role {
-                "system" | "developer" => continue,
-                "assistant" => "assistant",
-                "user" => "user",
-                "tool" => "user",
-                other => other,
-            };
-            let mut parts: Vec<Value> = Vec::new();
-            if let Some(content) = message.get("content") {
-                for part in classify_content(Some(content)) {
-                    push_google_part(&mut parts, part);
-                }
-            }
-            if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
-                for tc in tool_calls {
-                    let function = tc.get("function");
-                    let name = function
-                        .and_then(|f| f.get("name"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("tool");
-                    let args = function
-                        .and_then(|f| f.get("arguments"))
-                        .cloned()
-                        .unwrap_or(json!({}));
-                    let args_str = if let Some(s) = args.as_str() {
-                        s.to_string()
-                    } else {
-                        args.to_string()
-                    };
-                    parts.push(json!({ "text": format!("[assistant called {name}({args_str})]") }));
-                }
-            }
-            if let Some(tool_call_id) = message.get("tool_call_id").and_then(|v| v.as_str()) {
-                let _ = tool_call_id;
-                if let Some(content) = message.get("content") {
-                    if let Some(text) = content.as_str() {
-                        parts.push(json!({ "text": format!("[tool result: {text}]") }));
-                    }
-                }
-            }
-            if parts.is_empty() {
-                continue;
-            }
-            entries.push((role.to_string(), parts));
+            append_chat_message(&mut entries, message);
         }
     }
 
@@ -727,6 +594,55 @@ fn build_google_contents(request_value: &Value) -> Result<Vec<Value>, String> {
     Ok(contents)
 }
 
+fn append_chat_message(entries: &mut Vec<(String, Vec<Value>)>, message: &Value) {
+    let role = message
+        .get("role")
+        .and_then(|value| value.as_str())
+        .unwrap_or("user");
+
+    if role == "tool" {
+        let call_id = message
+            .get("tool_call_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let name = lookup_function_name(entries, call_id).unwrap_or_else(|| "tool".to_string());
+        let output = message_content_text(message.get("content")).unwrap_or_default();
+        entries.push((
+            "function".to_string(),
+            vec![json!({
+                "functionResponse": {
+                    "name": name,
+                    "response": { "result": output }
+                }
+            })],
+        ));
+        return;
+    }
+
+    let role = match role {
+        "system" | "developer" => return,
+        "assistant" => "model",
+        "user" | "" => "user",
+        other => other,
+    };
+    let mut parts: Vec<Value> = Vec::new();
+    if let Some(content) = message.get("content") {
+        for part in classify_content(Some(content)) {
+            push_google_part(&mut parts, part);
+        }
+    }
+    if let Some(tool_calls) = message.get("tool_calls").and_then(|value| value.as_array()) {
+        for tool_call in tool_calls {
+            if let Some(part) = chat_tool_call_to_function_call_part(tool_call) {
+                parts.push(part);
+            }
+        }
+    }
+    if !parts.is_empty() {
+        entries.push((role.to_string(), parts));
+    }
+}
+
 fn append_input_item(entries: &mut Vec<(String, Vec<Value>)>, item: &Value) {
     let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match item_type {
@@ -751,10 +667,12 @@ fn append_input_item(entries: &mut Vec<(String, Vec<Value>)>, item: &Value) {
             }
             entries.push((
                 "model".to_string(),
-                vec![json!({
-                    "functionCall": { "name": name, "args": args_value },
-                    "_call_id": call_id,
-                })],
+                vec![function_call_part(
+                    name,
+                    args_value,
+                    call_id,
+                    thought_signature_from_value(item),
+                )],
             ));
         }
         "function_call_output" => {
@@ -785,9 +703,9 @@ fn append_input_item(entries: &mut Vec<(String, Vec<Value>)>, item: &Value) {
             let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
             let role = match role {
                 "system" | "developer" => return,
-                "assistant" => "assistant",
+                "assistant" => "model",
                 "user" | "" => "user",
-                "tool" => "function",
+                "tool" => "user",
                 other => other,
             };
             let mut parts: Vec<Value> = Vec::new();
@@ -805,7 +723,7 @@ fn append_input_item(entries: &mut Vec<(String, Vec<Value>)>, item: &Value) {
     }
 }
 
-fn lookup_function_name(entries: &Vec<(String, Vec<Value>)>, call_id: &str) -> Option<String> {
+fn lookup_function_name(entries: &[(String, Vec<Value>)], call_id: &str) -> Option<String> {
     if call_id.is_empty() {
         return None;
     }
@@ -822,6 +740,27 @@ fn lookup_function_name(entries: &Vec<(String, Vec<Value>)>, call_id: &str) -> O
     None
 }
 
+fn message_content_text(content: Option<&Value>) -> Option<String> {
+    let mut out = String::new();
+    for part in classify_content(content) {
+        if let PartKind::Text(text) = part {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(trimmed);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 fn chat_tool_call_to_function_call_part(tc: &Value) -> Option<Value> {
     let function = tc.get("function")?;
     let name = function.get("name").and_then(|v| v.as_str())?;
@@ -835,10 +774,41 @@ fn chat_tool_call_to_function_call_part(tc: &Value) -> Option<Value> {
         arguments.clone()
     };
     let call_id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    Some(json!({
+    Some(function_call_part(
+        name,
+        args_value,
+        call_id,
+        thought_signature_from_value(tc),
+    ))
+}
+
+fn function_call_part(
+    name: &str,
+    args_value: Value,
+    call_id: &str,
+    thought_signature: Option<&str>,
+) -> Value {
+    let mut part = json!({
         "functionCall": { "name": name, "args": args_value },
         "_call_id": call_id,
-    }))
+    });
+    attach_thought_signature(&mut part, thought_signature);
+    part
+}
+
+fn thought_signature_from_value(value: &Value) -> Option<&str> {
+    value
+        .get("thoughtSignature")
+        .or_else(|| value.get("thought_signature"))
+        .and_then(|signature| signature.as_str())
+        .filter(|signature| !signature.trim().is_empty())
+}
+
+fn attach_thought_signature(part: &mut Value, signature: Option<&str>) {
+    let signature = signature.unwrap_or(DUMMY_THOUGHT_SIGNATURE);
+    if let Some(object) = part.as_object_mut() {
+        object.insert("thoughtSignature".to_string(), json!(signature));
+    }
 }
 
 /// Backwards-compatible wrapper that builds a single-turn `parts`
@@ -846,18 +816,6 @@ fn chat_tool_call_to_function_call_part(tc: &Value) -> Option<Value> {
 /// preserve multi-turn tool-call history; the request builder just
 /// flattens the last user turn's parts for callers that only need a
 /// single part list.
-fn extract_prompt_parts(request_value: &Value) -> Result<Vec<Value>, String> {
-    let contents = build_google_contents(request_value)?;
-    for entry in contents.iter().rev() {
-        if entry["role"] == "user" {
-            if let Some(parts) = entry.get("parts").and_then(|v| v.as_array()) {
-                return Ok(parts.clone());
-            }
-        }
-    }
-    Ok(Vec::new())
-}
-
 fn push_google_part(out: &mut Vec<Value>, part: PartKind) {
     match part {
         PartKind::Text(text) => {
@@ -973,14 +931,19 @@ fn google_to_openai_response(value: &serde_json::Value, model: &str) -> serde_js
                 args.to_string()
             };
             let call_id = format!("call_{}", Uuid::new_v4().simple());
-            function_calls.push(json!({
+            let mut function_call = json!({
                 "id": call_id,
                 "type": "function_call",
                 "call_id": call_id,
                 "name": name,
                 "arguments": args_str,
                 "status": "completed",
-            }));
+            });
+            if let Some(signature) = part.get("thoughtSignature").and_then(|v| v.as_str()) {
+                function_call["thoughtSignature"] = json!(signature);
+                function_call["thought_signature"] = json!(signature);
+            }
+            function_calls.push(function_call);
         }
     }
 
@@ -1434,6 +1397,64 @@ mod tests {
         assert_eq!(parts[0]["text"], "describe");
         assert_eq!(parts[1]["inline_data"]["mime_type"], "image/png");
         assert_eq!(parts[1]["inline_data"]["data"], "AAAA");
+    }
+
+    #[test]
+    fn build_google_payload_maps_responses_tool_history() {
+        let request = json!({
+            "model": "gemini-pro-agent",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "Run httrack once" }]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"httrack https://example.com -O .\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "Process running with session ID 76254"
+                }
+            ],
+            "tools": [{
+                "type": "function",
+                "name": "exec_command",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "cmd": { "type": "string" } }
+                }
+            }]
+        });
+
+        let payload = build_google_payload(&request, "gemini-pro-agent", Some("proj-1")).unwrap();
+        let contents = payload["request"]["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 3);
+        assert_eq!(contents[0]["role"], "user");
+        assert_eq!(contents[0]["parts"][0]["text"], "Run httrack once");
+        assert_eq!(contents[1]["role"], "model");
+        assert_eq!(
+            contents[1]["parts"][0]["functionCall"]["name"],
+            "exec_command"
+        );
+        assert_eq!(
+            contents[1]["parts"][0]["functionCall"]["args"]["cmd"],
+            "httrack https://example.com -O ."
+        );
+        assert!(contents[1]["parts"][0].get("_call_id").is_none());
+        assert_eq!(contents[2]["role"], "function");
+        assert_eq!(
+            contents[2]["parts"][0]["functionResponse"]["name"],
+            "exec_command"
+        );
+        assert_eq!(
+            contents[2]["parts"][0]["functionResponse"]["response"]["result"],
+            "Process running with session ID 76254"
+        );
     }
 
     #[test]

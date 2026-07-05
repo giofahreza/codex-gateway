@@ -84,22 +84,6 @@ pub async fn responses(
             .into_response();
     }
 
-    let account = match super::accounts::pick_account(&state) {
-        Some(a) => a,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    "No Grok accounts configured",
-                    "server_error",
-                    None,
-                ),
-            )
-                .into_response();
-        }
-    };
-
     let request_value: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(_) => {
@@ -130,14 +114,6 @@ pub async fn responses(
         .unwrap_or(false);
 
     let prompt_metrics = crate::prompt_metrics_from_request_value(&request_value);
-    let context = crate::grok_usage_context(
-        &account,
-        Some(model.clone()),
-        "/grok/v1/responses",
-        prompt_metrics,
-    );
-    crate::record_request_started(&state, &context);
-
     let mut payload = serde_json::json!({
         "model": &model,
         "input": request_value.get("input").cloned().unwrap_or(serde_json::Value::Null),
@@ -163,137 +139,197 @@ pub async fn responses(
         payload["stream"] = serde_json::Value::Bool(true);
     }
 
-    let upstream_base = account
-        .api_base_url
-        .as_deref()
-        .unwrap_or(DEFAULT_BASE_URL)
-        .trim_end_matches('/');
-    let upstream_url = format!("{}/responses", upstream_base);
-
-    match state
-        .client
-        .post(&upstream_url)
-        .header(
-            "Authorization",
-            format!("{} {}", account.token_type, account.access_token),
+    let payload_body = serde_json::to_string(&payload).unwrap_or_default();
+    let accounts = super::accounts::candidate_accounts(&state);
+    if accounts.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Content-Type", "application/json")],
+            crate::source::v1::response::openai_error_body(
+                "No Grok accounts configured",
+                "server_error",
+                None,
+            ),
         )
-        .header("Content-Type", "application/json")
-        .header(
-            "Accept",
-            if stream {
-                "text/event-stream"
-            } else {
-                "application/json"
-            },
-        )
-        .body(serde_json::to_string(&payload).unwrap_or_default())
-        .timeout(Duration::from_secs(180))
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            let status = resp.status();
-            let rate_limits = super::auth::extract_rate_limits(resp.headers());
-            if !status.is_success() {
-                persist_runtime_metadata(
-                    &state,
-                    &account,
-                    Some(model.as_str()),
-                    &rate_limits,
-                    "after error",
-                );
-                let err_body = resp.text().await.unwrap_or_default();
-                let message = err_body.clone();
-                crate::record_grok_error(&state, &context, &message);
-                let body_bytes = Bytes::from(err_body);
-                return (
-                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-                    [("Content-Type", "application/json")],
-                    crate::source::v1::response::upstream_error_to_openai(status, &body_bytes),
-                )
-                    .into_response();
-            }
+            .into_response();
+    }
 
-            if stream {
-                persist_runtime_metadata(&state, &account, Some(model.as_str()), &rate_limits, "");
-                let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, axum::Error>>(16);
-                let state_clone = state.clone();
-                let context_clone = context.clone();
-                let rl_headers = forwarded_ratelimit_headers(resp.headers());
-                tokio::spawn(async move {
-                    let mut chunk_stream = resp.bytes_stream();
-                    let mut buffer = Vec::new();
-                    while let Some(chunk) = futures_util::StreamExt::next(&mut chunk_stream).await {
-                        match chunk {
-                            Ok(bytes) => {
-                                buffer.extend_from_slice(&bytes);
-                                let _ = tx.send(Ok(bytes)).await;
-                            }
-                            Err(e) => {
-                                let _ = tx.send(Err(axum::Error::new(e))).await;
-                                break;
+    let mut last_error: Option<(StatusCode, String)> = None;
+    for (attempt_idx, account) in accounts.iter().enumerate() {
+        let context = crate::grok_usage_context(
+            account,
+            Some(model.clone()),
+            "/grok/v1/responses",
+            prompt_metrics.clone(),
+        );
+        crate::record_request_started(&state, &context);
+
+        let upstream_base = account
+            .api_base_url
+            .as_deref()
+            .unwrap_or(DEFAULT_BASE_URL)
+            .trim_end_matches('/');
+        let upstream_url = format!("{}/responses", upstream_base);
+
+        match state
+            .client
+            .post(&upstream_url)
+            .header(
+                "Authorization",
+                format!("{} {}", account.token_type, account.access_token),
+            )
+            .header("Content-Type", "application/json")
+            .header(
+                "Accept",
+                if stream {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                },
+            )
+            .body(payload_body.clone())
+            .timeout(Duration::from_secs(180))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                let rate_limits = super::auth::extract_rate_limits(resp.headers());
+                if !status.is_success() {
+                    persist_runtime_metadata(
+                        &state,
+                        account,
+                        Some(model.as_str()),
+                        &rate_limits,
+                        "after error",
+                    );
+                    let err_body = resp.text().await.unwrap_or_default();
+                    let message = err_body.clone();
+                    crate::record_grok_error(&state, &context, &message);
+                    if attempt_idx + 1 < accounts.len()
+                        && crate::should_retry_account_error(status, &message)
+                    {
+                        last_error = Some((status, message));
+                        continue;
+                    }
+                    let body_bytes = Bytes::from(err_body);
+                    return (
+                        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                        [("Content-Type", "application/json")],
+                        crate::source::v1::response::upstream_error_to_openai(status, &body_bytes),
+                    )
+                        .into_response();
+                }
+
+                if stream {
+                    persist_runtime_metadata(
+                        &state,
+                        account,
+                        Some(model.as_str()),
+                        &rate_limits,
+                        "",
+                    );
+                    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, axum::Error>>(16);
+                    let state_clone = state.clone();
+                    let context_clone = context.clone();
+                    let rl_headers = forwarded_ratelimit_headers(resp.headers());
+                    tokio::spawn(async move {
+                        let mut chunk_stream = resp.bytes_stream();
+                        let mut buffer = Vec::new();
+                        while let Some(chunk) =
+                            futures_util::StreamExt::next(&mut chunk_stream).await
+                        {
+                            match chunk {
+                                Ok(bytes) => {
+                                    buffer.extend_from_slice(&bytes);
+                                    let _ = tx.send(Ok(bytes)).await;
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(Err(axum::Error::new(e))).await;
+                                    break;
+                                }
                             }
                         }
-                    }
-                    let body_bytes = Bytes::from(buffer);
-                    if let Some(usage) = crate::usage_metrics_from_sse_response_body(&body_bytes) {
-                        crate::record_grok_success(&state_clone, &context_clone, &usage);
-                    }
-                });
+                        let body_bytes = Bytes::from(buffer);
+                        if let Some(usage) =
+                            crate::usage_metrics_from_sse_response_body(&body_bytes)
+                        {
+                            crate::record_grok_success(&state_clone, &context_clone, &usage);
+                        }
+                    });
 
-                let stream_body = Body::from_stream(rx_stream(rx));
-                let mut response = (
-                    StatusCode::OK,
-                    [("Content-Type", "text/event-stream")],
-                    stream_body,
-                )
-                    .into_response();
-                let response_headers = response.headers_mut();
-                for (k, v) in rl_headers {
-                    response_headers.insert(k, v);
+                    let stream_body = Body::from_stream(rx_stream(rx));
+                    let mut response = (
+                        StatusCode::OK,
+                        [("Content-Type", "text/event-stream")],
+                        stream_body,
+                    )
+                        .into_response();
+                    let response_headers = response.headers_mut();
+                    for (k, v) in rl_headers {
+                        response_headers.insert(k, v);
+                    }
+                    return response;
+                } else {
+                    let rl_headers = forwarded_ratelimit_headers(resp.headers());
+                    let body_bytes = resp.bytes().await.unwrap_or_default();
+                    let response_value: serde_json::Value =
+                        serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
+                    let usage = crate::usage_metrics_from_response_value(&response_value);
+                    crate::record_grok_success(&state, &context, &usage);
+                    let effective_model = response_value
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or(model.as_str());
+                    persist_runtime_metadata(
+                        &state,
+                        account,
+                        Some(effective_model),
+                        &rate_limits,
+                        "",
+                    );
+                    let mut response = (
+                        StatusCode::OK,
+                        [("Content-Type", "application/json")],
+                        body_bytes,
+                    )
+                        .into_response();
+                    let response_headers = response.headers_mut();
+                    for (k, v) in rl_headers {
+                        response_headers.insert(k, v);
+                    }
+                    return response;
                 }
-                response
-            } else {
-                let rl_headers = forwarded_ratelimit_headers(resp.headers());
-                let body_bytes = resp.bytes().await.unwrap_or_default();
-                let response_value: serde_json::Value =
-                    serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
-                let usage = crate::usage_metrics_from_response_value(&response_value);
-                crate::record_grok_success(&state, &context, &usage);
-                let effective_model = response_value
-                    .get("model")
-                    .and_then(|v| v.as_str())
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or(model.as_str());
-                persist_runtime_metadata(&state, &account, Some(effective_model), &rate_limits, "");
-                let mut response = (
-                    StatusCode::OK,
-                    [("Content-Type", "application/json")],
-                    body_bytes,
-                )
-                    .into_response();
-                let response_headers = response.headers_mut();
-                for (k, v) in rl_headers {
-                    response_headers.insert(k, v);
+            }
+            Err(err) => {
+                let message = format!("grok upstream unavailable: {}", err);
+                crate::record_grok_error(&state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
                 }
-                response
+                break;
             }
         }
-        Err(err) => {
-            let message = format!("grok upstream unavailable: {}", err);
-            crate::record_grok_error(&state, &context, &message);
-            (
-                StatusCode::BAD_GATEWAY,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    &format!("grok upstream unavailable: {}", err),
-                    "server_error",
-                    None,
-                ),
-            )
-                .into_response()
-        }
     }
+
+    let (status, message) = last_error.unwrap_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "All Grok accounts failed".to_string(),
+        )
+    });
+    (
+        status,
+        [("Content-Type", "application/json")],
+        crate::source::v1::response::openai_error_body(
+            &format!("All Grok accounts failed; last error: {}", message),
+            "server_error",
+            None,
+        ),
+    )
+        .into_response()
 }
 
 /// Returns the `x-ratelimit-*` headers from the upstream response, ready to be
@@ -381,29 +417,6 @@ async fn proxy_simple(
             .into_response();
     }
 
-    let account = match super::accounts::pick_account(state) {
-        Some(a) => a,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    "No Grok accounts configured",
-                    "server_error",
-                    None,
-                ),
-            )
-                .into_response();
-        }
-    };
-
-    let upstream_base = account
-        .api_base_url
-        .as_deref()
-        .unwrap_or(DEFAULT_BASE_URL)
-        .trim_end_matches('/');
-    let upstream_url = format!("{}/{}", upstream_base, upstream_suffix);
-
     let parsed_body: Option<serde_json::Value> = serde_json::from_slice(body).ok();
     let model = parsed_body
         .as_ref()
@@ -412,82 +425,124 @@ async fn proxy_simple(
         .as_ref()
         .map(crate::prompt_metrics_from_request_value)
         .unwrap_or_default();
-    let context = crate::grok_usage_context(
-        &account,
-        model.clone(),
-        &format!("/grok/v1/{}", upstream_suffix),
-        prompt_metrics,
-    );
-    crate::record_request_started(state, &context);
 
-    match state
-        .client
-        .post(&upstream_url)
-        .header(
-            "Authorization",
-            format!("{} {}", account.token_type, account.access_token),
+    let accounts = super::accounts::candidate_accounts(state);
+    if accounts.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Content-Type", "application/json")],
+            crate::source::v1::response::openai_error_body(
+                "No Grok accounts configured",
+                "server_error",
+                None,
+            ),
         )
-        .header("Content-Type", "application/json")
-        .body(body.to_vec())
-        .timeout(Duration::from_secs(180))
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            let status = resp.status();
-            let rate_limits = super::auth::extract_rate_limits(resp.headers());
-            if !status.is_success() {
-                persist_runtime_metadata(
-                    state,
-                    &account,
-                    model.as_deref(),
-                    &rate_limits,
-                    "after error",
-                );
-                let err_body = resp.text().await.unwrap_or_default();
-                crate::record_grok_error(state, &context, &err_body);
-                let body_bytes = Bytes::from(err_body);
-                return (
-                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            .into_response();
+    }
+
+    let mut last_error: Option<(StatusCode, String)> = None;
+    for (attempt_idx, account) in accounts.iter().enumerate() {
+        let upstream_base = account
+            .api_base_url
+            .as_deref()
+            .unwrap_or(DEFAULT_BASE_URL)
+            .trim_end_matches('/');
+        let upstream_url = format!("{}/{}", upstream_base, upstream_suffix);
+        let context = crate::grok_usage_context(
+            account,
+            model.clone(),
+            &format!("/grok/v1/{}", upstream_suffix),
+            prompt_metrics.clone(),
+        );
+        crate::record_request_started(state, &context);
+
+        match state
+            .client
+            .post(&upstream_url)
+            .header(
+                "Authorization",
+                format!("{} {}", account.token_type, account.access_token),
+            )
+            .header("Content-Type", "application/json")
+            .body(body.to_vec())
+            .timeout(Duration::from_secs(180))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                let rate_limits = super::auth::extract_rate_limits(resp.headers());
+                if !status.is_success() {
+                    persist_runtime_metadata(
+                        state,
+                        account,
+                        model.as_deref(),
+                        &rate_limits,
+                        "after error",
+                    );
+                    let err_body = resp.text().await.unwrap_or_default();
+                    crate::record_grok_error(state, &context, &err_body);
+                    if attempt_idx + 1 < accounts.len()
+                        && crate::should_retry_account_error(status, &err_body)
+                    {
+                        last_error = Some((status, err_body));
+                        continue;
+                    }
+                    let body_bytes = Bytes::from(err_body);
+                    return (
+                        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                        [("Content-Type", "application/json")],
+                        crate::source::v1::response::upstream_error_to_openai(status, &body_bytes),
+                    )
+                        .into_response();
+                }
+                persist_runtime_metadata(state, account, model.as_deref(), &rate_limits, "");
+                let rl_headers = forwarded_ratelimit_headers(resp.headers());
+                let body_bytes = resp.bytes().await.unwrap_or_default();
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                    let usage = crate::usage_metrics_from_response_value(&v);
+                    crate::record_grok_success(state, &context, &usage);
+                }
+                let mut response = (
+                    StatusCode::OK,
                     [("Content-Type", "application/json")],
-                    crate::source::v1::response::upstream_error_to_openai(status, &body_bytes),
+                    body_bytes,
                 )
                     .into_response();
+                let h = response.headers_mut();
+                for (k, v) in rl_headers {
+                    h.insert(k, v);
+                }
+                return response;
             }
-            persist_runtime_metadata(state, &account, model.as_deref(), &rate_limits, "");
-            let rl_headers = forwarded_ratelimit_headers(resp.headers());
-            let body_bytes = resp.bytes().await.unwrap_or_default();
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-                let usage = crate::usage_metrics_from_response_value(&v);
-                crate::record_grok_success(state, &context, &usage);
+            Err(err) => {
+                let message = format!("grok upstream unavailable: {}", err);
+                crate::record_grok_error(state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
             }
-            let mut response = (
-                StatusCode::OK,
-                [("Content-Type", "application/json")],
-                body_bytes,
-            )
-                .into_response();
-            let h = response.headers_mut();
-            for (k, v) in rl_headers {
-                h.insert(k, v);
-            }
-            response
-        }
-        Err(err) => {
-            let message = format!("grok upstream unavailable: {}", err);
-            crate::record_grok_error(state, &context, &message);
-            (
-                StatusCode::BAD_GATEWAY,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    &format!("grok upstream unavailable: {}", err),
-                    "server_error",
-                    None,
-                ),
-            )
-                .into_response()
         }
     }
+
+    let (status, message) = last_error.unwrap_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "All Grok accounts failed".to_string(),
+        )
+    });
+    (
+        status,
+        [("Content-Type", "application/json")],
+        crate::source::v1::response::openai_error_body(
+            &format!("All Grok accounts failed; last error: {}", message),
+            "server_error",
+            None,
+        ),
+    )
+        .into_response()
 }
 
 fn rx_stream(

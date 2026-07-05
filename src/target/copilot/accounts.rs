@@ -220,22 +220,27 @@ pub fn reload_state(state: &crate::AppState) {
     crate::sync_usage_stats(state);
 }
 
-pub fn pick_account(state: &crate::AppState) -> Option<CopilotAccount> {
+pub fn candidate_accounts(state: &crate::AppState) -> Vec<CopilotAccount> {
     let mut idx = state.copilot_rr.lock().unwrap();
     let accounts = state.copilot_accounts.lock().unwrap().clone();
     if accounts.is_empty() {
-        return None;
+        return Vec::new();
     }
 
     let len = accounts.len();
-    let picked_idx = crate::select_best_account_index(
+    let picked_indices = crate::select_ordered_account_indices(
         len,
         *idx,
         |candidate_idx| accounts[candidate_idx].enabled,
         |candidate_idx| crate::copilot_account_selection_score(state, &accounts[candidate_idx]),
-    )?;
-    *idx = (picked_idx + 1) % len;
-    Some(accounts[picked_idx].clone())
+    );
+    if let Some(picked_idx) = picked_indices.first() {
+        *idx = (picked_idx + 1) % len;
+    }
+    picked_indices
+        .into_iter()
+        .map(|candidate_idx| accounts[candidate_idx].clone())
+        .collect()
 }
 
 pub fn first_enabled(state: &crate::AppState) -> Option<CopilotAccount> {

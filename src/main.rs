@@ -11,6 +11,7 @@ use bytes::{Bytes, BytesMut};
 use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
     path::PathBuf,
@@ -794,33 +795,6 @@ async fn dashboard() -> impl IntoResponse {
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-      }
-      .attention-panel {
-        margin: 0 0 14px 0;
-        padding: 12px 14px;
-        border: 1px solid rgba(245, 158, 11, 0.42);
-        border-radius: 8px;
-        background: rgba(245, 158, 11, 0.08);
-      }
-      .attention-title {
-        margin-bottom: 6px;
-        font-weight: 800;
-      }
-      .attention-list {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 6px;
-      }
-      .attention-chip {
-        display: inline-flex;
-        align-items: center;
-        min-height: 28px;
-        padding: 4px 8px;
-        border: 1px solid var(--border);
-        border-radius: 999px;
-        background: var(--surface);
-        color: var(--text);
-        font-size: 12px;
       }
       .chart-section {
         margin: 14px 0 18px 0;
@@ -1767,10 +1741,6 @@ async fn dashboard() -> impl IntoResponse {
           <div id="overviewAttentionNote" class="overview-note">Loading status</div>
         </div>
       </section>
-      <section id="attentionPanel" class="attention-panel" aria-live="polite" hidden>
-        <div class="attention-title">Attention needed</div>
-        <div id="attentionList" class="attention-list"></div>
-      </section>
       <details id="chartDetails" class="chart-section" open>
         <summary class="chart-header">
           <span class="chart-title-row">
@@ -2280,9 +2250,6 @@ async fn dashboard() -> impl IntoResponse {
         });
         return out;
       }
-      function renderAttentionChip(text, extraClass) {
-        return '<span class="attention-chip' + (extraClass ? ' ' + escapeHtml(extraClass) : '') + '">' + escapeHtml(text) + '</span>';
-      }
       function updateOverview() {
         const accounts = allAccountsWithProvider();
         const totalAccounts = accounts.length;
@@ -2291,10 +2258,7 @@ async fn dashboard() -> impl IntoResponse {
         const attentionItems = accounts.map(function(item) {
           return { item: item, reasons: accountAttentionReasons(item) };
         }).filter(function(entry) { return entry.reasons.length > 0; });
-        const disabled = attentionItems.filter(function(entry) { return entry.reasons.indexOf('disabled') !== -1; }).length;
-        const expired = attentionItems.filter(function(entry) { return entry.reasons.indexOf('expired tokens') !== -1; }).length;
         const errorAccounts = attentionItems.filter(function(entry) { return entry.reasons.indexOf('errors') !== -1; }).length;
-        const nearQuota = attentionItems.filter(function(entry) { return entry.reasons.indexOf('near quota') !== -1; }).length;
         const attentionCount = attentionItems.length;
         setText('overviewRequests', formatNumber(dashboardState.totalRequests));
         setText('overviewErrors', formatNumber(dashboardState.totalErrors));
@@ -2306,22 +2270,6 @@ async fn dashboard() -> impl IntoResponse {
         setText('pageSubtitle', totalAccounts
           ? totalAccounts + ' accounts across ' + providersWithAccounts + ' providers'
           : 'No accounts loaded yet');
-        const panel = document.getElementById('attentionPanel');
-        const list = document.getElementById('attentionList');
-        if (!panel || !list) return;
-        const chips = [];
-        if (attentionCount) chips.push(renderAttentionChip(attentionCount + ' accounts need review'));
-        if (disabled) chips.push(renderAttentionChip(disabled + ' disabled'));
-        if (expired) chips.push(renderAttentionChip(expired + ' expired tokens'));
-        if (nearQuota) chips.push(renderAttentionChip(nearQuota + ' near quota'));
-        if (errorAccounts) chips.push(renderAttentionChip(errorAccounts + ' errors'));
-        if (!chips.length) {
-          panel.hidden = true;
-          list.innerHTML = '';
-          return;
-        }
-        panel.hidden = false;
-        list.innerHTML = chips.join('');
       }
       function notify(message, tone) {
         const toast = document.getElementById('toast');
@@ -6800,10 +6748,8 @@ async fn proxy(
         | TargetModel::CodexModels
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
-    let session_id = Uuid::new_v4().to_string();
-
-    let picked = pick_token(&state);
-    if picked.is_none() {
+    let token_candidates = candidate_tokens(&state);
+    if token_candidates.is_empty() {
         return if matches!(source_api, SourceApi::V1) {
             (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -6822,90 +6768,150 @@ async fn proxy(
                 .into_response()
         };
     }
-    let (_token_idx, token) = picked.unwrap();
-    let codex_context = {
-        let request_value: Option<serde_json::Value> =
-            serde_json::from_slice(&routed.upstream_body).ok();
-        let prompt = request_value
-            .as_ref()
-            .map(prompt_metrics_from_request_value)
-            .unwrap_or_default();
-        let model = request_value.as_ref().and_then(model_from_request_value);
-        codex_usage_context(&token, model, routed.upstream_path.clone(), prompt)
-    };
-    record_codex_request(&state, &codex_context);
-    let body_bytes = match routed.target {
-        TargetModel::Codex => target::codex::gateway::build_request_body(
+    let request_value: Option<serde_json::Value> =
+        serde_json::from_slice(&routed.upstream_body).ok();
+    let prompt = request_value
+        .as_ref()
+        .map(prompt_metrics_from_request_value)
+        .unwrap_or_default();
+    let model = request_value.as_ref().and_then(model_from_request_value);
+    let mut last_error: Option<(StatusCode, String)> = None;
+    let mut selected_response = None;
+
+    for (attempt_idx, (_token_idx, token)) in token_candidates.iter().enumerate() {
+        let session_id = Uuid::new_v4().to_string();
+        let codex_context = codex_usage_context(
+            token,
+            model.clone(),
+            routed.upstream_path.clone(),
+            prompt.clone(),
+        );
+        record_codex_request(&state, &codex_context);
+
+        let body_bytes = target::codex::gateway::build_request_body(
             &method,
             &routed.upstream_path,
             &headers,
-            routed.upstream_body,
+            routed.upstream_body.clone(),
             &session_id,
-        ),
-        TargetModel::Antigravity
-        | TargetModel::Gemini
-        | TargetModel::Qwen
-        | TargetModel::DeepSeek
-        | TargetModel::Grok
-        | TargetModel::MiniMax
-        | TargetModel::Copilot
-        | TargetModel::Claude
-        | TargetModel::Custom
-        | TargetModel::CodexModels
-        | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
-    };
-    let mut req = state
-        .client
-        .request(method.clone(), upstream)
-        .body(body_bytes);
+        );
+        let mut req = state
+            .client
+            .request(method.clone(), upstream.clone())
+            .body(body_bytes);
 
-    // Copy headers except hop-by-hop/auth and proxy-edge client headers; set upstream auth
-    for (k, v) in headers.iter() {
-        if should_drop_incoming_header(k.as_str()) {
-            continue;
+        // Copy headers except hop-by-hop/auth and proxy-edge client headers; set upstream auth
+        for (k, v) in headers.iter() {
+            if should_drop_incoming_header(k.as_str()) {
+                continue;
+            }
+            req = req.header(k, v);
         }
-        req = req.header(k, v);
-    }
-    req = req.header("Authorization", format!("Bearer {}", token.token));
-    req = match routed.target {
-        TargetModel::Codex => target::codex::gateway::apply_default_headers(
+        req = req.header("Authorization", format!("Bearer {}", token.token));
+        req = target::codex::gateway::apply_default_headers(
             req,
             &headers,
             token.account_id.as_deref(),
             &session_id,
-        ),
-        TargetModel::Antigravity
-        | TargetModel::Gemini
-        | TargetModel::Qwen
-        | TargetModel::DeepSeek
-        | TargetModel::Grok
-        | TargetModel::MiniMax
-        | TargetModel::Copilot
-        | TargetModel::Claude
-        | TargetModel::Custom
-        | TargetModel::CodexModels
-        | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
-    };
+        );
 
-    let resp = match req.send().await {
-        Ok(r) => r,
-        Err(err) => {
-            error!("upstream error: {}", err);
-            record_codex_error(&state, &codex_context, "upstream send failed");
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(err) => {
+                let message = format!("upstream send failed: {}", err);
+                error!("upstream error: {}", err);
+                record_codex_error(&state, &codex_context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < token_candidates.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        let status = resp.status();
+        if status.as_u16() >= 400 {
+            record_codex_error(
+                &state,
+                &codex_context,
+                format!("upstream status {}", status),
+            );
+            let mut out_headers = HeaderMap::new();
+            for (k, v) in resp.headers().iter() {
+                let name = k.as_str().to_ascii_lowercase();
+                if is_hop_header(&name) || name == "content-encoding" || name == "content-length" {
+                    continue;
+                }
+                out_headers.insert(k, v.clone());
+            }
+            let body_bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(err) => {
+                    let message = format!("upstream error body read failed: {}", err);
+                    error!("{}", message);
+                    last_error = Some((StatusCode::BAD_GATEWAY, message));
+                    if attempt_idx + 1 < token_candidates.len() {
+                        continue;
+                    }
+                    break;
+                }
+            };
+            let message = String::from_utf8_lossy(&body_bytes).to_string();
+            if attempt_idx + 1 < token_candidates.len()
+                && should_retry_account_error(status, &message)
+            {
+                last_error = Some((status, message));
+                continue;
+            }
             return if matches!(source_api, SourceApi::V1) {
+                let mut headers = out_headers;
+                headers.insert(
+                    axum::http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
                 (
-                    StatusCode::BAD_GATEWAY,
-                    [(
-                        axum::http::header::CONTENT_TYPE.as_str(),
-                        "application/json",
-                    )],
-                    openai_error_body("Upstream error", "server_error", None),
+                    status,
+                    headers,
+                    upstream_error_to_openai(status, &body_bytes),
                 )
                     .into_response()
             } else {
-                (StatusCode::BAD_GATEWAY, "upstream error").into_response()
+                (status, out_headers, body_bytes).into_response()
             };
         }
+
+        selected_response = Some((resp, codex_context));
+        break;
+    }
+
+    let Some((resp, codex_context)) = selected_response else {
+        let (_status, message) = last_error.unwrap_or_else(|| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "All Codex accounts failed".to_string(),
+            )
+        });
+        return if matches!(source_api, SourceApi::V1) {
+            (
+                StatusCode::BAD_GATEWAY,
+                [(
+                    axum::http::header::CONTENT_TYPE.as_str(),
+                    "application/json",
+                )],
+                openai_error_body(
+                    &format!("All Codex accounts failed; last error: {}", message),
+                    "server_error",
+                    None,
+                ),
+            )
+                .into_response()
+        } else {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("all upstream tokens failed; last error: {}", message),
+            )
+                .into_response()
+        };
     };
 
     let status = resp.status();
@@ -7463,6 +7469,49 @@ fn should_custom_model_fallback(status: StatusCode) -> bool {
     status.as_u16() >= 400
 }
 
+pub(crate) fn should_retry_account_error(status: StatusCode, message: &str) -> bool {
+    if matches!(
+        status,
+        StatusCode::UNAUTHORIZED
+            | StatusCode::FORBIDDEN
+            | StatusCode::REQUEST_TIMEOUT
+            | StatusCode::CONFLICT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    ) || status.is_server_error()
+    {
+        return true;
+    }
+
+    if status != StatusCode::BAD_REQUEST && status != StatusCode::PAYMENT_REQUIRED {
+        return false;
+    }
+
+    let lower = message.to_ascii_lowercase();
+    [
+        "rate limit",
+        "ratelimit",
+        "too many requests",
+        "quota",
+        "resource exhausted",
+        "insufficient_quota",
+        "capacity",
+        "overloaded",
+        "temporarily unavailable",
+        "try again later",
+        "usage limit",
+        "daily limit",
+        "weekly limit",
+        "monthly limit",
+        "requests limit",
+        "token limit exceeded",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 async fn dispatch_custom_target(
     state: AppState,
     headers: HeaderMap,
@@ -7521,111 +7570,143 @@ async fn dispatch_codex_custom_target(
 ) -> axum::response::Response {
     let upstream =
         target::codex::gateway::build_upstream_url(&state.cfg.upstream_base, upstream_path, None);
-    let Some((_token_idx, token)) = pick_token(&state) else {
+    let token_candidates = candidate_tokens(&state);
+    if token_candidates.is_empty() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [("Content-Type", "application/json")],
             openai_error_body("No upstream credentials configured", "server_error", None),
         )
             .into_response();
-    };
+    }
     let request_value: Option<serde_json::Value> = serde_json::from_slice(&body).ok();
     let model = request_value.as_ref().and_then(model_from_request_value);
-    let context = codex_usage_context(
-        &token,
-        model,
-        upstream_path.to_string(),
-        request_value
-            .as_ref()
-            .map(prompt_metrics_from_request_value)
-            .unwrap_or_default(),
-    );
-    record_codex_request(&state, &context);
+    let prompt = request_value
+        .as_ref()
+        .map(prompt_metrics_from_request_value)
+        .unwrap_or_default();
+    let mut last_error: Option<(StatusCode, String)> = None;
 
-    let session_id = Uuid::new_v4().to_string();
-    let body = target::codex::gateway::build_request_body(
-        &Method::POST,
-        upstream_path,
-        &headers,
-        body,
-        &session_id,
-    );
-    let mut req = state.client.request(Method::POST, upstream);
-    for (key, value) in headers.iter() {
-        if should_drop_incoming_header(key.as_str()) {
-            continue;
-        }
-        req = req.header(key, value);
-    }
-    req = req.header("Authorization", format!("Bearer {}", token.token));
-    req = target::codex::gateway::apply_default_headers(
-        req,
-        &headers,
-        token.account_id.as_deref(),
-        &session_id,
-    );
+    for (attempt_idx, (_token_idx, token)) in token_candidates.iter().enumerate() {
+        let context = codex_usage_context(
+            token,
+            model.clone(),
+            upstream_path.to_string(),
+            prompt.clone(),
+        );
+        record_codex_request(&state, &context);
 
-    let resp = match req.body(body).send().await {
-        Ok(resp) => resp,
-        Err(err) => {
-            record_codex_error(&state, &context, err.to_string());
-            return (
-                StatusCode::BAD_GATEWAY,
-                [("Content-Type", "application/json")],
-                openai_error_body("Upstream error", "server_error", None),
-            )
-                .into_response();
+        let session_id = Uuid::new_v4().to_string();
+        let request_body = target::codex::gateway::build_request_body(
+            &Method::POST,
+            upstream_path,
+            &headers,
+            body.clone(),
+            &session_id,
+        );
+        let mut req = state.client.request(Method::POST, upstream.clone());
+        for (key, value) in headers.iter() {
+            if should_drop_incoming_header(key.as_str()) {
+                continue;
+            }
+            req = req.header(key, value);
         }
-    };
-    let status = resp.status();
-    let mut out_headers = HeaderMap::new();
-    for (key, value) in resp.headers().iter() {
-        let name = key.as_str().to_ascii_lowercase();
-        if !is_hop_header(&name) && name != "content-encoding" && name != "content-length" {
-            out_headers.insert(key.clone(), value.clone());
+        req = req.header("Authorization", format!("Bearer {}", token.token));
+        req = target::codex::gateway::apply_default_headers(
+            req,
+            &headers,
+            token.account_id.as_deref(),
+            &session_id,
+        );
+
+        let resp = match req.body(request_body).send().await {
+            Ok(resp) => resp,
+            Err(err) => {
+                let message = format!("Upstream error: {}", err);
+                record_codex_error(&state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < token_candidates.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+        let status = resp.status();
+        let mut out_headers = HeaderMap::new();
+        for (key, value) in resp.headers().iter() {
+            let name = key.as_str().to_ascii_lowercase();
+            if !is_hop_header(&name) && name != "content-encoding" && name != "content-length" {
+                out_headers.insert(key.clone(), value.clone());
+            }
         }
-    }
-    let body_bytes = match resp.bytes().await {
-        Ok(body) => body,
-        Err(err) => {
-            record_codex_error(&state, &context, err.to_string());
-            return (
-                StatusCode::BAD_GATEWAY,
-                [("Content-Type", "application/json")],
-                openai_error_body("Upstream error", "server_error", None),
-            )
-                .into_response();
-        }
-    };
-    if status.is_success() {
-        let is_sse = out_headers
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.contains("text/event-stream"))
-            .unwrap_or(false);
-        if is_sse {
-            if let Some(metrics) = usage_metrics_from_sse_response_body(&body_bytes) {
+        let body_bytes = match resp.bytes().await {
+            Ok(body) => body,
+            Err(err) => {
+                let message = format!("Upstream error: {}", err);
+                record_codex_error(&state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < token_candidates.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+        if status.is_success() {
+            let is_sse = out_headers
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.contains("text/event-stream"))
+                .unwrap_or(false);
+            if is_sse {
+                if let Some(metrics) = usage_metrics_from_sse_response_body(&body_bytes) {
+                    record_usage_success(&state, &context, &metrics);
+                }
+                if matches!(response_mode, ResponseMode::SseToJson) {
+                    out_headers.insert(
+                        axum::http::header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    );
+                    return (status, out_headers, sse_to_response_json(&body_bytes))
+                        .into_response();
+                }
+            } else {
+                let value = serde_json::from_slice::<serde_json::Value>(&body_bytes).ok();
+                let metrics = value
+                    .as_ref()
+                    .map(usage_metrics_from_response_value)
+                    .unwrap_or_default();
                 record_usage_success(&state, &context, &metrics);
             }
-            if matches!(response_mode, ResponseMode::SseToJson) {
-                out_headers.insert(
-                    axum::http::header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/json"),
-                );
-                return (status, out_headers, sse_to_response_json(&body_bytes)).into_response();
-            }
+            return (status, out_headers, body_bytes).into_response();
         } else {
-            let value = serde_json::from_slice::<serde_json::Value>(&body_bytes).ok();
-            let metrics = value
-                .as_ref()
-                .map(usage_metrics_from_response_value)
-                .unwrap_or_default();
-            record_usage_success(&state, &context, &metrics);
+            let message = String::from_utf8_lossy(&body_bytes).to_string();
+            record_codex_error(&state, &context, format!("upstream status {}", status));
+            if attempt_idx + 1 < token_candidates.len()
+                && should_retry_account_error(status, &message)
+            {
+                last_error = Some((status, message));
+                continue;
+            }
+            return (status, out_headers, body_bytes).into_response();
         }
-    } else {
-        record_codex_error(&state, &context, format!("upstream status {}", status));
     }
-    (status, out_headers, body_bytes).into_response()
+
+    let (_status, message) = last_error.unwrap_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "All Codex accounts failed".to_string(),
+        )
+    });
+    (
+        StatusCode::BAD_GATEWAY,
+        [("Content-Type", "application/json")],
+        openai_error_body(
+            &format!("All Codex accounts failed; last error: {}", message),
+            "server_error",
+            None,
+        ),
+    )
+        .into_response()
 }
 
 async fn codex_models_response(state: AppState, headers: HeaderMap) -> axum::response::Response {
@@ -9052,6 +9133,18 @@ pub(crate) struct AccountSelectionScore {
 
 impl AccountSelectionScore {
     pub(crate) fn is_better_than(&self, other: &Self) -> bool {
+        if self.is_quota_exhausted() != other.is_quota_exhausted() {
+            return !self.is_quota_exhausted();
+        }
+
+        if self.historical_tokens != other.historical_tokens {
+            return self.historical_tokens < other.historical_tokens;
+        }
+
+        if self.historical_requests != other.historical_requests {
+            return self.historical_requests < other.historical_requests;
+        }
+
         match (self.quota_pressure, other.quota_pressure) {
             (Some(candidate), Some(current)) => {
                 let diff = candidate - current;
@@ -9068,44 +9161,52 @@ impl AccountSelectionScore {
             _ => {}
         }
 
-        if self.historical_tokens != other.historical_tokens {
-            return self.historical_tokens < other.historical_tokens;
-        }
-        self.historical_requests < other.historical_requests
+        false
+    }
+
+    fn is_quota_exhausted(&self) -> bool {
+        self.quota_pressure
+            .map(|value| value.is_infinite() && value.is_sign_positive())
+            .unwrap_or(false)
     }
 }
 
-pub(crate) fn select_best_account_index<FEnabled, FScore>(
+pub(crate) fn select_ordered_account_indices<FEnabled, FScore>(
     len: usize,
     start_idx: usize,
     mut is_enabled: FEnabled,
     mut score_for: FScore,
-) -> Option<usize>
+) -> Vec<usize>
 where
     FEnabled: FnMut(usize) -> bool,
     FScore: FnMut(usize) -> AccountSelectionScore,
 {
     if len == 0 {
-        return None;
+        return Vec::new();
     }
 
-    let mut best: Option<(usize, AccountSelectionScore)> = None;
+    let mut candidates = Vec::new();
     for offset in 0..len {
         let candidate_idx = (start_idx + offset) % len;
         if !is_enabled(candidate_idx) {
             continue;
         }
-        let candidate_score = score_for(candidate_idx);
-        if best
-            .as_ref()
-            .map(|(_, best_score)| candidate_score.is_better_than(best_score))
-            .unwrap_or(true)
-        {
-            best = Some((candidate_idx, candidate_score));
-        }
+        candidates.push((candidate_idx, offset, score_for(candidate_idx)));
     }
 
-    best.map(|(idx, _)| idx)
+    candidates.sort_by(
+        |(_, left_offset, left_score), (_, right_offset, right_score)| {
+            if left_score.is_better_than(right_score) {
+                Ordering::Less
+            } else if right_score.is_better_than(left_score) {
+                Ordering::Greater
+            } else {
+                left_offset.cmp(right_offset)
+            }
+        },
+    );
+
+    candidates.into_iter().map(|(idx, _, _)| idx).collect()
 }
 
 fn quota_cache_key(file_name: Option<&str>, label: &str) -> String {
@@ -9796,21 +9897,30 @@ fn require_admin_session_text(state: &AppState, headers: &HeaderMap) -> Option<R
     )
 }
 
-fn pick_token(state: &AppState) -> Option<(usize, UpstreamToken)> {
+fn candidate_tokens(state: &AppState) -> Vec<(usize, UpstreamToken)> {
     let mut idx = state.rr.lock().unwrap();
     let tokens = state.tokens.lock().unwrap().clone();
     if tokens.is_empty() {
-        return None;
+        return Vec::new();
     }
     let len = tokens.len();
-    let picked_idx = select_best_account_index(
+    let picked_indices = select_ordered_account_indices(
         len,
         *idx,
         |candidate_idx| tokens[candidate_idx].enabled,
         |candidate_idx| codex_token_selection_score(state, candidate_idx, &tokens[candidate_idx]),
-    )?;
-    *idx = (picked_idx + 1) % len;
-    Some((picked_idx, tokens[picked_idx].clone()))
+    );
+    if let Some(picked_idx) = picked_indices.first() {
+        *idx = (picked_idx + 1) % len;
+    }
+    picked_indices
+        .into_iter()
+        .map(|candidate_idx| (candidate_idx, tokens[candidate_idx].clone()))
+        .collect()
+}
+
+fn pick_token(state: &AppState) -> Option<(usize, UpstreamToken)> {
+    candidate_tokens(state).into_iter().next()
 }
 
 fn update_account_counters(
@@ -10550,10 +10660,10 @@ mod codex_provider_model_tests {
 
 #[cfg(test)]
 mod account_selection_tests {
-    use super::{select_best_account_index, AccountSelectionScore};
+    use super::{select_ordered_account_indices, AccountSelectionScore};
 
     #[test]
-    fn quota_pressure_wins_when_both_accounts_have_quota_data() {
+    fn historical_usage_wins_before_non_exhausted_quota_pressure() {
         let scores = [
             AccountSelectionScore {
                 quota_pressure: Some(81.0),
@@ -10567,9 +10677,35 @@ mod account_selection_tests {
             },
         ];
 
-        let picked =
-            select_best_account_index(2, 0, |_| true, |idx| scores[idx]).expect("picked account");
-        assert_eq!(picked, 1);
+        let picked = select_ordered_account_indices(2, 0, |_| true, |idx| scores[idx])
+            .into_iter()
+            .next()
+            .expect("picked account");
+        assert_eq!(picked, 0);
+    }
+
+    #[test]
+    fn exhausted_quota_accounts_are_ordered_after_available_accounts() {
+        let scores = [
+            AccountSelectionScore {
+                quota_pressure: Some(f64::INFINITY),
+                historical_tokens: 1,
+                historical_requests: 1,
+            },
+            AccountSelectionScore {
+                quota_pressure: Some(90.0),
+                historical_tokens: 10_000,
+                historical_requests: 100,
+            },
+            AccountSelectionScore {
+                quota_pressure: Some(f64::INFINITY),
+                historical_tokens: 2,
+                historical_requests: 2,
+            },
+        ];
+
+        let order = select_ordered_account_indices(3, 0, |_| true, |idx| scores[idx]);
+        assert_eq!(order, vec![1, 0, 2]);
     }
 
     #[test]
@@ -10587,8 +10723,10 @@ mod account_selection_tests {
             },
         ];
 
-        let picked =
-            select_best_account_index(2, 1, |_| true, |idx| scores[idx]).expect("picked account");
+        let picked = select_ordered_account_indices(2, 1, |_| true, |idx| scores[idx])
+            .into_iter()
+            .next()
+            .expect("picked account");
         assert_eq!(picked, 1);
     }
 
@@ -10607,7 +10745,9 @@ mod account_selection_tests {
             },
         ];
 
-        let picked = select_best_account_index(2, 0, |idx| idx == 1, |idx| scores[idx])
+        let picked = select_ordered_account_indices(2, 0, |idx| idx == 1, |idx| scores[idx])
+            .into_iter()
+            .next()
             .expect("picked account");
         assert_eq!(picked, 1);
     }

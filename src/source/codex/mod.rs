@@ -42,7 +42,7 @@ pub fn route_to_target(
                     body,
                 ));
             }
-            let body = normalize_codex_provider_body(target, body);
+            let body = normalize_codex_provider_body(body);
             return Ok(crate::source::v1::provider::convert(
                 target,
                 upstream_path,
@@ -55,7 +55,7 @@ pub fn route_to_target(
     Ok(codex::convert(upstream_path, uri, method, headers, body))
 }
 
-fn normalize_codex_provider_body(target: TargetModel, body: Bytes) -> Bytes {
+fn normalize_codex_provider_body(body: Bytes) -> Bytes {
     let Ok(Value::Object(input)) = serde_json::from_slice::<Value>(&body) else {
         return body;
     };
@@ -79,14 +79,6 @@ fn normalize_codex_provider_body(target: TargetModel, body: Bytes) -> Bytes {
     copy_json_field(&input, &mut output, "reasoning_effort");
     copy_json_field(&input, &mut output, "text");
     copy_json_field(&input, &mut output, "response_format");
-
-    if matches!(target, TargetModel::Gemini | TargetModel::Antigravity)
-        && !output.contains_key("messages")
-    {
-        if let Some(messages) = codex_input_to_messages(input.get("input")) {
-            output.insert("messages".to_string(), Value::Array(messages));
-        }
-    }
 
     serde_json::to_vec(&Value::Object(output))
         .map(Bytes::from)
@@ -142,83 +134,6 @@ fn copy_json_field_object(input: &Value, output: &mut Map<String, Value>, name: 
     }
 }
 
-fn codex_input_to_messages(input: Option<&Value>) -> Option<Vec<Value>> {
-    let items = input?.as_array()?;
-    let mut messages = Vec::new();
-    for item in items {
-        let role = item
-            .get("role")
-            .and_then(|value| value.as_str())
-            .unwrap_or("user");
-        if let Some(text) = extract_text(item) {
-            messages.push(serde_json::json!({
-                "role": role,
-                "content": text
-            }));
-        }
-    }
-    if messages.is_empty() {
-        None
-    } else {
-        Some(messages)
-    }
-}
-
-fn extract_text(value: &Value) -> Option<String> {
-    if let Some(text) = value
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return Some(text.to_string());
-    }
-    if let Some(text) = value
-        .get("content")
-        .and_then(|content| content.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return Some(text.to_string());
-    }
-
-    let parts = value
-        .get("content")
-        .and_then(|content| content.as_array())
-        .or_else(|| value.as_array())?;
-    let mut out = String::new();
-    for part in parts {
-        let part_type = part
-            .get("type")
-            .and_then(|value| value.as_str())
-            .unwrap_or("");
-        if !matches!(
-            part_type,
-            "" | "text" | "input_text" | "output_text" | "summary_text"
-        ) {
-            continue;
-        }
-        let text = part
-            .get("text")
-            .and_then(|value| value.as_str())
-            .or_else(|| part.get("input_text").and_then(|value| value.as_str()))
-            .or_else(|| part.get("output_text").and_then(|value| value.as_str()))
-            .or_else(|| part.get("content").and_then(|value| value.as_str()))
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        if let Some(text) = text {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(text);
-        }
-    }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_responses_converts_gemini_input_array_to_messages() {
+    fn codex_responses_preserves_gemini_input_array() {
         let uri: Uri = "/codex/responses".parse().unwrap();
         let routed = route_to_target(
             "/codex/responses",
@@ -263,8 +178,9 @@ mod tests {
 
         assert_eq!(routed.target, TargetModel::Gemini);
         let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
-        assert_eq!(body["messages"][0]["role"], "user");
-        assert_eq!(body["messages"][0]["content"], "hello");
+        assert!(body.get("messages").is_none());
+        assert_eq!(body["input"][0]["role"], "user");
+        assert_eq!(body["input"][0]["content"][0]["text"], "hello");
     }
 
     #[test]
@@ -284,7 +200,8 @@ mod tests {
         assert_eq!(routed.target, TargetModel::Antigravity);
         let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
         assert_eq!(body["model"], "gemini-2.5-pro");
-        assert_eq!(body["messages"][0]["content"], "hello");
+        assert!(body.get("messages").is_none());
+        assert_eq!(body["input"][0]["content"][0]["text"], "hello");
     }
 
     #[test]

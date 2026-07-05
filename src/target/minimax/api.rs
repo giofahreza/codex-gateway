@@ -196,36 +196,11 @@ pub async fn responses(
         }
     };
 
-    let account = match super::accounts::pick_account(&state) {
-        Some(account) => account,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    "No MiniMax accounts configured",
-                    "server_error",
-                    None,
-                ),
-            )
-                .into_response();
-        }
-    };
-    let context = crate::minimax_usage_context(
-        &account,
-        Some(model.clone()),
-        "/minimax/v1/chat/completions",
-        crate::prompt_metrics_from_request_value(&raw),
-    );
-    crate::record_minimax_request(&state, &context);
-
-    let base_url = normalize_base_url(account.base_url.as_deref());
     let wants_stream = crate::source::wants_stream(&headers, &body);
 
     let chat_payload = match build_chat_completions_payload(&raw, &model) {
         Ok(payload) => payload,
         Err(err) => {
-            crate::record_minimax_error(&state, &context, &err);
             return (
                 StatusCode::BAD_REQUEST,
                 [("Content-Type", "application/json")],
@@ -235,72 +210,13 @@ pub async fn responses(
         }
     };
 
-    if wants_stream {
-        return stream_chat_completions(
-            &state,
-            &account.api_key,
-            &base_url,
-            &chat_payload,
-            &context,
-            &model,
-            &headers,
-        )
-        .await;
-    }
-
-    let resp = match state
-        .client
-        .post(chat_completions_url(&base_url))
-        .header(
-            "Authorization",
-            format!("Bearer {}", account.api_key.trim()),
-        )
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .body(chat_payload.to_string())
-        .timeout(Duration::from_secs(180))
-        .send()
-        .await
-    {
-        Ok(resp) => resp,
-        Err(err) => {
-            let message = format!("MiniMax request failed: {}", err);
-            crate::record_minimax_error(&state, &context, &message);
-            return (
-                StatusCode::BAD_GATEWAY,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(&message, "server_error", None),
-            )
-                .into_response();
-        }
-    };
-
-    let status = resp.status();
-    let text = match resp.text().await {
-        Ok(text) => text,
-        Err(err) => {
-            let message = format!("MiniMax body read failed: {}", err);
-            crate::record_minimax_error(&state, &context, &message);
-            return (
-                StatusCode::BAD_GATEWAY,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(&message, "server_error", None),
-            )
-                .into_response();
-        }
-    };
-
-    if !status.is_success() {
-        crate::record_minimax_error(
-            &state,
-            &context,
-            format!("MiniMax returned {}: {}", status, text),
-        );
+    let accounts = super::accounts::candidate_accounts(&state);
+    if accounts.is_empty() {
         return (
-            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
             [("Content-Type", "application/json")],
             crate::source::v1::response::openai_error_body(
-                &format!("MiniMax returned {}: {}", status, text),
+                "No MiniMax accounts configured",
                 "server_error",
                 None,
             ),
@@ -308,26 +224,162 @@ pub async fn responses(
             .into_response();
     }
 
-    let chat_response: Value = match serde_json::from_str(&text) {
-        Ok(value) => value,
-        Err(err) => {
-            let message = format!("invalid MiniMax response: {}", err);
+    let prompt_metrics = crate::prompt_metrics_from_request_value(&raw);
+    let mut last_error: Option<(StatusCode, String)> = None;
+
+    for (attempt_idx, account) in accounts.iter().enumerate() {
+        let context = crate::minimax_usage_context(
+            account,
+            Some(model.clone()),
+            "/minimax/v1/chat/completions",
+            prompt_metrics.clone(),
+        );
+        crate::record_minimax_request(&state, &context);
+
+        let base_url = normalize_base_url(account.base_url.as_deref());
+
+        if wants_stream {
+            match stream_chat_completions(
+                &state,
+                &account.api_key,
+                &base_url,
+                &chat_payload,
+                &context,
+                &model,
+                &headers,
+            )
+            .await
+            {
+                Ok(response) => return response,
+                Err((status, message)) => {
+                    crate::record_minimax_error(&state, &context, &message);
+                    if attempt_idx + 1 < accounts.len()
+                        && crate::should_retry_account_error(status, &message)
+                    {
+                        last_error = Some((status, message));
+                        continue;
+                    }
+                    return (
+                        status,
+                        [("Content-Type", "application/json")],
+                        crate::source::v1::response::openai_error_body(
+                            &message,
+                            if status.is_client_error() {
+                                "invalid_request_error"
+                            } else {
+                                "server_error"
+                            },
+                            None,
+                        ),
+                    )
+                        .into_response();
+                }
+            }
+        }
+
+        let resp = match state
+            .client
+            .post(chat_completions_url(&base_url))
+            .header(
+                "Authorization",
+                format!("Bearer {}", account.api_key.trim()),
+            )
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .body(chat_payload.to_string())
+            .timeout(Duration::from_secs(180))
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                let message = format!("MiniMax request failed: {}", err);
+                crate::record_minimax_error(&state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        let status = resp.status();
+        let text = match resp.text().await {
+            Ok(text) => text,
+            Err(err) => {
+                let message = format!("MiniMax body read failed: {}", err);
+                crate::record_minimax_error(&state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        if !status.is_success() {
+            let message = format!("MiniMax returned {}: {}", status, text);
             crate::record_minimax_error(&state, &context, &message);
+            if attempt_idx + 1 < accounts.len()
+                && crate::should_retry_account_error(status, &message)
+            {
+                last_error = Some((status, message));
+                continue;
+            }
             return (
-                StatusCode::BAD_GATEWAY,
+                status,
                 [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(&message, "server_error", None),
+                crate::source::v1::response::openai_error_body(
+                    &message,
+                    if status.is_client_error() {
+                        "invalid_request_error"
+                    } else {
+                        "server_error"
+                    },
+                    None,
+                ),
             )
                 .into_response();
         }
-    };
 
-    let response = chat_completion_to_responses(&chat_response, &model);
-    let usage = crate::usage_metrics_from_response_value(&response);
-    crate::record_minimax_success(&state, &context, &usage);
+        let chat_response: Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(err) => {
+                let message = format!("invalid MiniMax response: {}", err);
+                crate::record_minimax_error(&state, &context, &message);
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    [("Content-Type", "application/json")],
+                    crate::source::v1::response::openai_error_body(&message, "server_error", None),
+                )
+                    .into_response();
+            }
+        };
 
-    let body = serde_json::to_vec(&response).unwrap_or_default();
-    (StatusCode::OK, [("Content-Type", "application/json")], body).into_response()
+        let response = chat_completion_to_responses(&chat_response, &model);
+        let usage = crate::usage_metrics_from_response_value(&response);
+        crate::record_minimax_success(&state, &context, &usage);
+
+        let body = serde_json::to_vec(&response).unwrap_or_default();
+        return (StatusCode::OK, [("Content-Type", "application/json")], body).into_response();
+    }
+
+    let (status, message) = last_error.unwrap_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "All MiniMax accounts failed".to_string(),
+        )
+    });
+    (
+        status,
+        [("Content-Type", "application/json")],
+        crate::source::v1::response::openai_error_body(
+            &format!("All MiniMax accounts failed; last error: {}", message),
+            "server_error",
+            None,
+        ),
+    )
+        .into_response()
 }
 
 pub(super) async fn stream_chat_completions(
@@ -338,7 +390,7 @@ pub(super) async fn stream_chat_completions(
     context: &crate::UsageContext,
     model: &str,
     _headers: &HeaderMap,
-) -> axum::response::Response {
+) -> Result<axum::response::Response, (StatusCode, String)> {
     let mut payload = payload.clone();
     payload["stream"] = json!(true);
     if payload.get("stream_options").is_none() {
@@ -359,34 +411,17 @@ pub(super) async fn stream_chat_completions(
         Ok(resp) => resp,
         Err(err) => {
             let message = format!("MiniMax stream request failed: {}", err);
-            crate::record_minimax_error(state, context, &message);
-            return (
-                StatusCode::BAD_GATEWAY,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(&message, "server_error", None),
-            )
-                .into_response();
+            return Err((StatusCode::BAD_GATEWAY, message));
         }
     };
 
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        crate::record_minimax_error(
-            state,
-            context,
+        return Err((
+            status,
             format!("MiniMax stream returned {}: {}", status, text),
-        );
-        return (
-            StatusCode::BAD_GATEWAY,
-            [("Content-Type", "application/json")],
-            crate::source::v1::response::openai_error_body(
-                &format!("MiniMax stream returned {}: {}", status, text),
-                "server_error",
-                None,
-            ),
-        )
-            .into_response();
+        ));
     }
 
     let usage_state = state.clone();
@@ -441,7 +476,7 @@ pub(super) async fn stream_chat_completions(
         yield Ok(done_sse_event());
     };
 
-    (
+    Ok((
         StatusCode::OK,
         [
             ("Content-Type", "text/event-stream"),
@@ -449,7 +484,7 @@ pub(super) async fn stream_chat_completions(
         ],
         Body::from_stream(stream),
     )
-        .into_response()
+        .into_response())
 }
 
 async fn fetch_models_json(

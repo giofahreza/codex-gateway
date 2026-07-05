@@ -86,110 +86,136 @@ pub async fn messages(
         }
     };
 
-    let account = match super::accounts::pick_account(&state) {
-        Some(account) => account,
-        None => {
-            return anthropic_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "api_error",
-                "No MiniMax accounts configured",
-            );
-        }
-    };
-
-    let context = crate::minimax_usage_context(
-        &account,
-        Some(model),
-        "/minimax/anthropic/v1/messages",
-        crate::prompt_metrics_from_request_value(&raw),
-    );
-    crate::record_minimax_request(&state, &context);
-
-    let base_url = super::api::normalize_base_url(account.base_url.as_deref());
-    let url = anthropic_messages_url(&base_url);
-    let wants_stream = crate::source::wants_stream(&headers, &body);
-    let mut request = state
-        .client
-        .post(url)
-        .body(body.clone())
-        .timeout(Duration::from_secs(180));
-
-    for (key, value) in headers.iter() {
-        if should_drop_anthropic_incoming_header(key.as_str()) {
-            continue;
-        }
-        request = request.header(key, value);
+    let accounts = super::accounts::candidate_accounts(&state);
+    if accounts.is_empty() {
+        return anthropic_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "api_error",
+            "No MiniMax accounts configured",
+        );
     }
 
-    request = request
-        .header(
-            "Authorization",
-            format!("Bearer {}", account.api_key.trim()),
-        )
-        .header("x-api-key", account.api_key.trim())
-        .header("Content-Type", "application/json")
-        .header(
-            "Accept",
+    let wants_stream = crate::source::wants_stream(&headers, &body);
+    let prompt_metrics = crate::prompt_metrics_from_request_value(&raw);
+    let mut last_error: Option<(StatusCode, String)> = None;
+
+    for (attempt_idx, account) in accounts.iter().enumerate() {
+        let context = crate::minimax_usage_context(
+            account,
+            Some(model.clone()),
+            "/minimax/anthropic/v1/messages",
+            prompt_metrics.clone(),
+        );
+        crate::record_minimax_request(&state, &context);
+
+        let base_url = super::api::normalize_base_url(account.base_url.as_deref());
+        let url = anthropic_messages_url(&base_url);
+        let mut request = state
+            .client
+            .post(url)
+            .body(body.clone())
+            .timeout(Duration::from_secs(180));
+
+        for (key, value) in headers.iter() {
+            if should_drop_anthropic_incoming_header(key.as_str()) {
+                continue;
+            }
+            request = request.header(key, value);
+        }
+
+        request = request
+            .header(
+                "Authorization",
+                format!("Bearer {}", account.api_key.trim()),
+            )
+            .header("x-api-key", account.api_key.trim())
+            .header("Content-Type", "application/json")
+            .header(
+                "Accept",
+                if wants_stream {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                },
+            );
+        if !headers.contains_key("anthropic-version") {
+            request = request.header("anthropic-version", DEFAULT_ANTHROPIC_VERSION);
+        }
+
+        let resp = match request.send().await {
+            Ok(resp) => resp,
+            Err(err) => {
+                let message = format!("MiniMax Anthropic request failed: {}", err);
+                crate::record_minimax_error(&state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        let status = resp.status();
+        let out_headers = response_headers(
+            resp.headers(),
             if wants_stream {
                 "text/event-stream"
             } else {
                 "application/json"
             },
         );
-    if !headers.contains_key("anthropic-version") {
-        request = request.header("anthropic-version", DEFAULT_ANTHROPIC_VERSION);
-    }
 
-    let resp = match request.send().await {
-        Ok(resp) => resp,
-        Err(err) => {
-            let message = format!("MiniMax Anthropic request failed: {}", err);
-            crate::record_minimax_error(&state, &context, &message);
-            return anthropic_error(StatusCode::BAD_GATEWAY, "api_error", &message);
+        if wants_stream && status.is_success() {
+            return stream_messages(state, context, resp, out_headers).await;
         }
-    };
 
-    let status = resp.status();
-    let out_headers = response_headers(
-        resp.headers(),
-        if wants_stream {
-            "text/event-stream"
-        } else {
-            "application/json"
-        },
-    );
+        let bytes = match resp.bytes().await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                let message = format!("MiniMax Anthropic body read failed: {}", err);
+                crate::record_minimax_error(&state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
 
-    if wants_stream && status.is_success() {
-        return stream_messages(state, context, resp, out_headers).await;
-    }
-
-    let bytes = match resp.bytes().await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            let message = format!("MiniMax Anthropic body read failed: {}", err);
-            crate::record_minimax_error(&state, &context, &message);
-            return anthropic_error(StatusCode::BAD_GATEWAY, "api_error", &message);
-        }
-    };
-
-    if !status.is_success() {
-        crate::record_minimax_error(
-            &state,
-            &context,
-            format!(
+        if !status.is_success() {
+            let message = format!(
                 "MiniMax Anthropic returned {}: {}",
                 status,
                 String::from_utf8_lossy(&bytes)
-            ),
-        );
+            );
+            crate::record_minimax_error(&state, &context, &message);
+            if attempt_idx + 1 < accounts.len()
+                && crate::should_retry_account_error(status, &message)
+            {
+                last_error = Some((status, message));
+                continue;
+            }
+            return (status, out_headers, bytes).into_response();
+        }
+
+        let usage = serde_json::from_slice::<Value>(&bytes)
+            .map(|value| crate::usage_metrics_from_response_value(&value))
+            .unwrap_or_default();
+        crate::record_minimax_success(&state, &context, &usage);
         return (status, out_headers, bytes).into_response();
     }
 
-    let usage = serde_json::from_slice::<Value>(&bytes)
-        .map(|value| crate::usage_metrics_from_response_value(&value))
-        .unwrap_or_default();
-    crate::record_minimax_success(&state, &context, &usage);
-    (status, out_headers, bytes).into_response()
+    let (status, message) = last_error.unwrap_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "All MiniMax accounts failed".to_string(),
+        )
+    });
+    anthropic_error(
+        status,
+        "api_error",
+        &format!("All MiniMax accounts failed; last error: {}", message),
+    )
 }
 
 async fn stream_messages(

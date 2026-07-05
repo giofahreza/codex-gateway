@@ -106,87 +106,117 @@ pub async fn messages(
             );
         }
     };
-    let account = match super::accounts::pick_account(&state) {
-        Some(account) => account,
-        None => {
-            return anthropic_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "api_error",
-                "No Claude accounts configured",
-            );
-        }
-    };
-    let context = crate::claude_usage_context(
-        &account,
-        Some(model),
-        "/claude/v1/messages",
-        crate::prompt_metrics_from_request_value(&raw),
-    );
-    crate::record_claude_request(&state, &context);
-    let access_token = match super::auth::ensure_access_token(&state, &account).await {
-        Ok(token) => token,
-        Err(err) => {
-            crate::record_claude_error(&state, &context, &err);
-            return anthropic_error(StatusCode::UNAUTHORIZED, "authentication_error", &err);
-        }
-    };
-
-    let wants_stream = crate::source::wants_stream(&headers, &body);
-    let resp = match post_anthropic_messages(
-        &state.client,
-        &account,
-        &access_token,
-        &headers,
-        body,
-        wants_stream,
-    )
-    .await
-    {
-        Ok(resp) => resp,
-        Err(err) => {
-            crate::record_claude_error(&state, &context, &err);
-            return anthropic_error(StatusCode::BAD_GATEWAY, "api_error", &err);
-        }
-    };
-
-    let status = resp.status();
-    super::quota::observe_response_headers(&state, &account, resp.headers());
-    let out_headers = response_headers(
-        resp.headers(),
-        if wants_stream {
-            "text/event-stream"
-        } else {
-            "application/json"
-        },
-    );
-    if wants_stream && status.is_success() {
-        return stream_anthropic_passthrough(state, context, resp, out_headers).await;
+    let accounts = super::accounts::candidate_accounts(&state);
+    if accounts.is_empty() {
+        return anthropic_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "api_error",
+            "No Claude accounts configured",
+        );
     }
-    let bytes = match resp.bytes().await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            let message = format!("Claude body read failed: {}", err);
-            crate::record_claude_error(&state, &context, &message);
-            return anthropic_error(StatusCode::BAD_GATEWAY, "api_error", &message);
+    let wants_stream = crate::source::wants_stream(&headers, &body);
+    let prompt_metrics = crate::prompt_metrics_from_request_value(&raw);
+    let mut last_error: Option<(StatusCode, String)> = None;
+
+    for (attempt_idx, account) in accounts.iter().enumerate() {
+        let context = crate::claude_usage_context(
+            account,
+            Some(model.clone()),
+            "/claude/v1/messages",
+            prompt_metrics.clone(),
+        );
+        crate::record_claude_request(&state, &context);
+        let access_token = match super::auth::ensure_access_token(&state, account).await {
+            Ok(token) => token,
+            Err(err) => {
+                crate::record_claude_error(&state, &context, &err);
+                last_error = Some((StatusCode::UNAUTHORIZED, err));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        let resp = match post_anthropic_messages(
+            &state.client,
+            account,
+            &access_token,
+            &headers,
+            body.clone(),
+            wants_stream,
+        )
+        .await
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                crate::record_claude_error(&state, &context, &err);
+                last_error = Some((StatusCode::BAD_GATEWAY, err));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        let status = resp.status();
+        super::quota::observe_response_headers(&state, account, resp.headers());
+        let out_headers = response_headers(
+            resp.headers(),
+            if wants_stream {
+                "text/event-stream"
+            } else {
+                "application/json"
+            },
+        );
+        if wants_stream && status.is_success() {
+            return stream_anthropic_passthrough(state, context, resp, out_headers).await;
         }
-    };
-    if !status.is_success() {
-        crate::record_claude_error(
-            &state,
-            &context,
-            format!(
+        let bytes = match resp.bytes().await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                let message = format!("Claude body read failed: {}", err);
+                crate::record_claude_error(&state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+        if !status.is_success() {
+            let message = format!(
                 "Claude returned {}: {}",
                 status,
                 String::from_utf8_lossy(&bytes)
-            ),
-        );
+            );
+            crate::record_claude_error(&state, &context, &message);
+            if attempt_idx + 1 < accounts.len()
+                && crate::should_retry_account_error(status, &message)
+            {
+                last_error = Some((status, message));
+                continue;
+            }
+            return (status, out_headers, bytes).into_response();
+        }
+        let usage = serde_json::from_slice::<Value>(&bytes)
+            .map(|value| crate::usage_metrics_from_response_value(&value))
+            .unwrap_or_default();
+        crate::record_claude_success(&state, &context, &usage);
         return (status, out_headers, bytes).into_response();
     }
-    let usage = serde_json::from_slice::<Value>(&bytes)
-        .map(|value| crate::usage_metrics_from_response_value(&value))
-        .unwrap_or_default();
-    crate::record_claude_success(&state, &context, &usage);
-    (status, out_headers, bytes).into_response()
+
+    let (status, message) = last_error.unwrap_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "All Claude accounts failed".to_string(),
+        )
+    });
+    anthropic_error(
+        status,
+        "api_error",
+        &format!("All Claude accounts failed; last error: {}", message),
+    )
 }
 
 pub async fn responses(
@@ -221,101 +251,130 @@ pub async fn responses(
             );
         }
     };
-    let account = match super::accounts::pick_account(&state) {
-        Some(account) => account,
-        None => {
-            return openai_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "No Claude accounts configured",
-            );
-        }
-    };
-    let context = crate::claude_usage_context(
-        &account,
-        Some(model.clone()),
-        "/claude/v1/responses",
-        crate::prompt_metrics_from_request_value(&raw),
-    );
-    crate::record_claude_request(&state, &context);
-    let access_token = match super::auth::ensure_access_token(&state, &account).await {
-        Ok(token) => token,
-        Err(err) => {
-            crate::record_claude_error(&state, &context, &err);
-            return openai_error(StatusCode::UNAUTHORIZED, "authentication_error", &err);
-        }
-    };
     let wants_stream = crate::source::wants_stream(&headers, &body);
     let anthropic_payload = match responses_to_anthropic_messages(&raw, &model, false) {
         Ok(payload) => payload,
         Err(err) => {
-            crate::record_claude_error(&state, &context, &err);
             return openai_error(StatusCode::BAD_REQUEST, "invalid_request_error", &err);
         }
     };
     let anthropic_body = Bytes::from(serde_json::to_vec(&anthropic_payload).unwrap_or_default());
-    let resp = match post_anthropic_messages(
-        &state.client,
-        &account,
-        &access_token,
-        &headers,
-        anthropic_body,
-        false,
-    )
-    .await
-    {
-        Ok(resp) => resp,
-        Err(err) => {
-            crate::record_claude_error(&state, &context, &err);
-            return openai_error(StatusCode::BAD_GATEWAY, "server_error", &err);
-        }
-    };
-    let status = resp.status();
-    super::quota::observe_response_headers(&state, &account, resp.headers());
-    let text = match resp.text().await {
-        Ok(text) => text,
-        Err(err) => {
-            let message = format!("Claude body read failed: {}", err);
-            crate::record_claude_error(&state, &context, &message);
-            return openai_error(StatusCode::BAD_GATEWAY, "server_error", &message);
-        }
-    };
-    if !status.is_success() {
-        crate::record_claude_error(
-            &state,
-            &context,
-            format!("Claude returned {}: {}", status, text),
+    let accounts = super::accounts::candidate_accounts(&state);
+    if accounts.is_empty() {
+        return openai_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "No Claude accounts configured",
         );
+    }
+    let prompt_metrics = crate::prompt_metrics_from_request_value(&raw);
+    let mut last_error: Option<(StatusCode, String)> = None;
+
+    for (attempt_idx, account) in accounts.iter().enumerate() {
+        let context = crate::claude_usage_context(
+            account,
+            Some(model.clone()),
+            "/claude/v1/responses",
+            prompt_metrics.clone(),
+        );
+        crate::record_claude_request(&state, &context);
+        let access_token = match super::auth::ensure_access_token(&state, account).await {
+            Ok(token) => token,
+            Err(err) => {
+                crate::record_claude_error(&state, &context, &err);
+                last_error = Some((StatusCode::UNAUTHORIZED, err));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+        let resp = match post_anthropic_messages(
+            &state.client,
+            account,
+            &access_token,
+            &headers,
+            anthropic_body.clone(),
+            false,
+        )
+        .await
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                crate::record_claude_error(&state, &context, &err);
+                last_error = Some((StatusCode::BAD_GATEWAY, err));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+        let status = resp.status();
+        super::quota::observe_response_headers(&state, account, resp.headers());
+        let text = match resp.text().await {
+            Ok(text) => text,
+            Err(err) => {
+                let message = format!("Claude body read failed: {}", err);
+                crate::record_claude_error(&state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+        if !status.is_success() {
+            let message = format!("Claude returned {}: {}", status, text);
+            crate::record_claude_error(&state, &context, &message);
+            if attempt_idx + 1 < accounts.len()
+                && crate::should_retry_account_error(status, &message)
+            {
+                last_error = Some((status, message));
+                continue;
+            }
+            return (
+                status,
+                [("Content-Type", "application/json")],
+                openai_error_body_from_anthropic(&text),
+            )
+                .into_response();
+        }
+        let anthropic: Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(err) => {
+                let message = format!("Claude response JSON parse failed: {}", err);
+                crate::record_claude_error(&state, &context, &message);
+                return openai_error(StatusCode::BAD_GATEWAY, "server_error", &message);
+            }
+        };
+        let response = anthropic_message_to_response(&anthropic, &model);
+        let mut usage = crate::usage_metrics_from_response_value(&response);
+        if usage.total_tokens == 0 {
+            usage = crate::usage_metrics_from_response_value(&anthropic);
+        }
+        crate::record_claude_success(&state, &context, &usage);
+        if wants_stream {
+            return responses_sse(response).into_response();
+        }
         return (
-            status,
+            StatusCode::OK,
             [("Content-Type", "application/json")],
-            openai_error_body_from_anthropic(&text),
+            serde_json::to_vec(&response).unwrap_or_default(),
         )
             .into_response();
     }
-    let anthropic: Value = match serde_json::from_str(&text) {
-        Ok(value) => value,
-        Err(err) => {
-            let message = format!("Claude response JSON parse failed: {}", err);
-            crate::record_claude_error(&state, &context, &message);
-            return openai_error(StatusCode::BAD_GATEWAY, "server_error", &message);
-        }
-    };
-    let response = anthropic_message_to_response(&anthropic, &model);
-    let mut usage = crate::usage_metrics_from_response_value(&response);
-    if usage.total_tokens == 0 {
-        usage = crate::usage_metrics_from_response_value(&anthropic);
-    }
-    crate::record_claude_success(&state, &context, &usage);
-    if wants_stream {
-        return responses_sse(response).into_response();
-    }
-    (
-        StatusCode::OK,
-        [("Content-Type", "application/json")],
-        serde_json::to_vec(&response).unwrap_or_default(),
+
+    let (status, message) = last_error.unwrap_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "All Claude accounts failed".to_string(),
+        )
+    });
+    openai_error(
+        status,
+        "server_error",
+        &format!("All Claude accounts failed; last error: {}", message),
     )
-        .into_response()
 }
 
 async fn post_anthropic_messages(

@@ -164,88 +164,123 @@ pub async fn responses(
         }
     };
 
-    let account = match super::accounts::pick_account(&state) {
-        Some(account) => account,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    "No Qwen accounts configured",
-                    "server_error",
-                    None,
-                ),
-            )
-                .into_response();
-        }
-    };
-    let context = crate::qwen_usage_context(
-        &account,
-        Some(model.clone()),
-        "/qwen/v1/responses",
-        crate::prompt_metrics_from_request_value(&request_value),
-    );
-
-    crate::record_qwen_request(&state, &context);
-
-    let access_token = match super::auth::ensure_access_token(&state, &account).await {
-        Ok(token) => token,
-        Err(err) => {
-            crate::record_qwen_error(&state, &context, &err);
-            return (
-                StatusCode::BAD_GATEWAY,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(&err, "server_error", None),
-            )
-                .into_response();
-        }
-    };
-
-    let upstream = match send_chat_request(
-        &state.client,
-        &access_token,
-        &super::auth::base_url(&state, &account),
-        &payload,
-    )
-    .await
-    {
-        Ok(value) => value,
-        Err((status, message)) => {
-            crate::record_qwen_error(&state, &context, &message);
-            return (
-                status,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(&message, "server_error", None),
-            )
-                .into_response();
-        }
-    };
-
-    let response = chat_to_openai_response(&upstream, &model);
-    let mut usage = crate::usage_metrics_from_response_value(&response);
-    crate::apply_estimated_usage_fallback(
-        &mut usage,
-        &context.prompt,
-        response
-            .get("output_text")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default(),
-    );
-    crate::record_qwen_success(&state, &context, &usage);
-    if crate::source::wants_stream(&headers, &body) {
+    let accounts = super::accounts::candidate_accounts(&state);
+    if accounts.is_empty() {
         return (
-            StatusCode::OK,
-            [
-                ("Content-Type", "text/event-stream"),
-                ("Cache-Control", "no-store"),
-            ],
-            Body::from(render_response_sse(&response)),
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Content-Type", "application/json")],
+            crate::source::v1::response::openai_error_body(
+                "No Qwen accounts configured",
+                "server_error",
+                None,
+            ),
         )
             .into_response();
     }
 
-    let body = serde_json::to_vec(&response).unwrap_or_default();
-    (StatusCode::OK, [("Content-Type", "application/json")], body).into_response()
+    let wants_stream = crate::source::wants_stream(&headers, &body);
+    let prompt_metrics = crate::prompt_metrics_from_request_value(&request_value);
+    let mut last_error: Option<(StatusCode, String)> = None;
+
+    for (attempt_idx, account) in accounts.iter().enumerate() {
+        let context = crate::qwen_usage_context(
+            account,
+            Some(model.clone()),
+            "/qwen/v1/responses",
+            prompt_metrics.clone(),
+        );
+
+        crate::record_qwen_request(&state, &context);
+
+        let access_token = match super::auth::ensure_access_token(&state, account).await {
+            Ok(token) => token,
+            Err(err) => {
+                crate::record_qwen_error(&state, &context, &err);
+                last_error = Some((StatusCode::BAD_GATEWAY, err));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        let upstream = match send_chat_request(
+            &state.client,
+            &access_token,
+            &super::auth::base_url(&state, account),
+            &payload,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err((status, message)) => {
+                crate::record_qwen_error(&state, &context, &message);
+                if attempt_idx + 1 < accounts.len()
+                    && crate::should_retry_account_error(status, &message)
+                {
+                    last_error = Some((status, message));
+                    continue;
+                }
+                return (
+                    status,
+                    [("Content-Type", "application/json")],
+                    crate::source::v1::response::openai_error_body(
+                        &message,
+                        if status.is_client_error() {
+                            "invalid_request_error"
+                        } else {
+                            "server_error"
+                        },
+                        None,
+                    ),
+                )
+                    .into_response();
+            }
+        };
+
+        let response = chat_to_openai_response(&upstream, &model);
+        let mut usage = crate::usage_metrics_from_response_value(&response);
+        crate::apply_estimated_usage_fallback(
+            &mut usage,
+            &context.prompt,
+            response
+                .get("output_text")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default(),
+        );
+        crate::record_qwen_success(&state, &context, &usage);
+        if wants_stream {
+            return (
+                StatusCode::OK,
+                [
+                    ("Content-Type", "text/event-stream"),
+                    ("Cache-Control", "no-store"),
+                ],
+                Body::from(render_response_sse(&response)),
+            )
+                .into_response();
+        }
+
+        let body = serde_json::to_vec(&response).unwrap_or_default();
+        return (StatusCode::OK, [("Content-Type", "application/json")], body).into_response();
+    }
+
+    let (status, message) = last_error.unwrap_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "All Qwen accounts failed".to_string(),
+        )
+    });
+    (
+        status,
+        [("Content-Type", "application/json")],
+        crate::source::v1::response::openai_error_body(
+            &format!("All Qwen accounts failed; last error: {}", message),
+            "server_error",
+            None,
+        ),
+    )
+        .into_response()
 }
 
 async fn fetch_models(

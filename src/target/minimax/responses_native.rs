@@ -105,28 +105,76 @@ pub async fn responses(
         }
     };
 
-    let account = match super::accounts::pick_account(&state) {
-        Some(account) => account,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    "No MiniMax accounts configured",
-                    "server_error",
-                    None,
-                ),
-            )
-                .into_response();
-        }
-    };
-
-    let base_url = normalize_base_url(account.base_url.as_deref());
-    if use_native_responses(Some(&base_url)) {
-        native_responses(&state, &account, &base_url, &model, &raw, &headers, &body).await
-    } else {
-        chat_completions_responses(&state, &account, &base_url, &model, &raw, &headers, &body).await
+    let accounts = super::accounts::candidate_accounts(&state);
+    if accounts.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Content-Type", "application/json")],
+            crate::source::v1::response::openai_error_body(
+                "No MiniMax accounts configured",
+                "server_error",
+                None,
+            ),
+        )
+            .into_response();
     }
+
+    let mut last_error: Option<(StatusCode, String)> = None;
+    for (attempt_idx, account) in accounts.iter().enumerate() {
+        let base_url = normalize_base_url(account.base_url.as_deref());
+        let response = if use_native_responses(Some(&base_url)) {
+            native_responses(&state, account, &base_url, &model, &raw, &headers, &body).await
+        } else {
+            chat_completions_responses(&state, account, &base_url, &model, &raw, &headers, &body)
+                .await
+        };
+
+        let status = response.status();
+        if status.is_success() {
+            return response;
+        }
+
+        let headers = response.headers().clone();
+        let body_bytes = match axum::body::to_bytes(response.into_body(), usize::MAX).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                let message = format!("MiniMax error body read failed: {}", err);
+                if attempt_idx + 1 < accounts.len() {
+                    last_error = Some((StatusCode::BAD_GATEWAY, message));
+                    continue;
+                }
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    [("Content-Type", "application/json")],
+                    crate::source::v1::response::openai_error_body(&message, "server_error", None),
+                )
+                    .into_response();
+            }
+        };
+        let message = String::from_utf8_lossy(&body_bytes).to_string();
+        if attempt_idx + 1 < accounts.len() && crate::should_retry_account_error(status, &message) {
+            last_error = Some((status, message));
+            continue;
+        }
+        return (status, headers, body_bytes).into_response();
+    }
+
+    let (status, message) = last_error.unwrap_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "All MiniMax accounts failed".to_string(),
+        )
+    });
+    (
+        status,
+        [("Content-Type", "application/json")],
+        crate::source::v1::response::openai_error_body(
+            &format!("All MiniMax accounts failed; last error: {}", message),
+            "server_error",
+            None,
+        ),
+    )
+        .into_response()
 }
 
 async fn native_responses(
@@ -398,7 +446,7 @@ async fn chat_completions_responses(
     };
 
     if wants_stream {
-        return stream_chat_completions(
+        return match stream_chat_completions(
             state,
             &account.api_key,
             base_url,
@@ -407,7 +455,27 @@ async fn chat_completions_responses(
             model,
             headers,
         )
-        .await;
+        .await
+        {
+            Ok(response) => response,
+            Err((status, message)) => {
+                crate::record_minimax_error(state, &context, &message);
+                (
+                    status,
+                    [("Content-Type", "application/json")],
+                    crate::source::v1::response::openai_error_body(
+                        &message,
+                        if status.is_client_error() {
+                            "invalid_request_error"
+                        } else {
+                            "server_error"
+                        },
+                        None,
+                    ),
+                )
+                    .into_response()
+            }
+        };
     }
 
     let resp = match state

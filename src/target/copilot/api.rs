@@ -166,73 +166,24 @@ pub async fn responses(
             .into_response();
     }
     sanitize_responses_payload(&mut raw);
-    let account = match super::accounts::pick_account(&state) {
-        Some(account) => account,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(
-                    "No GitHub Copilot accounts configured",
-                    "server_error",
-                    None,
-                ),
-            )
-                .into_response()
-        }
-    };
-    let context = crate::copilot_usage_context(
-        &account,
-        Some(model.clone()),
-        "/copilot/v1/responses",
-        crate::prompt_metrics_from_request_value(&raw),
-    );
-    crate::record_copilot_request(&state, &context);
-
-    let wants_stream = crate::source::wants_stream(&headers, &body);
-    let copilot_token = match super::auth::ensure_copilot_token(&state, &account).await {
-        Ok(token) => token,
-        Err(err) => {
-            crate::record_copilot_error(&state, &context, &err);
-            return (
-                StatusCode::BAD_GATEWAY,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(&err, "server_error", None),
-            )
-                .into_response();
-        }
-    };
-
-    if should_use_chat_completions_bridge(&raw) {
-        return match chat_completions_bridge_response(
-            &state,
-            &context,
-            &account,
-            &copilot_token,
-            &raw,
-            &model,
-            wants_stream,
+    let accounts = super::accounts::candidate_accounts(&state);
+    if accounts.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Content-Type", "application/json")],
+            crate::source::v1::response::openai_error_body(
+                "No GitHub Copilot accounts configured",
+                "server_error",
+                None,
+            ),
         )
-        .await
-        {
-            Ok(response) => response,
-            Err(message) => {
-                crate::record_copilot_error(&state, &context, &message);
-                (
-                    StatusCode::BAD_GATEWAY,
-                    [("Content-Type", "application/json")],
-                    crate::source::v1::response::openai_error_body(&message, "server_error", None),
-                )
-                    .into_response()
-            }
-        };
+            .into_response();
     }
-
-    let body = match serde_json::to_vec(&raw) {
+    let wants_stream = crate::source::wants_stream(&headers, &body);
+    let request_body = match serde_json::to_vec(&raw) {
         Ok(value) => Bytes::from(value),
         Err(err) => {
             let message = format!("Copilot request serialize failed: {}", err);
-            crate::record_copilot_error(&state, &context, &message);
             return (
                 StatusCode::BAD_REQUEST,
                 [("Content-Type", "application/json")],
@@ -245,38 +196,35 @@ pub async fn responses(
                 .into_response();
         }
     };
+    let prompt_metrics = crate::prompt_metrics_from_request_value(&raw);
+    let mut last_error: Option<(StatusCode, String)> = None;
 
-    let resp = match post_copilot_responses(
-        &state.client,
-        &account,
-        &copilot_token,
-        &body,
-        wants_stream,
-        responses_payload_has_images(&raw),
-    )
-    .await
-    {
-        Ok(resp) => resp,
-        Err(message) => {
-            crate::record_copilot_error(&state, &context, &message);
-            return (
-                StatusCode::BAD_GATEWAY,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(&message, "server_error", None),
-            )
-                .into_response();
-        }
-    };
+    for (attempt_idx, account) in accounts.iter().enumerate() {
+        let context = crate::copilot_usage_context(
+            account,
+            Some(model.clone()),
+            "/copilot/v1/responses",
+            prompt_metrics.clone(),
+        );
+        crate::record_copilot_request(&state, &context);
 
-    let status = resp.status();
-    if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        let message = format!("Copilot returned {}: {}", status, text);
-        if should_try_chat_completions_fallback(status, &text, wants_stream, &raw) {
+        let copilot_token = match super::auth::ensure_copilot_token(&state, account).await {
+            Ok(token) => token,
+            Err(err) => {
+                crate::record_copilot_error(&state, &context, &err);
+                last_error = Some((StatusCode::BAD_GATEWAY, err));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        if should_use_chat_completions_bridge(&raw) {
             match chat_completions_bridge_response(
                 &state,
                 &context,
-                &account,
+                account,
                 &copilot_token,
                 &raw,
                 &model,
@@ -285,79 +233,160 @@ pub async fn responses(
             .await
             {
                 Ok(response) => return response,
-                Err(fallback_message) => {
-                    let combined = format!("{} | chat fallback: {}", message, fallback_message);
-                    crate::record_copilot_error(&state, &context, &combined);
-                    return (
-                        status,
-                        [("Content-Type", "application/json")],
-                        crate::source::v1::response::openai_error_body(
-                            &combined,
-                            if status.is_client_error() {
-                                "invalid_request_error"
-                            } else {
-                                "server_error"
-                            },
-                            None,
-                        ),
-                    )
-                        .into_response();
+                Err(message) => {
+                    crate::record_copilot_error(&state, &context, &message);
+                    last_error = Some((StatusCode::BAD_GATEWAY, message));
+                    if attempt_idx + 1 < accounts.len() {
+                        continue;
+                    }
+                    break;
                 }
             }
         }
-        crate::record_copilot_error(&state, &context, &message);
+
+        let resp = match post_copilot_responses(
+            &state.client,
+            account,
+            &copilot_token,
+            &request_body,
+            wants_stream,
+            responses_payload_has_images(&raw),
+        )
+        .await
+        {
+            Ok(resp) => resp,
+            Err(message) => {
+                crate::record_copilot_error(&state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            let message = format!("Copilot returned {}: {}", status, text);
+            if should_try_chat_completions_fallback(status, &text, wants_stream, &raw) {
+                match chat_completions_bridge_response(
+                    &state,
+                    &context,
+                    account,
+                    &copilot_token,
+                    &raw,
+                    &model,
+                    wants_stream,
+                )
+                .await
+                {
+                    Ok(response) => return response,
+                    Err(fallback_message) => {
+                        let combined = format!("{} | chat fallback: {}", message, fallback_message);
+                        crate::record_copilot_error(&state, &context, &combined);
+                        if attempt_idx + 1 < accounts.len()
+                            && crate::should_retry_account_error(status, &combined)
+                        {
+                            last_error = Some((status, combined));
+                            continue;
+                        }
+                        return (
+                            status,
+                            [("Content-Type", "application/json")],
+                            crate::source::v1::response::openai_error_body(
+                                &combined,
+                                if status.is_client_error() {
+                                    "invalid_request_error"
+                                } else {
+                                    "server_error"
+                                },
+                                None,
+                            ),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            crate::record_copilot_error(&state, &context, &message);
+            if attempt_idx + 1 < accounts.len()
+                && crate::should_retry_account_error(status, &message)
+            {
+                last_error = Some((status, message));
+                continue;
+            }
+            return (
+                status,
+                [("Content-Type", "application/json")],
+                crate::source::v1::response::openai_error_body(
+                    &message,
+                    if status.is_client_error() {
+                        "invalid_request_error"
+                    } else {
+                        "server_error"
+                    },
+                    None,
+                ),
+            )
+                .into_response();
+        }
+
+        if wants_stream {
+            return stream_native_responses(&state, &context, resp).await;
+        }
+
+        let text = match resp.text().await {
+            Ok(text) => text,
+            Err(err) => {
+                let message = format!("Copilot body read failed: {}", err);
+                crate::record_copilot_error(&state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+        let value: Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(err) => {
+                let message = format!("invalid Copilot response: {}", err);
+                crate::record_copilot_error(&state, &context, &message);
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    [("Content-Type", "application/json")],
+                    crate::source::v1::response::openai_error_body(&message, "server_error", None),
+                )
+                    .into_response();
+            }
+        };
+        let usage = crate::usage_metrics_from_response_value(&value);
+        crate::record_copilot_success(&state, &context, &usage);
         return (
-            status,
+            StatusCode::OK,
             [("Content-Type", "application/json")],
-            crate::source::v1::response::openai_error_body(
-                &message,
-                if status.is_client_error() {
-                    "invalid_request_error"
-                } else {
-                    "server_error"
-                },
-                None,
-            ),
+            Bytes::from(text),
         )
             .into_response();
     }
 
-    if wants_stream {
-        return stream_native_responses(&state, &context, resp).await;
-    }
-
-    let text = match resp.text().await {
-        Ok(text) => text,
-        Err(err) => {
-            let message = format!("Copilot body read failed: {}", err);
-            crate::record_copilot_error(&state, &context, &message);
-            return (
-                StatusCode::BAD_GATEWAY,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(&message, "server_error", None),
-            )
-                .into_response();
-        }
-    };
-    let value: Value = match serde_json::from_str(&text) {
-        Ok(value) => value,
-        Err(err) => {
-            let message = format!("invalid Copilot response: {}", err);
-            crate::record_copilot_error(&state, &context, &message);
-            return (
-                StatusCode::BAD_GATEWAY,
-                [("Content-Type", "application/json")],
-                crate::source::v1::response::openai_error_body(&message, "server_error", None),
-            )
-                .into_response();
-        }
-    };
-    let usage = crate::usage_metrics_from_response_value(&value);
-    crate::record_copilot_success(&state, &context, &usage);
+    let (status, message) = last_error.unwrap_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "All GitHub Copilot accounts failed".to_string(),
+        )
+    });
     (
-        StatusCode::OK,
+        status,
         [("Content-Type", "application/json")],
-        Bytes::from(text),
+        crate::source::v1::response::openai_error_body(
+            &format!(
+                "All GitHub Copilot accounts failed; last error: {}",
+                message
+            ),
+            "server_error",
+            None,
+        ),
     )
         .into_response()
 }
@@ -409,18 +438,6 @@ pub async fn messages(
         )
             .into_response();
     }
-    let account = match super::accounts::pick_account(&state) {
-        Some(account) => account,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [("Content-Type", "application/json")],
-                anthropic_error_body("api_error", "No GitHub Copilot accounts configured"),
-            )
-                .into_response()
-        }
-    };
-
     let responses_payload = match anthropic_messages_to_responses(&raw, &model) {
         Ok(payload) => payload,
         Err(err) => {
@@ -432,40 +449,131 @@ pub async fn messages(
                 .into_response()
         }
     };
-    let context = crate::copilot_usage_context(
-        &account,
-        Some(model.clone()),
-        "/copilot/anthropic/v1/messages",
-        crate::prompt_metrics_from_request_value(&raw),
-    );
-    crate::record_copilot_request(&state, &context);
 
-    let copilot_token = match super::auth::ensure_copilot_token(&state, &account).await {
-        Ok(token) => token,
-        Err(err) => {
-            crate::record_copilot_error(&state, &context, &err);
+    let accounts = super::accounts::candidate_accounts(&state);
+    if accounts.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Content-Type", "application/json")],
+            anthropic_error_body("api_error", "No GitHub Copilot accounts configured"),
+        )
+            .into_response();
+    }
+    let prompt_metrics = crate::prompt_metrics_from_request_value(&raw);
+    let mut last_error: Option<(StatusCode, String)> = None;
+
+    for (attempt_idx, account) in accounts.iter().enumerate() {
+        let context = crate::copilot_usage_context(
+            account,
+            Some(model.clone()),
+            "/copilot/anthropic/v1/messages",
+            prompt_metrics.clone(),
+        );
+        crate::record_copilot_request(&state, &context);
+
+        let copilot_token = match super::auth::ensure_copilot_token(&state, account).await {
+            Ok(token) => token,
+            Err(err) => {
+                crate::record_copilot_error(&state, &context, &err);
+                last_error = Some((StatusCode::BAD_GATEWAY, err));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        if should_use_chat_completions_bridge(&responses_payload) {
+            let response_value = match chat_completions_response_value(
+                &state.client,
+                account,
+                &copilot_token,
+                &responses_payload,
+                &model,
+                false,
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(message) => {
+                    crate::record_copilot_error(&state, &context, &message);
+                    last_error = Some((StatusCode::BAD_GATEWAY, message));
+                    if attempt_idx + 1 < accounts.len() {
+                        continue;
+                    }
+                    break;
+                }
+            };
+            let usage = crate::usage_metrics_from_response_value(&response_value);
+            crate::record_copilot_success(&state, &context, &usage);
+            let anthropic = responses_to_anthropic_message(&response_value, &model);
+            if raw
+                .get("stream")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                return anthropic_stream_response(&anthropic);
+            }
+
             return (
-                StatusCode::BAD_GATEWAY,
+                StatusCode::OK,
                 [("Content-Type", "application/json")],
-                anthropic_error_body("api_error", &err),
+                serde_json::to_vec(&anthropic).unwrap_or_default(),
             )
                 .into_response();
         }
-    };
 
-    if should_use_chat_completions_bridge(&responses_payload) {
-        let response_value = match chat_completions_response_value(
+        let body = Bytes::from(serde_json::to_vec(&responses_payload).unwrap_or_default());
+        let resp = match post_copilot_responses(
             &state.client,
-            &account,
+            account,
             &copilot_token,
-            &responses_payload,
-            &model,
+            &body,
             false,
+            responses_payload_has_images(&responses_payload),
         )
         .await
         {
-            Ok(value) => value,
+            Ok(resp) => resp,
             Err(message) => {
+                crate::record_copilot_error(&state, &context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message));
+                if attempt_idx + 1 < accounts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            let message = format!("Copilot returned {}: {}", status, text);
+            crate::record_copilot_error(&state, &context, &message);
+            if attempt_idx + 1 < accounts.len()
+                && crate::should_retry_account_error(status, &message)
+            {
+                last_error = Some((status, message));
+                continue;
+            }
+            return (
+                status,
+                [("Content-Type", "application/json")],
+                anthropic_error_body(
+                    if status.is_client_error() {
+                        "invalid_request_error"
+                    } else {
+                        "api_error"
+                    },
+                    &message,
+                ),
+            )
+                .into_response();
+        }
+        let response_value: Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(err) => {
+                let message = format!("invalid Copilot response: {}", err);
                 crate::record_copilot_error(&state, &context, &message);
                 return (
                     StatusCode::BAD_GATEWAY,
@@ -494,76 +602,22 @@ pub async fn messages(
             .into_response();
     }
 
-    let body = Bytes::from(serde_json::to_vec(&responses_payload).unwrap_or_default());
-    let resp = match post_copilot_responses(
-        &state.client,
-        &account,
-        &copilot_token,
-        &body,
-        false,
-        responses_payload_has_images(&responses_payload),
-    )
-    .await
-    {
-        Ok(resp) => resp,
-        Err(message) => {
-            crate::record_copilot_error(&state, &context, &message);
-            return (
-                StatusCode::BAD_GATEWAY,
-                [("Content-Type", "application/json")],
-                anthropic_error_body("api_error", &message),
-            )
-                .into_response();
-        }
-    };
-
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        let message = format!("Copilot returned {}: {}", status, text);
-        crate::record_copilot_error(&state, &context, &message);
-        return (
-            status,
-            [("Content-Type", "application/json")],
-            anthropic_error_body(
-                if status.is_client_error() {
-                    "invalid_request_error"
-                } else {
-                    "api_error"
-                },
-                &message,
-            ),
+    let (status, message) = last_error.unwrap_or_else(|| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "All GitHub Copilot accounts failed".to_string(),
         )
-            .into_response();
-    }
-    let response_value: Value = match serde_json::from_str(&text) {
-        Ok(value) => value,
-        Err(err) => {
-            let message = format!("invalid Copilot response: {}", err);
-            crate::record_copilot_error(&state, &context, &message);
-            return (
-                StatusCode::BAD_GATEWAY,
-                [("Content-Type", "application/json")],
-                anthropic_error_body("api_error", &message),
-            )
-                .into_response();
-        }
-    };
-    let usage = crate::usage_metrics_from_response_value(&response_value);
-    crate::record_copilot_success(&state, &context, &usage);
-    let anthropic = responses_to_anthropic_message(&response_value, &model);
-    if raw
-        .get("stream")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-    {
-        return anthropic_stream_response(&anthropic);
-    }
-
+    });
     (
-        StatusCode::OK,
+        status,
         [("Content-Type", "application/json")],
-        serde_json::to_vec(&anthropic).unwrap_or_default(),
+        anthropic_error_body(
+            "api_error",
+            &format!(
+                "All GitHub Copilot accounts failed; last error: {}",
+                message
+            ),
+        ),
     )
         .into_response()
 }
