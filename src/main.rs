@@ -1189,13 +1189,9 @@ async fn dashboard() -> impl IntoResponse {
         inset: 0 auto 0 0;
         height: 100%;
         border-radius: 7px;
-        transition: width 0.4s;
+        background-color: var(--quota-bar-color, #22c55e);
+        transition: width 0.4s, background-color 0.4s;
       }
-      .quota-bar-fill.low { background: #22c55e; }
-      .quota-bar-fill.mid { background: #f59e0b; }
-      .quota-bar-fill.high { background: #ef4444; }
-      .quota-bar-fill.five-hour { background: #22c55e; }
-      .quota-bar-fill.weekly { background: #ef4444; }
       .quota-bar-text {
         position: absolute;
         inset: 0;
@@ -2610,6 +2606,29 @@ async fn dashboard() -> impl IntoResponse {
         function pctClass(pct) {
           return pct > 80 ? 'high' : pct > 50 ? 'mid' : 'low';
         }
+        function mixChannel(start, end, ratio) {
+          return Math.round(start + (end - start) * ratio);
+        }
+        function mixRgb(from, to, ratio) {
+          return 'rgb('
+            + mixChannel(from[0], to[0], ratio) + ', '
+            + mixChannel(from[1], to[1], ratio) + ', '
+            + mixChannel(from[2], to[2], ratio) + ')';
+        }
+        function quotaUsageColor(pct) {
+          var value = pctValue(pct);
+          var green = [34, 197, 94];
+          var amber = [245, 158, 11];
+          var red = [239, 68, 68];
+          if (value <= 50) return mixRgb(green, amber, value / 50);
+          return mixRgb(amber, red, (value - 50) / 50);
+        }
+        function quotaToneColor(tone, pct) {
+          if (tone === 'low') return '#22c55e';
+          if (tone === 'mid') return '#f59e0b';
+          if (tone === 'high') return '#ef4444';
+          return quotaUsageColor(pct);
+        }
         function bucketPct(bucket) {
           return bucket && bucket.used_percent != null ? bucket.used_percent : 0;
         }
@@ -2619,8 +2638,9 @@ async fn dashboard() -> impl IntoResponse {
           var safeTitle = safeLabel + ' ' + safeHint + (detailTitle ? ' - ' + escapeHtml(detailTitle) : '');
           var width = pctValue(pct);
           var cls = tone || pctClass(width);
+          var color = quotaToneColor(tone, width);
           return '<div class="quota-bar-wrap"><div class="quota-bar" title="' + safeTitle + '">'
-            + '<div class="quota-bar-fill ' + cls + '" style="width:' + width + '%;"></div>'
+            + '<div class="quota-bar-fill ' + cls + '" style="width:' + width + '%; --quota-bar-color:' + color + ';"></div>'
             + '<div class="quota-bar-text"><span>' + safeLabel + '</span><span>' + safeHint + '</span></div>'
             + '</div></div>';
         }
