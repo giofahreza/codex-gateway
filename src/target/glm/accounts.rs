@@ -5,11 +5,77 @@ use std::collections::HashSet;
 pub struct GlmAccount {
     pub account_id: String,
     pub label: String,
+    pub account_type: String,
     pub api_key: String,
     pub base_url: Option<String>,
     pub anthropic_base_url: Option<String>,
     pub file_name: Option<String>,
     pub enabled: bool,
+}
+
+pub const ACCOUNT_TYPE_API_USAGE: &str = "api_usage";
+pub const ACCOUNT_TYPE_SUBSCRIPTION: &str = "subscription";
+
+impl GlmAccount {
+    pub fn normalized_account_type(&self) -> String {
+        normalize_account_type(Some(&self.account_type))
+    }
+
+    pub fn is_subscription(&self) -> bool {
+        self.normalized_account_type() == ACCOUNT_TYPE_SUBSCRIPTION
+    }
+
+    pub fn openai_base_url(&self) -> String {
+        super::api::normalize_base_url_for_account_type(
+            self.base_url.as_deref(),
+            &self.normalized_account_type(),
+        )
+    }
+}
+
+pub fn normalize_account_type(value: Option<&str>) -> String {
+    match value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase().replace(['-', ' '], "_"))
+        .as_deref()
+    {
+        Some("subscription") | Some("coding_plan") | Some("coding") | Some("plan") => {
+            ACCOUNT_TYPE_SUBSCRIPTION.to_string()
+        }
+        Some("api") | Some("api_usage") | Some("usage") | Some("pay_as_you_go") | Some("payg") => {
+            ACCOUNT_TYPE_API_USAGE.to_string()
+        }
+        _ => ACCOUNT_TYPE_API_USAGE.to_string(),
+    }
+}
+
+fn account_type_from_value(value: &serde_json::Value) -> String {
+    if let Some(account_type) = value
+        .get("account_type")
+        .or_else(|| value.get("usage_type"))
+        .and_then(|v| v.as_str())
+    {
+        return normalize_account_type(Some(account_type));
+    }
+
+    let has_subscription_route = value
+        .get("base_url")
+        .or_else(|| value.get("openai_base_url"))
+        .and_then(|v| v.as_str())
+        .map(|value| value.to_ascii_lowercase().contains("/coding/"))
+        .unwrap_or(false)
+        || value
+            .get("anthropic_base_url")
+            .and_then(|v| v.as_str())
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+
+    if has_subscription_route {
+        ACCOUNT_TYPE_SUBSCRIPTION.to_string()
+    } else {
+        ACCOUNT_TYPE_API_USAGE.to_string()
+    }
 }
 
 pub fn load_accounts(cfg: &crate::Config, disabled: &HashSet<String>) -> Vec<GlmAccount> {
@@ -78,10 +144,12 @@ pub fn load_accounts(cfg: &crate::Config, disabled: &HashSet<String>) -> Vec<Glm
                     .filter(|value| !value.is_empty())
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| label.clone());
+                let account_type = account_type_from_value(&value);
 
                 accounts.push(GlmAccount {
                     account_id,
                     label,
+                    account_type,
                     api_key,
                     base_url: value
                         .get("base_url")
@@ -143,4 +211,38 @@ pub fn first_enabled(state: &crate::AppState) -> Option<GlmAccount> {
         .iter()
         .find(|account| account.enabled)
         .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn normalizes_account_type_aliases() {
+        assert_eq!(normalize_account_type(Some("api")), ACCOUNT_TYPE_API_USAGE);
+        assert_eq!(
+            normalize_account_type(Some("api usage")),
+            ACCOUNT_TYPE_API_USAGE
+        );
+        assert_eq!(
+            normalize_account_type(Some("coding-plan")),
+            ACCOUNT_TYPE_SUBSCRIPTION
+        );
+        assert_eq!(
+            normalize_account_type(Some("subscription")),
+            ACCOUNT_TYPE_SUBSCRIPTION
+        );
+    }
+
+    #[test]
+    fn infers_old_coding_plan_credentials_from_routes() {
+        assert_eq!(
+            account_type_from_value(&json!({
+                "base_url": "https://api.z.ai/api/coding/paas/v4"
+            })),
+            ACCOUNT_TYPE_SUBSCRIPTION
+        );
+        assert_eq!(account_type_from_value(&json!({})), ACCOUNT_TYPE_API_USAGE);
+    }
 }

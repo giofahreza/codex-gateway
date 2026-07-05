@@ -16,6 +16,7 @@ pub struct QuotaCacheEntry {
 pub struct QuotaSummary {
     pub label: String,
     pub file_name: String,
+    pub account_type: String,
     pub status_msg: String,
     pub available_models: Vec<ModelInfo>,
     pub raw: Value,
@@ -60,12 +61,14 @@ pub async fn get_quota_summaries(state: &crate::AppState) -> Vec<Value> {
             results.push(json!({
                 "label": account.label,
                 "file_name": account.file_name.clone().unwrap_or_default(),
+                "account_type": account.normalized_account_type(),
                 "error": err
             }));
         } else {
             results.push(json!({
                 "label": entry.summary.label,
                 "file_name": entry.summary.file_name,
+                "account_type": entry.summary.account_type,
                 "status_msg": entry.summary.status_msg,
                 "available_models": entry.summary.available_models,
                 "raw": entry.summary.raw,
@@ -96,7 +99,8 @@ async fn fetch_account_quota(
     let summary = QuotaSummary {
         label: account.label.clone(),
         file_name: account.file_name.clone().unwrap_or_default(),
-        status_msg: "Z.AI does not expose a stable Coding Plan quota endpoint here; this card shows the live model catalog and gateway-recorded usage.".to_string(),
+        account_type: account.normalized_account_type(),
+        status_msg: "Z.AI does not expose a stable GLM quota endpoint here; this card shows the live model catalog and gateway-recorded usage.".to_string(),
         available_models: models,
         raw,
     };
@@ -112,7 +116,7 @@ async fn fetch_models(
     client: &reqwest::Client,
     account: &super::accounts::GlmAccount,
 ) -> Result<(Vec<ModelInfo>, Value), String> {
-    let base = super::api::normalize_base_url(account.base_url.as_deref());
+    let base = account.openai_base_url();
     let url = models_url(&base);
     let resp = client
         .get(&url)

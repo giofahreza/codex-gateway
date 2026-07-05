@@ -10,6 +10,7 @@ use serde::Deserialize;
 struct LoginStartRequest {
     api_key: String,
     label: Option<String>,
+    account_type: Option<String>,
     base_url: Option<String>,
     openai_base_url: Option<String>,
     anthropic_base_url: Option<String>,
@@ -36,9 +37,11 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
             serde_json::json!({
                 "account_id": account.account_id,
                 "label": account.label,
+                "account_type": account.normalized_account_type(),
                 "file_name": account.file_name,
                 "enabled": account.enabled,
-                "base_url": account.base_url,
+                "base_url": account.openai_base_url(),
+                "openai_base_url": account.openai_base_url(),
                 "anthropic_base_url": account.anthropic_base_url,
                 "requests": usage.requests,
                 "errors": usage.errors,
@@ -87,7 +90,7 @@ async fn save_account(state: &crate::AppState, body: &Bytes) -> axum::response::
         Err(_) => {
             return axum::Json(serde_json::json!({
                 "ok": false,
-                "message": "Submit GLM credentials as JSON: {\"api_key\":\"...\",\"label\":\"optional\",\"base_url\":\"optional\",\"anthropic_base_url\":\"optional\"}"
+                "message": "Submit GLM credentials as JSON: {\"api_key\":\"...\",\"label\":\"optional\",\"account_type\":\"api_usage|subscription\",\"base_url\":\"optional\",\"anthropic_base_url\":\"optional\"}"
             }))
             .into_response();
         }
@@ -106,9 +109,20 @@ async fn save_account(state: &crate::AppState, body: &Bytes) -> axum::response::
         .base_url
         .as_deref()
         .or(payload.openai_base_url.as_deref());
-    let base_url = super::api::normalize_base_url(base_url_input);
-    let anthropic_base_url =
-        super::anthropic::normalize_anthropic_base_url(payload.anthropic_base_url.as_deref());
+    let account_type = super::accounts::normalize_account_type(payload.account_type.as_deref());
+    let base_url = super::api::normalize_base_url_for_account_type(base_url_input, &account_type);
+    let anthropic_base_url = if account_type == super::accounts::ACCOUNT_TYPE_SUBSCRIPTION {
+        Some(super::anthropic::normalize_anthropic_base_url(
+            payload.anthropic_base_url.as_deref(),
+        ))
+    } else {
+        payload
+            .anthropic_base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.trim_end_matches('/').to_string())
+    };
     if let Err(err) = super::api::validate_api_key(&state.client, api_key, &base_url).await {
         return axum::Json(serde_json::json!({
             "ok": false,
@@ -148,6 +162,7 @@ async fn save_account(state: &crate::AppState, body: &Bytes) -> axum::response::
         "type": "glm",
         "account_id": account_id,
         "label": label,
+        "account_type": account_type,
         "api_key": api_key,
         "base_url": base_url,
         "anthropic_base_url": anthropic_base_url,
@@ -195,9 +210,9 @@ fn helper_html() -> String {
     r#"<!doctype html><html><head><meta charset="utf-8"><title>GLM Setup</title></head><body>
 <h1>GLM Setup</h1>
 <p>Open <a href="https://z.ai/manage-apikey/apikey-list" target="_blank" rel="noopener">Z.AI API Keys</a>, create an API key, then paste it into the dashboard GLM modal.</p>
-<p>Default OpenAI/Codex base URL: <code>https://api.z.ai/api/coding/paas/v4</code>.</p>
-<p>Default Claude Code base URL: <code>https://api.z.ai/api/anthropic</code>.</p>
-<p>You can also POST the key directly to <code>/login/glm/start</code> with JSON <code>{"api_key":"...","label":"optional","base_url":"optional","anthropic_base_url":"optional"}</code>.</p>
+<p>Use <code>account_type=api_usage</code> for normal API keys. Default OpenAI/Codex base URL: <code>https://api.z.ai/api/paas/v4</code>. Claude requests are translated through Chat Completions for this type.</p>
+<p>Use <code>account_type=subscription</code> for GLM Coding Plan subscription keys. Default OpenAI/Codex base URL: <code>https://api.z.ai/api/coding/paas/v4</code>. Default Claude Code base URL: <code>https://api.z.ai/api/anthropic</code>.</p>
+<p>You can also POST the key directly to <code>/login/glm/start</code> with JSON <code>{"api_key":"...","label":"optional","account_type":"api_usage","base_url":"optional","anthropic_base_url":"optional"}</code>.</p>
 </body></html>"#
     .to_string()
 }

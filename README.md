@@ -574,7 +574,12 @@ The gateway can also stand in for MiniMax's Anthropic endpoint from the official
 
 ## GLM/Z.AI provider
 
-GLM is exposed as an API-key provider for the Z.AI GLM Coding Plan. Add a GLM account from the dashboard, or submit a key directly:
+GLM is exposed as a Z.AI API-key provider with two account types:
+
+- `api_usage`: normal Z.AI API usage keys. This is the default. OpenAI/Codex requests use `https://api.z.ai/api/paas/v4`; Claude Messages requests are translated through Chat Completions.
+- `subscription`: GLM Coding Plan subscription keys. OpenAI/Codex requests use `https://api.z.ai/api/coding/paas/v4`; Claude Messages requests pass through to `https://api.z.ai/api/anthropic`.
+
+Add a GLM account from the dashboard, or submit a key directly:
 
 ```bash
 curl -sS http://127.0.0.1:8319/login/glm/start \
@@ -583,8 +588,7 @@ curl -sS http://127.0.0.1:8319/login/glm/start \
   -d '{
     "api_key": "ZAI_API_KEY",
     "label": "personal",
-    "openai_base_url": "https://api.z.ai/api/coding/paas/v4",
-    "anthropic_base_url": "https://api.z.ai/api/anthropic"
+    "account_type": "api_usage"
   }'
 ```
 
@@ -594,11 +598,11 @@ Routing:
 - Unprefixed `glm*` model ids also route to GLM.
 - `POST /v1/responses` and `POST /codex/responses` translate OpenAI/Codex Responses input, tools, tool output, and streaming events to GLM's OpenAI-compatible `/chat/completions` route.
 - `POST /v1/chat/completions` passes OpenAI Chat Completions requests through to GLM's OpenAI-compatible route.
-- `POST /claude/v1/messages` and `POST /claude/messages` pass Anthropic Messages requests through to GLM's Anthropic-compatible route.
+- `POST /claude/v1/messages` and `POST /claude/messages` use the account type: API-usage accounts translate Anthropic Messages to Chat Completions and synthesize Anthropic responses; subscription accounts pass Anthropic Messages through to GLM's Anthropic-compatible route.
 - `GET /v1/models` and `GET /codex/models` include `glm:` model ids whenever a GLM account is enabled.
-- The dashboard shows the live model catalog from `/models`. Z.AI does not currently expose a stable Coding Plan quota endpoint through this route, so account load balancing uses gateway-recorded usage first.
+- The dashboard shows the live model catalog from `/models`. Z.AI does not currently expose a stable GLM quota endpoint through this route, so account load balancing uses gateway-recorded usage first.
 
-Z.AI documents two different Coding Plan base URLs: Anthropic Messages uses `https://api.z.ai/api/anthropic`, while OpenAI Chat Completions uses `https://api.z.ai/api/coding/paas/v4`. Keep them separate in saved credentials.
+For subscription keys, keep the Coding Plan base URLs separate in saved credentials: Anthropic Messages uses `https://api.z.ai/api/anthropic`, while OpenAI Chat Completions uses `https://api.z.ai/api/coding/paas/v4`.
 
 Example:
 

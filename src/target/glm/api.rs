@@ -11,7 +11,10 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use uuid::Uuid;
 
-use super::DEFAULT_OPENAI_BASE_URL;
+use super::{
+    DEFAULT_API_USAGE_OPENAI_BASE_URL, DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_SUBSCRIPTION_OPENAI_BASE_URL,
+};
 
 const MODEL_FALLBACKS: &[&str] = &[
     "glm-5.2",
@@ -23,10 +26,21 @@ const MODEL_FALLBACKS: &[&str] = &[
 ];
 
 pub fn normalize_base_url(base_url: Option<&str>) -> String {
+    normalize_base_url_for_account_type(base_url, super::accounts::ACCOUNT_TYPE_API_USAGE)
+}
+
+pub fn normalize_base_url_for_account_type(base_url: Option<&str>, account_type: &str) -> String {
+    let default_base_url = if super::accounts::normalize_account_type(Some(account_type))
+        == super::accounts::ACCOUNT_TYPE_SUBSCRIPTION
+    {
+        DEFAULT_SUBSCRIPTION_OPENAI_BASE_URL
+    } else {
+        DEFAULT_API_USAGE_OPENAI_BASE_URL
+    };
     base_url
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT_OPENAI_BASE_URL)
+        .unwrap_or(default_base_url)
         .trim_end_matches('/')
         .to_string()
 }
@@ -105,7 +119,7 @@ pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) ->
     };
 
     let api_key = account.api_key.clone();
-    let base_url = normalize_base_url(account.base_url.as_deref());
+    let base_url = account.openai_base_url();
     match fetch_models_json(&state.client, &api_key, &base_url).await {
         Ok(value) => match models_to_openai_json(&value) {
             Ok(body) => {
@@ -232,7 +246,7 @@ pub async fn responses(
         );
         crate::record_glm_request(&state, &context);
 
-        let base_url = normalize_base_url(account.base_url.as_deref());
+        let base_url = account.openai_base_url();
 
         if wants_stream {
             match stream_chat_completions(
@@ -455,7 +469,7 @@ pub async fn chat_completions(
         );
         crate::record_glm_request(&state, &context);
 
-        let base_url = normalize_base_url(account.base_url.as_deref());
+        let base_url = account.openai_base_url();
         let mut request = state
             .client
             .post(chat_completions_url(&base_url))
@@ -913,7 +927,7 @@ fn build_chat_messages(raw: &Value) -> Result<Option<Value>, String> {
     Ok(None)
 }
 
-fn sanitize_chat_messages(messages: Vec<Value>) -> Vec<Value> {
+pub(super) fn sanitize_chat_messages(messages: Vec<Value>) -> Vec<Value> {
     let mut out = Vec::new();
     let mut index = 0;
 

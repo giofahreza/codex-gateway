@@ -3438,6 +3438,9 @@ async fn dashboard() -> impl IntoResponse {
       }
       function buildGlmCard(a, quota) {
         var usage = '';
+        if (a.account_type) {
+          usage += '<span class="stat-pill"><span class="stat-pill-label">type</span><span class="stat-pill-value">' + escapeHtml(a.account_type) + '</span></span>';
+        }
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>';
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>';
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.prompt_total || 0) + '</span><span class="stat-pill-label">prompt</span></span>';
@@ -4122,7 +4125,7 @@ async fn dashboard() -> impl IntoResponse {
     <div id="addGlmModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addGlmTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
         <h2 id="addGlmTitle" style="margin-top:0;">Add GLM Account</h2>
-        <p>Paste a Z.AI GLM Coding Plan API key. The gateway validates it against the OpenAI-compatible model catalog before saving it.</p>
+        <p>Paste a Z.AI GLM API key and choose whether it is a normal API-usage key or a Coding Plan subscription key.</p>
         <div class="modal-actions" style="margin-top:8px;">
           <button type="button" onclick="window.open('/login/glm/start', '_blank', 'noopener')">Open Helper</button>
         </div>
@@ -4130,10 +4133,15 @@ async fn dashboard() -> impl IntoResponse {
         <textarea id="glmKeyInput" rows="6" placeholder="Paste Z.AI API key here"></textarea>
         <label for="glmLabelInput" style="margin-top:12px;">Label</label>
         <input id="glmLabelInput" placeholder="optional label">
+        <label for="glmAccountTypeInput" style="margin-top:12px;">Account Type</label>
+        <select id="glmAccountTypeInput">
+          <option value="api_usage" selected>API usage</option>
+          <option value="subscription">Subscription</option>
+        </select>
         <label for="glmOpenAiBaseUrlInput" style="margin-top:12px;">OpenAI/Codex Base URL</label>
-        <input id="glmOpenAiBaseUrlInput" placeholder="https://api.z.ai/api/coding/paas/v4">
+        <input id="glmOpenAiBaseUrlInput" placeholder="API usage: https://api.z.ai/api/paas/v4">
         <label for="glmAnthropicBaseUrlInput" style="margin-top:12px;">Claude Code Base URL</label>
-        <input id="glmAnthropicBaseUrlInput" placeholder="https://api.z.ai/api/anthropic">
+        <input id="glmAnthropicBaseUrlInput" placeholder="Subscription only: https://api.z.ai/api/anthropic">
         <button onclick="submitGlmKey()" style="margin-top:12px;">Save Key</button>
         <div id="glmStatus" class="muted" style="margin-top:8px;"></div>
         <div class="modal-actions" style="margin-top:16px;">
@@ -4540,6 +4548,7 @@ async fn dashboard() -> impl IntoResponse {
       async function submitGlmKey() {
         const apiKey = document.getElementById('glmKeyInput').value.trim();
         const label = document.getElementById('glmLabelInput').value.trim();
+        const accountType = document.getElementById('glmAccountTypeInput').value;
         const openaiBaseUrl = document.getElementById('glmOpenAiBaseUrlInput').value.trim();
         const anthropicBaseUrl = document.getElementById('glmAnthropicBaseUrlInput').value.trim();
         if (!apiKey) {
@@ -4554,6 +4563,7 @@ async fn dashboard() -> impl IntoResponse {
           body: JSON.stringify({
             api_key: apiKey,
             label: label || undefined,
+            account_type: accountType,
             openai_base_url: openaiBaseUrl || undefined,
             anthropic_base_url: anthropicBaseUrl || undefined
           })
@@ -4566,6 +4576,7 @@ async fn dashboard() -> impl IntoResponse {
         }
         document.getElementById('glmKeyInput').value = '';
         document.getElementById('glmLabelInput').value = '';
+        document.getElementById('glmAccountTypeInput').value = 'api_usage';
         document.getElementById('glmOpenAiBaseUrlInput').value = '';
         document.getElementById('glmAnthropicBaseUrlInput').value = '';
         refreshGlmQuota();
