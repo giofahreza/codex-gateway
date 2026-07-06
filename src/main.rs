@@ -1109,6 +1109,145 @@ async fn dashboard() -> impl IntoResponse {
       .custom-model-account-row code {
         overflow-wrap: anywhere;
       }
+      .custom-model-editor {
+        display: grid;
+        gap: 12px;
+      }
+      .custom-model-steps {
+        display: grid;
+        gap: 12px;
+      }
+      .custom-model-step {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface);
+        padding: 12px;
+        display: grid;
+        gap: 10px;
+      }
+      .custom-model-step-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .custom-model-step-index {
+        font-weight: 800;
+        font-size: 13px;
+        color: var(--text);
+      }
+      .custom-model-step-summary {
+        color: var(--muted);
+        font-size: 12px;
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+      .custom-model-step-toolbar {
+        display: flex;
+        gap: 6px;
+        justify-content: flex-end;
+      }
+      .custom-model-step-targets {
+        display: grid;
+        gap: 8px;
+      }
+      .custom-model-target {
+        display: grid;
+        grid-template-columns: minmax(110px, 0.7fr) minmax(140px, 1.2fr) minmax(140px, 1fr) 70px auto auto;
+        gap: 8px;
+        align-items: center;
+        padding: 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-alt);
+        position: relative;
+      }
+      .custom-model-target.disabled {
+        opacity: 0.55;
+      }
+      .custom-model-target select,
+      .custom-model-target input {
+        min-height: 32px;
+      }
+      .custom-model-target-accounts {
+        text-align: left;
+        padding: 4px 8px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--text);
+        cursor: pointer;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 100%;
+      }
+      .custom-model-target-weight {
+        text-align: center;
+      }
+      .custom-model-target-toolbar {
+        display: flex;
+        gap: 6px;
+        justify-content: flex-end;
+      }
+      .custom-model-step-footer {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-start;
+      }
+      .custom-model-account-picker-popover {
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        right: 0;
+        z-index: 20;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        box-shadow: var(--shadow);
+        padding: 8px;
+        max-height: 260px;
+        overflow: auto;
+        display: grid;
+        gap: 8px;
+      }
+      .custom-model-account-picker-head {
+        display: flex;
+        gap: 6px;
+        justify-content: space-between;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 6px;
+      }
+      .custom-model-account-picker-head .mini-btn {
+        flex: 1;
+      }
+      .custom-model-field-error {
+        color: #f87171;
+        font-size: 12px;
+        font-weight: 600;
+        min-height: 16px;
+      }
+      .custom-model-preview-wrap {
+        border: 1px dashed var(--border);
+        border-radius: 8px;
+        padding: 10px;
+        background: var(--surface-alt);
+        min-height: 80px;
+      }
+      .custom-model-preview-empty {
+        color: var(--muted);
+        font-size: 12px;
+        text-align: center;
+        padding: 16px;
+      }
+      @media (max-width: 760px) {
+        .custom-model-target {
+          grid-template-columns: 1fr;
+        }
+        .custom-model-account-picker-popover {
+          position: static;
+        }
+      }
       .inline-checks {
         display: flex;
         gap: 12px;
@@ -3939,6 +4078,369 @@ async fn dashboard() -> impl IntoResponse {
         renderCustomModels(models);
         renderCustomModelAccountKeys();
       }
+      // ---------- Custom model route editor ----------
+      const customModelProviderCatalog = [
+        { prefix: 'agw', label: 'Antigravity', placeholder: 'gemini-2.5-pro' },
+        { prefix: 'gem', label: 'Gemini', placeholder: 'gemini-2.5-pro' },
+        { prefix: 'qwn', label: 'Qwen', placeholder: 'qwen3-coder-plus' },
+        { prefix: 'dsk', label: 'DeepSeek', placeholder: 'deepseek-chat' },
+        { prefix: 'grk', label: 'Grok', placeholder: 'grok-2' },
+        { prefix: 'min', label: 'MiniMax', placeholder: 'MiniMax-M3' },
+        { prefix: 'cop', label: 'GitHub Copilot', placeholder: 'gpt-5.1' },
+        { prefix: 'cld', label: 'Claude', placeholder: 'claude-sonnet-4-5' },
+        { prefix: 'glm', label: 'GLM (Z.AI)', placeholder: 'glm-4.6' },
+        { prefix: 'cod', label: 'Codex', placeholder: 'gpt-5' }
+      ];
+      const customModelProviderPrefixes = customModelProviderCatalog.map(function(p) { return p.prefix; });
+      const customModelPrefixAliases = {
+        agw: 'agw', antigravity: 'agw', 'anti-gravity': 'agw',
+        gem: 'gem', gemini: 'gem',
+        qwn: 'qwn', qwen: 'qwn',
+        dsk: 'dsk', deepseek: 'dsk',
+        grk: 'grk', grok: 'grk', xai: 'grk',
+        min: 'min', minimax: 'min',
+        cop: 'cop', copilot: 'cop', 'github-copilot': 'cop', github_copilot: 'cop',
+        cld: 'cld', claude: 'cld', anthropic: 'cld',
+        glm: 'glm', zai: 'glm', 'z-ai': 'glm',
+        cod: 'cod', codex: 'cod',
+        ctm: 'ctm', custom: 'ctm'
+      };
+      function customModelCanonicalizePrefix(prefix) {
+        if (!prefix) return '';
+        return customModelPrefixAliases[String(prefix).toLowerCase()] || '';
+      }
+      function customModelSplitTargetSpec(spec) {
+        var raw = String(spec || '').trim();
+        var at = raw.indexOf('@');
+        var modelPart = at < 0 ? raw : raw.slice(0, at).trim();
+        var account = at < 0 ? '' : raw.slice(at + 1).trim();
+        var colon = modelPart.indexOf(':');
+        var prefix = colon < 0 ? '' : modelPart.slice(0, colon).trim();
+        var model = colon < 0 ? modelPart.trim() : modelPart.slice(colon + 1).trim();
+        var canonical = customModelCanonicalizePrefix(prefix);
+        return { provider: canonical || prefix.toLowerCase(), model: model, account: account };
+      }
+      const customModelEditorState = { steps: [], lastFocusedTargetId: null };
+      let customModelEditorCounter = 0;
+      function customModelNewId(prefix) {
+        customModelEditorCounter += 1;
+        return prefix + '-' + Date.now().toString(36) + '-' + customModelEditorCounter.toString(36);
+      }
+      function customModelEmptyTarget(partial) {
+        partial = partial || {};
+        var provider = partial.provider || customModelProviderCatalog[0].prefix;
+        return {
+          id: customModelNewId('t'),
+          provider: provider,
+          model: partial.model || '',
+          accounts: Array.isArray(partial.accounts) ? partial.accounts.slice() : [],
+          weight: Number(partial.weight) > 0 ? Number(partial.weight) : 1,
+          enabled: partial.enabled !== false
+        };
+      }
+      function customModelEmptyStep() {
+        return { id: customModelNewId('s'), targets: [customModelEmptyTarget()] };
+      }
+      function customModelHydrateEditor(model) {
+        var steps = [];
+        var routes = customRoutes(model);
+        routes.forEach(function (group) {
+          var enabledTargets = enabledCustomTargets(group && group.targets);
+          if (!enabledTargets.length) return;
+          var stepTargets = [];
+          enabledTargets.forEach(function (raw) {
+            var split = customModelSplitTargetSpec(raw.model || '');
+            var weight = Number(raw.weight) > 0 ? Number(raw.weight) : 1;
+            var enabled = raw.enabled !== false;
+            var bucketKey = split.provider + '|' + split.model + '|' + weight + '|' + enabled;
+            var existing = stepTargets.find(function (x) { return x._key === bucketKey; });
+            var account = String(raw.account || '').trim();
+            if (existing) {
+              if (account && existing.accounts.indexOf(account) === -1) existing.accounts.push(account);
+            } else {
+              stepTargets.push(Object.assign(customModelEmptyTarget({
+                provider: split.provider || customModelProviderCatalog[0].prefix,
+                model: split.model,
+                accounts: account ? [account] : [],
+                weight: weight,
+                enabled: enabled
+              }), { _key: bucketKey }));
+            }
+          });
+          stepTargets.forEach(function (t) { delete t._key; });
+          steps.push({ id: customModelNewId('s'), targets: stepTargets });
+        });
+        if (!steps.length) steps.push(customModelEmptyStep());
+        return { steps: steps };
+      }
+      function renderCustomModelEditor() {
+        var stepsEl = document.getElementById('customModelSteps');
+        if (!stepsEl) return;
+        var state = customModelEditorState;
+        if (!state.steps.length) {
+          stepsEl.innerHTML = '<div class="custom-model-preview-empty">No steps yet. Click "+ Add fallback step" below.</div>';
+        } else {
+          stepsEl.innerHTML = state.steps.map(function (step, stepIdx) {
+            var enabledCount = step.targets.filter(function (t) { return t.enabled !== false && String(t.model || '').trim(); }).length;
+            var strategy = step.targets.length > 1 ? 'load-balanced' : 'fallback only';
+            var upDisabled = stepIdx === 0 ? ' disabled' : '';
+            var downDisabled = stepIdx === state.steps.length - 1 ? ' disabled' : '';
+            return ''
+              + '<div class="custom-model-step" data-step-id="' + escapeHtml(step.id) + '">'
+              +   '<div class="custom-model-step-header">'
+              +     '<span class="custom-model-step-index">Step ' + (stepIdx + 1) + '</span>'
+              +     '<span class="custom-model-step-summary">' + enabledCount + ' of ' + step.targets.length + ' enabled · ' + strategy + '</span>'
+              +     '<span class="custom-model-step-toolbar">'
+              +       '<button type="button" class="mini-btn" data-step-action="up" data-step-id="' + escapeHtml(step.id) + '"' + upDisabled + ' aria-label="Move step up">↑</button>'
+              +       '<button type="button" class="mini-btn" data-step-action="down" data-step-id="' + escapeHtml(step.id) + '"' + downDisabled + ' aria-label="Move step down">↓</button>'
+              +       '<button type="button" class="mini-btn danger" data-step-action="remove" data-step-id="' + escapeHtml(step.id) + '">Remove step</button>'
+              +     '</span>'
+              +   '</div>'
+              +   '<div class="custom-model-step-targets">'
+              +     step.targets.map(function (t) { return renderCustomModelTargetRow(step.id, t); }).join('')
+              +   '</div>'
+              +   '<div class="custom-model-step-footer">'
+              +     '<button type="button" class="mini-btn" data-step-action="add-target" data-step-id="' + escapeHtml(step.id) + '">+ Add target to step</button>'
+              +   '</div>'
+              +   '<div class="custom-model-field-error" data-step-error="' + escapeHtml(step.id) + '"></div>'
+              + '</div>';
+          }).join('');
+        }
+        renderCustomModelPreview();
+      }
+      function renderCustomModelTargetRow(stepId, target) {
+        var providerOptions = customModelProviderCatalog.map(function (p) {
+          return '<option value="' + escapeHtml(p.prefix) + '"' + (target.provider === p.prefix ? ' selected' : '') + '>' + escapeHtml(p.label) + '</option>';
+        }).join('');
+        var placeholder = (customModelProviderCatalog.find(function (p) { return p.prefix === target.provider; }) || {}).placeholder || 'model-id';
+        var weight = Math.max(1, Math.floor(Number(target.weight) || 1));
+        var enabled = target.enabled !== false;
+        var accountLabel = customModelAccountPickerLabel(target);
+        return ''
+          + '<div class="custom-model-target' + (enabled ? '' : ' disabled') + '" data-step-id="' + escapeHtml(stepId) + '" data-target-id="' + escapeHtml(target.id) + '">'
+          +   '<select class="custom-model-target-provider" data-target-field="provider" data-target-id="' + escapeHtml(target.id) + '" aria-label="Provider">' + providerOptions + '</select>'
+          +   '<input class="custom-model-target-model" type="text" data-target-field="model" data-target-id="' + escapeHtml(target.id) + '" value="' + escapeHtml(target.model) + '" placeholder="' + escapeHtml(placeholder) + '" autocomplete="off">'
+          +   '<button type="button" class="custom-model-target-accounts" data-target-action="open-picker" data-target-id="' + escapeHtml(target.id) + '" title="Click to choose accounts">' + escapeHtml(accountLabel) + '</button>'
+          +   '<input class="custom-model-target-weight" type="number" min="1" step="1" data-target-field="weight" data-target-id="' + escapeHtml(target.id) + '" value="' + weight + '" aria-label="Weight" title="Weight">'
+          +   '<label class="check-row" title="Enabled"><input type="checkbox" data-target-field="enabled" data-target-id="' + escapeHtml(target.id) + '"' + (enabled ? ' checked' : '') + '> on</label>'
+          +   '<span class="custom-model-target-toolbar">'
+          +     '<button type="button" class="mini-btn danger" data-target-action="remove" data-target-id="' + escapeHtml(target.id) + '">Remove</button>'
+          +   '</span>'
+          +   '<div class="custom-model-account-picker-popover" data-target-picker="' + escapeHtml(target.id) + '" hidden></div>'
+          + '</div>';
+      }
+      function customModelAccountPickerLabel(target) {
+        if (!target.accounts || !target.accounts.length) return 'All accounts (*)';
+        if (target.accounts.length === 1) return '1 account';
+        return target.accounts.length + ' accounts';
+      }
+      function renderCustomModelPreview() {
+        var previewEl = document.getElementById('customModelPreview');
+        if (!previewEl) return;
+        var model = customModelBuildPreviewModel();
+        if (!model) {
+          previewEl.innerHTML = '<div class="custom-model-preview-empty">Fill in alias and at least one route target to see a preview.</div>';
+          return;
+        }
+        previewEl.innerHTML = renderCustomModelCard(model);
+      }
+      function customModelBuildPreviewModel() {
+        var form = document.getElementById('customModelForm');
+        if (!form) return null;
+        var alias = form.querySelector('input[name="alias"]').value.trim();
+        if (!alias) return null;
+        var display = form.querySelector('input[name="display_name"]').value.trim();
+        var enabled = form.querySelector('input[name="enabled"]').checked;
+        var serialized = serializeCustomModelEditor(customModelEditorState);
+        if (!serialized.routes.length) return null;
+        return {
+          alias: alias,
+          display_name: display || null,
+          enabled: enabled,
+          routes: serialized.routes,
+          target_count: serialized.routes.reduce(function (s, g) { return s + g.targets.length; }, 0),
+          route_group_count: serialized.routes.length,
+          id: 'ctm:' + alias
+        };
+      }
+      // ---------- State mutators ----------
+      function addCustomModelStep() {
+        customModelEditorState.steps.push(customModelEmptyStep());
+        renderCustomModelEditor();
+        renderCustomModelFieldErrors();
+      }
+      function removeCustomModelStep(stepId) {
+        customModelEditorState.steps = customModelEditorState.steps.filter(function (s) { return s.id !== stepId; });
+        if (!customModelEditorState.steps.length) customModelEditorState.steps.push(customModelEmptyStep());
+        renderCustomModelEditor();
+        renderCustomModelFieldErrors();
+      }
+      function moveCustomModelStep(stepId, dir) {
+        var arr = customModelEditorState.steps;
+        var idx = arr.findIndex(function (s) { return s.id === stepId; });
+        if (idx < 0) return;
+        var j = idx + dir;
+        if (j < 0 || j >= arr.length) return;
+        var tmp = arr[idx]; arr[idx] = arr[j]; arr[j] = tmp;
+        renderCustomModelEditor();
+        renderCustomModelFieldErrors();
+      }
+      function addCustomModelTarget(stepId, partial) {
+        var step = customModelEditorState.steps.find(function (s) { return s.id === stepId; });
+        if (!step) return;
+        var fresh = customModelEmptyTarget(partial || {});
+        if (partial && partial.provider) fresh.provider = partial.provider;
+        step.targets.push(fresh);
+        renderCustomModelEditor();
+        renderCustomModelFieldErrors();
+      }
+      function removeCustomModelTarget(stepId, targetId) {
+        var step = customModelEditorState.steps.find(function (s) { return s.id === stepId; });
+        if (!step) return;
+        step.targets = step.targets.filter(function (t) { return t.id !== targetId; });
+        if (!step.targets.length) step.targets.push(customModelEmptyTarget());
+        renderCustomModelEditor();
+        renderCustomModelFieldErrors();
+      }
+      function patchCustomModelTarget(targetId, patch) {
+        for (var i = 0; i < customModelEditorState.steps.length; i++) {
+          var step = customModelEditorState.steps[i];
+          var t = step.targets.find(function (x) { return x.id === targetId; });
+          if (t) {
+            if (patch.provider != null) t.provider = patch.provider;
+            if (patch.model != null) t.model = patch.model;
+            if (patch.accounts != null) t.accounts = patch.accounts.slice();
+            if (patch.weight != null) t.weight = Math.max(1, Math.floor(Number(patch.weight) || 1));
+            if (patch.enabled != null) t.enabled = !!patch.enabled;
+            return;
+          }
+        }
+      }
+      // ---------- Account picker ----------
+      let customModelAccountPickerOpenId = null;
+      function openCustomModelAccountPicker(targetId) {
+        var popover = document.querySelector('[data-target-picker="' + targetId + '"]');
+        if (!popover) return;
+        var wasOpen = !popover.hidden;
+        closeCustomModelAccountPickers();
+        if (wasOpen) return;
+        renderCustomModelAccountPicker(targetId, popover);
+        popover.hidden = false;
+        customModelAccountPickerOpenId = targetId;
+      }
+      function closeCustomModelAccountPickers() {
+        document.querySelectorAll('.custom-model-account-picker-popover').forEach(function (el) { el.hidden = true; });
+        customModelAccountPickerOpenId = null;
+      }
+      function renderCustomModelAccountPicker(targetId, popover) {
+        var accounts = dashboardState.customModelAccounts || [];
+        var target = null;
+        for (var i = 0; i < customModelEditorState.steps.length && !target; i++) {
+          target = customModelEditorState.steps[i].targets.find(function (t) { return t.id === targetId; });
+        }
+        if (!target) return;
+        var canonical = customModelCanonicalizePrefix(target.provider) || (target.provider || '').toLowerCase();
+        var filtered = accounts.filter(function (a) {
+          return !canonical || (a.provider || '').toLowerCase() === canonical;
+        });
+        var html = ''
+          + '<div class="custom-model-account-picker-head">'
+          +   '<button type="button" class="mini-btn" data-picker-action="select-all" data-target-id="' + escapeHtml(targetId) + '">All accounts (*)</button>'
+          +   '<button type="button" class="mini-btn secondary-button" data-picker-action="clear" data-target-id="' + escapeHtml(targetId) + '">Clear</button>'
+          + '</div>';
+        if (!filtered.length) {
+          html += '<div class="muted">No account keys match this provider.</div>';
+        } else {
+          var selected = new Set(target.accounts || []);
+          html += '<div class="custom-model-account-provider">';
+          filtered.forEach(function (a) {
+            var key = a.key || '';
+            var title = a.label || a.account_id || key;
+            var checked = selected.has(key) ? ' checked' : '';
+            html += '<label class="custom-model-account-row" style="cursor:pointer;">'
+              + '<div><strong>' + escapeHtml(title) + '</strong><br><code>' + escapeHtml(key) + '</code></div>'
+              + '<input type="checkbox" data-picker-checkbox="' + escapeHtml(key) + '" data-target-id="' + escapeHtml(targetId) + '"' + checked + '>'
+              + '</label>';
+          });
+          html += '</div>';
+        }
+        popover.innerHTML = html;
+      }
+      // ---------- Serialize / validate ----------
+      function serializeCustomModelEditor(state) {
+        var routes = [];
+        state.steps.forEach(function (step) {
+          var lineTokens = [];
+          step.targets.forEach(function (t) {
+            var provider = (t.provider || '').toLowerCase();
+            var model = String(t.model || '').trim();
+            if (!provider || !model) return;
+            var enabled = t.enabled !== false;
+            var weight = Math.max(1, Math.floor(Number(t.weight) || 1));
+            var weightSuffix = weight > 1 ? ' x' + weight : '';
+            var accounts = (t.accounts || []).map(function (x) { return String(x || '').trim(); }).filter(Boolean);
+            if (!accounts.length) {
+              if (!enabled) return;
+              lineTokens.push(provider + ':' + model + weightSuffix);
+            } else {
+              accounts.forEach(function (acct) {
+                lineTokens.push(provider + ':' + model + '@' + acct + weightSuffix);
+              });
+            }
+          });
+          if (lineTokens.length) {
+            routes.push({ targets: lineTokens.map(function (tok) {
+              return { model: tok, weight: 1 };
+            }) });
+          }
+        });
+        var text = routes.map(function (g) {
+          return g.targets.map(function (t) { return t.model; }).join(', ');
+        }).join('\n');
+        return { routes: routes, text: text };
+      }
+      function validateCustomModelEditor() {
+        var errors = { alias: '', steps: {} };
+        var aliasInput = document.getElementById('customModelAliasInput');
+        var alias = aliasInput ? aliasInput.value.trim() : '';
+        if (!alias) errors.alias = 'Alias is required.';
+        else if (/[\s:/\\]/.test(alias)) errors.alias = 'Alias must not contain whitespace, colon, slash, or backslash.';
+        var totalEnabled = 0;
+        customModelEditorState.steps.forEach(function (step) {
+          var messages = [];
+          var stepEnabled = 0;
+          step.targets.forEach(function (t) {
+            var provider = (t.provider || '').toLowerCase();
+            var model = String(t.model || '').trim();
+            if (!model) return;
+            if (t.enabled === false) return;
+            stepEnabled++; totalEnabled++;
+            var canonical = customModelCanonicalizePrefix(provider);
+            if (canonical === 'ctm') {
+              messages.push('Custom models cannot target another custom model.');
+            } else if (!canonical || customModelProviderPrefixes.indexOf(canonical) < 0) {
+              messages.push('Unsupported provider prefix "' + provider + '" for "' + model + '".');
+            }
+          });
+          if (!stepEnabled) messages.push('At least one enabled target is required in this step.');
+          if (messages.length) errors.steps[step.id] = messages.join(' ');
+        });
+        if (!totalEnabled && !Object.keys(errors.steps).length) {
+          var first = customModelEditorState.steps[0];
+          if (first) errors.steps[first.id] = 'At least one route target is required.';
+        }
+        return errors;
+      }
+      function renderCustomModelFieldErrors() {
+        var errors = validateCustomModelEditor();
+        var aliasErrEl = document.getElementById('customModelAliasError');
+        if (aliasErrEl) aliasErrEl.textContent = errors.alias || '';
+        document.querySelectorAll('[data-step-error]').forEach(function (el) {
+          var sid = el.getAttribute('data-step-error');
+          el.textContent = (errors.steps && errors.steps[sid]) || '';
+        });
+      }
+      // ---------- Account keys panel (click-to-assign into focused target) ----------
       function renderCustomModelAccountKeys() {
         var list = document.getElementById('customModelAccountKeys');
         if (!list) return;
@@ -3948,23 +4450,23 @@ async fn dashboard() -> impl IntoResponse {
           return;
         }
         var grouped = {};
-        accounts.forEach(function(account) {
-          var provider = account.provider || 'unknown';
-          if (!grouped[provider]) grouped[provider] = [];
-          grouped[provider].push(account);
+        accounts.forEach(function (a) {
+          var p = a.provider || 'unknown';
+          if (!grouped[p]) grouped[p] = [];
+          grouped[p].push(a);
         });
         var providers = Object.keys(grouped).sort();
-        list.innerHTML = providers.map(function(provider) {
-          var items = grouped[provider] || [];
-          var label = items[0].provider_label || providerLabels[provider] || provider;
-          var rows = items.map(function(account) {
-            var key = account.key || '';
-            var keyArg = escapeHtml(jsString(key));
-            var title = account.label || account.account_id || key;
+        list.innerHTML = providers.map(function (provider) {
+          var items = grouped[provider];
+          var label = (items[0] && items[0].provider_label) || providerLabels[provider] || provider;
+          var rows = items.map(function (a) {
+            var key = a.key || '';
+            var keyArg = jsString(key);
+            var title = a.label || a.account_id || key;
             return '<div class="custom-model-account-row">'
               + '<div><strong>' + escapeHtml(title) + '</strong><br><code>' + escapeHtml(key) + '</code></div>'
               + '<span class="custom-model-account-actions">'
-              + '<button type="button" class="mini-btn" onclick="insertCustomModelAccountKey(' + keyArg + ')">Use</button>'
+              + '<button type="button" class="mini-btn" onclick="useCustomModelAccountKey(' + keyArg + ')">Use</button>'
               + '<button type="button" class="mini-btn secondary-button" onclick="copyCustomModelAccountKey(' + keyArg + ')">Copy</button>'
               + '</span>'
               + '</div>';
@@ -3972,64 +4474,53 @@ async fn dashboard() -> impl IntoResponse {
           return '<div class="custom-model-account-provider"><strong>' + escapeHtml(label) + '</strong>' + rows + '</div>';
         }).join('');
       }
-      function applyAccountKeyToRouteToken(token, key) {
-        var raw = String(token || '');
-        var leading = raw.match(/^\s*/)[0];
-        var trailing = raw.match(/\s*$/)[0];
-        var core = raw.trim();
-        if (!core) return raw + '@' + key;
-        var atIndex = core.indexOf('@');
-        if (atIndex !== -1) {
-          core = core.slice(0, atIndex).trim();
-        }
-        return leading + core + '@' + key + trailing;
-      }
-      function insertCustomModelAccountKey(key) {
+      function useCustomModelAccountKey(key) {
         key = String(key || '').trim();
         if (!key) return;
-        var input = document.getElementById('customModelRoutesInput');
-        if (!input) return;
-        var value = input.value || '';
-        var start = input.selectionStart == null ? value.length : input.selectionStart;
-        var end = input.selectionEnd == null ? start : input.selectionEnd;
-        if (end > start) {
-          input.value = value.slice(0, start)
-            + applyAccountKeyToRouteToken(value.slice(start, end), key)
-            + value.slice(end);
-        } else {
-          var leftComma = value.lastIndexOf(',', start - 1);
-          var leftLine = value.lastIndexOf('\n', start - 1);
-          var tokenStart = Math.max(leftComma, leftLine) + 1;
-          var rightComma = value.indexOf(',', start);
-          var rightLine = value.indexOf('\n', start);
-          var tokenEndCandidates = [rightComma, rightLine].filter(function(index) { return index !== -1; });
-          var tokenEnd = tokenEndCandidates.length ? Math.min.apply(Math, tokenEndCandidates) : value.length;
-          var token = value.slice(tokenStart, tokenEnd);
-          if (token.trim()) {
-            var replacement = applyAccountKeyToRouteToken(token, key);
-            input.value = value.slice(0, tokenStart) + replacement + value.slice(tokenEnd);
-            start = tokenStart + replacement.length;
-          } else {
-            input.value = value.slice(0, start) + '@' + key + value.slice(end);
-            start += key.length + 1;
+        var targetId = customModelEditorState.lastFocusedTargetId || customModelFindTargetForKey(key);
+        if (!targetId) {
+          setText('customModelStatus', 'Click a target row first, then click Use.');
+          return;
+        }
+        for (var i = 0; i < customModelEditorState.steps.length; i++) {
+          var step = customModelEditorState.steps[i];
+          var t = step.targets.find(function (x) { return x.id === targetId; });
+          if (t) {
+            if (t.accounts.indexOf(key) === -1) t.accounts.push(key);
+            closeCustomModelAccountPickers();
+            renderCustomModelEditor();
+            renderCustomModelFieldErrors();
+            setText('customModelStatus', 'Account key added to target.');
+            return;
           }
         }
-        input.focus();
-        input.setSelectionRange(start, start);
-        setText('customModelStatus', 'Account key inserted into Routes.');
+      }
+      function customModelFindTargetForKey(key) {
+        var accounts = dashboardState.customModelAccounts || [];
+        var acct = accounts.find(function (a) { return a.key === key; });
+        if (!acct) return null;
+        var want = (acct.provider || '').toLowerCase();
+        for (var i = 0; i < customModelEditorState.steps.length; i++) {
+          var t = customModelEditorState.steps[i].targets.find(function (x) {
+            return (x.provider || '').toLowerCase() === want;
+          });
+          if (t) return t.id;
+        }
+        return null;
       }
       function copyCustomModelAccountKey(key) {
         if (!key) return;
         if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(key).then(function() {
+          navigator.clipboard.writeText(key).then(function () {
             notify('Account key copied');
-          }).catch(function() {
+          }).catch(function () {
             notify(key);
           });
         } else {
           notify(key);
         }
       }
+      // ---------- Modal open/close + submit ----------
       function openCustomModelModal(alias) {
         var model = alias ? findCustomModel(alias) : null;
         var title = document.getElementById('customModelTitle');
@@ -4040,58 +4531,195 @@ async fn dashboard() -> impl IntoResponse {
         form.querySelector('input[name="alias"]').value = model ? normalizeCustomAlias(model.alias) : '';
         form.querySelector('input[name="display_name"]').value = model && model.display_name ? model.display_name : '';
         form.querySelector('input[name="enabled"]').checked = !model || model.enabled !== false;
-        form.querySelector('textarea[name="routes"]').value = model ? customRoutesTextarea(customRoutes(model)) : '';
+        customModelEditorState.steps = customModelHydrateEditor(model).steps;
+        customModelEditorState.lastFocusedTargetId = null;
+        closeCustomModelAccountPickers();
+        renderCustomModelEditor();
         renderCustomModelAccountKeys();
+        renderCustomModelFieldErrors();
         setText('customModelStatus', '');
         openModal('customModelModal');
+        var aliasInput = document.getElementById('customModelAliasInput');
+        if (aliasInput) setTimeout(function () { aliasInput.focus(); aliasInput.select && aliasInput.select(); }, 30);
       }
       function closeCustomModelModal() {
         closeModal('customModelModal');
-        var status = document.getElementById('customModelStatus');
-        if (status) status.textContent = '';
-      }
-      function parseCustomRouteGroups(text) {
-        return String(text || '')
-          .split(/\n+/)
-          .map(function(line) {
-            return line.split(',')
-              .map(function(value) { return value.trim(); })
-              .filter(Boolean);
-          })
-          .filter(function(group) { return group.length > 0; });
+        closeCustomModelAccountPickers();
+        setText('customModelStatus', '');
       }
       async function submitCustomModelForm(e) {
         e.preventDefault();
         var form = e.target;
-        var routesText = form.querySelector('textarea[name="routes"]').value;
+        var serialized = serializeCustomModelEditor(customModelEditorState);
+        var textarea = form.querySelector('textarea[name="routes"]');
+        if (textarea) textarea.value = serialized.text;
+        var errors = validateCustomModelEditor();
+        renderCustomModelFieldErrors();
+        if (errors.alias) {
+          setText('customModelStatus', errors.alias);
+          var aliasInput = document.getElementById('customModelAliasInput');
+          if (aliasInput) aliasInput.focus();
+          return;
+        }
+        var totalEnabled = 0;
+        customModelEditorState.steps.forEach(function (s) {
+          s.targets.forEach(function (t) {
+            if (t.enabled !== false && String(t.model || '').trim()) totalEnabled++;
+          });
+        });
+        if (!totalEnabled) {
+          setText('customModelStatus', 'At least one route target is required.');
+          return;
+        }
         var payload = {
           original_alias: form.querySelector('input[name="original_alias"]').value.trim() || undefined,
           alias: form.querySelector('input[name="alias"]').value.trim(),
           display_name: form.querySelector('input[name="display_name"]').value.trim() || undefined,
           enabled: form.querySelector('input[name="enabled"]').checked,
-          routes: routesText
+          routes: serialized.text
         };
-        if (!payload.alias) {
-          setText('customModelStatus', 'Alias is required.');
-          return;
-        }
-        if (!parseCustomRouteGroups(routesText).length) {
-          setText('customModelStatus', 'At least one route target is required.');
-          return;
-        }
         setText('customModelStatus', 'Saving custom model...');
-        const res = await adminFetch('/custom-models/save', {
+        var res = await adminFetch('/custom-models/save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
         if (!res) return;
-        const data = await res.json();
+        var data = await res.json();
         setText('customModelStatus', data.message || (data.ok ? 'Saved.' : 'Save failed.'));
         notify(data.message || (data.ok ? 'Custom model saved' : 'Save failed'), data.ok === false ? 'error' : '');
         if (!data.ok) return;
         closeCustomModelModal();
         refreshCustomModels();
+      }
+      function bindCustomModelEditorEvents() {
+        var addBtn = document.getElementById('addCustomStepBtn');
+        if (addBtn) addBtn.addEventListener('click', addCustomModelStep);
+        var stepsEl = document.getElementById('customModelSteps');
+        if (!stepsEl) return;
+        stepsEl.addEventListener('click', function (e) {
+          var stepBtn = e.target.closest('[data-step-action]');
+          if (stepBtn) {
+            var sid = stepBtn.getAttribute('data-step-id');
+            var action = stepBtn.getAttribute('data-step-action');
+            if (action === 'remove') { removeCustomModelStep(sid); return; }
+            if (action === 'up') { moveCustomModelStep(sid, -1); return; }
+            if (action === 'down') { moveCustomModelStep(sid, 1); return; }
+            if (action === 'add-target') { addCustomModelTarget(sid); return; }
+          }
+          var targetBtn = e.target.closest('[data-target-action]');
+          if (targetBtn) {
+            var tid = targetBtn.getAttribute('data-target-id');
+            var host = targetBtn.closest('.custom-model-target');
+            var stepId = host ? host.getAttribute('data-step-id') : null;
+            var taction = targetBtn.getAttribute('data-target-action');
+            if (taction === 'remove') {
+              if (stepId) removeCustomModelTarget(stepId, tid);
+              return;
+            }
+            if (taction === 'open-picker') {
+              if (host) customModelEditorState.lastFocusedTargetId = tid;
+              openCustomModelAccountPicker(tid);
+              return;
+            }
+          }
+          var pickerBtn = e.target.closest('[data-picker-action]');
+          if (pickerBtn) {
+            var paction = pickerBtn.getAttribute('data-picker-action');
+            var ptid = pickerBtn.getAttribute('data-target-id');
+            if (paction === 'select-all' || paction === 'clear') {
+              patchCustomModelTarget(ptid, { accounts: [] });
+              closeCustomModelAccountPickers();
+              renderCustomModelEditor();
+              return;
+            }
+          }
+        });
+        stepsEl.addEventListener('change', function (e) {
+          var el = e.target;
+          if (!el || !el.getAttribute) return;
+          if (el.hasAttribute && el.hasAttribute('data-picker-checkbox')) {
+            var key = el.getAttribute('data-picker-checkbox');
+            var pickTid = el.getAttribute('data-target-id');
+            for (var i = 0; i < customModelEditorState.steps.length; i++) {
+              var t = customModelEditorState.steps[i].targets.find(function (x) { return x.id === pickTid; });
+              if (t) {
+                var set = new Set(t.accounts);
+                if (el.checked) set.add(key); else set.delete(key);
+                patchCustomModelTarget(pickTid, { accounts: Array.from(set) });
+                renderCustomModelEditor();
+                return;
+              }
+            }
+            return;
+          }
+          var tid = el.getAttribute('data-target-id');
+          if (!tid) return;
+          var field = el.getAttribute('data-target-field');
+          if (field === 'provider') {
+            patchCustomModelTarget(tid, { provider: el.value, accounts: [] });
+            closeCustomModelAccountPickers();
+            renderCustomModelEditor();
+            renderCustomModelFieldErrors();
+            return;
+          }
+          if (field === 'model') {
+            patchCustomModelTarget(tid, { model: el.value });
+            renderCustomModelPreview();
+            renderCustomModelFieldErrors();
+            return;
+          }
+          if (field === 'weight') {
+            var w = parseInt(el.value, 10);
+            if (!Number.isFinite(w) || w < 1) w = 1;
+            el.value = String(w);
+            patchCustomModelTarget(tid, { weight: w });
+            return;
+          }
+          if (field === 'enabled') {
+            patchCustomModelTarget(tid, { enabled: el.checked });
+            renderCustomModelEditor();
+            renderCustomModelFieldErrors();
+            return;
+          }
+        });
+        stepsEl.addEventListener('input', function (e) {
+          var el = e.target;
+          if (!el || !el.getAttribute) return;
+          if (el.getAttribute('data-target-field') !== 'model') return;
+          var tid = el.getAttribute('data-target-id');
+          if (!tid) return;
+          patchCustomModelTarget(tid, { model: el.value });
+          renderCustomModelPreview();
+        });
+        stepsEl.addEventListener('focusin', function (e) {
+          var el = e.target;
+          var tid = el.getAttribute && el.getAttribute('data-target-id');
+          if (tid) customModelEditorState.lastFocusedTargetId = tid;
+        });
+        var aliasInput = document.getElementById('customModelAliasInput');
+        if (aliasInput) aliasInput.addEventListener('input', function () {
+          var errEl = document.getElementById('customModelAliasError');
+          if (!errEl) return;
+          var v = aliasInput.value.trim();
+          if (!v) errEl.textContent = 'Alias is required.';
+          else if (/[\s:/\\]/.test(v)) errEl.textContent = 'Alias must not contain whitespace, colon, slash, or backslash.';
+          else errEl.textContent = '';
+          renderCustomModelPreview();
+        });
+        var displayInput = document.getElementById('customModelDisplayNameInput');
+        if (displayInput) displayInput.addEventListener('input', renderCustomModelPreview);
+        var enabledInput = document.getElementById('customModelEnabledInput');
+        if (enabledInput) enabledInput.addEventListener('change', renderCustomModelPreview);
+        document.addEventListener('click', function (e) {
+          if (!customModelAccountPickerOpenId) return;
+          var popover = document.querySelector('[data-target-picker="' + customModelAccountPickerOpenId + '"]');
+          if (!popover) return;
+          if (popover.contains(e.target)) return;
+          var trigger = document.querySelector('[data-target-action="open-picker"][data-target-id="' + customModelAccountPickerOpenId + '"]');
+          if (trigger && trigger.contains(e.target)) return;
+          closeCustomModelAccountPickers();
+        }, true);
       }
       function deleteCustomModel(alias) {
         var model = findCustomModel(alias);
@@ -4787,14 +5415,22 @@ async fn dashboard() -> impl IntoResponse {
             </label>
           </div>
           <div class="custom-model-form-row">
-            <label for="customModelRoutesInput">Routes</label>
-            <textarea id="customModelRoutesInput" name="routes" rows="7" placeholder="agw:gemini-2.5-pro@agw:email:user@example.com, gem:gemini-2.5-pro&#10;min:MiniMax-M3&#10;agw:gpt-oss-120b-medium"></textarea>
-            <div class="muted">One fallback step per line. Targets separated by comma on the same line are load-balanced. Add @account-key to restrict a target to one account.</div>
+            <label>Fallback steps</label>
+            <div class="muted">Each step runs if the previous one fails. Targets inside the same step are load-balanced. Pick multiple accounts on a target to spread load across them; leave empty to use any account.</div>
+            <div id="customModelSteps" class="custom-model-steps"></div>
+            <div><button type="button" id="addCustomStepBtn" class="mini-btn">+ Add fallback step</button></div>
+            <div id="customModelAliasError" class="custom-model-field-error"></div>
           </div>
           <div class="custom-model-form-row">
             <label>Account keys</label>
+            <div class="muted">Quick "Use" inserts the key into the most recently focused target. The picker on each target supports multiple accounts.</div>
             <div id="customModelAccountKeys" class="custom-model-account-list muted">Loading account keys...</div>
           </div>
+          <div class="custom-model-form-row">
+            <label>Preview</label>
+            <div id="customModelPreview" class="custom-model-preview-wrap"></div>
+          </div>
+          <textarea id="customModelRoutesInput" name="routes" hidden></textarea>
           <div id="customModelStatus" class="muted"></div>
           <div class="modal-actions" style="margin-top:8px;">
             <button type="submit">Save</button>
@@ -5473,6 +6109,7 @@ async fn dashboard() -> impl IntoResponse {
         }
       });
       document.getElementById('customModelForm').addEventListener('submit', submitCustomModelForm);
+      bindCustomModelEditorEvents();
       document.getElementById('copilotDeviceForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         await pollCopilotDevice(false);
