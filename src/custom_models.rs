@@ -136,10 +136,11 @@ fn validate_target(target: &CustomModelTarget) -> Result<(), String> {
     if model.is_empty() {
         return Err("target model is required".to_string());
     }
-    if model.starts_with("ctm:") {
+    let normalized_model = normalize_target_model_id(model);
+    if normalized_model.starts_with("ctm:") {
         return Err("custom models cannot target another custom model".to_string());
     }
-    if model.contains(':') && !is_supported_target_prefix(model) {
+    if normalized_model.contains(':') && !is_supported_target_prefix(&normalized_model) {
         return Err(format!("unsupported target model prefix in '{}'", model));
     }
     Ok(())
@@ -149,11 +150,39 @@ fn is_supported_target_prefix(model: &str) -> bool {
     let Some((prefix, rest)) = model.split_once(':') else {
         return true;
     };
-    !rest.trim().is_empty()
-        && matches!(
-            prefix.to_ascii_lowercase().as_str(),
-            "agw" | "gem" | "qwn" | "dsk" | "grk" | "min" | "cop" | "cld" | "glm" | "cod"
-        )
+    !rest.trim().is_empty() && canonical_target_provider_prefix(prefix).is_some()
+}
+
+fn canonical_target_provider_prefix(prefix: &str) -> Option<&'static str> {
+    match prefix.trim().to_ascii_lowercase().as_str() {
+        "agw" | "antigravity" | "anti-gravity" => Some("agw"),
+        "gem" | "gemini" => Some("gem"),
+        "qwn" | "qwen" => Some("qwn"),
+        "dsk" | "deepseek" => Some("dsk"),
+        "grk" | "grok" | "xai" => Some("grk"),
+        "min" | "minimax" => Some("min"),
+        "cop" | "copilot" | "github-copilot" | "github_copilot" => Some("cop"),
+        "cld" | "claude" | "anthropic" => Some("cld"),
+        "glm" | "zai" | "z-ai" => Some("glm"),
+        "cod" | "codex" => Some("cod"),
+        "ctm" | "custom" => Some("ctm"),
+        _ => None,
+    }
+}
+
+fn normalize_target_model_id(model: &str) -> String {
+    let model = model.trim();
+    let Some((prefix, rest)) = model.split_once(':') else {
+        return model.to_string();
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return model.to_string();
+    };
+    match canonical_target_provider_prefix(prefix) {
+        Some(canonical) => format!("{}:{}", canonical, rest),
+        None => model.to_string(),
+    }
 }
 
 pub(crate) fn normalize_model(mut model: CustomModel) -> CustomModel {
@@ -250,10 +279,10 @@ fn legacy_route_groups(
 fn parse_target_spec(value: &str) -> (String, Option<String>) {
     let trimmed = value.trim();
     let Some((model, account)) = trimmed.split_once('@') else {
-        return (trimmed.to_string(), None);
+        return (normalize_target_model_id(trimmed), None);
     };
     (
-        model.trim().to_string(),
+        normalize_target_model_id(model),
         Some(account.trim().to_string()).filter(|value| !value.is_empty()),
     )
 }
@@ -435,6 +464,40 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].targets.len(), 2);
         assert_eq!(groups[1].targets[0].model, "min:MiniMax-M3");
+    }
+
+    #[test]
+    fn normalizes_full_provider_target_prefixes_without_changing_account_keys() {
+        let model = normalize_model(custom_model(
+            "demo",
+            vec![
+                vec![
+                    "minimax:MiniMax-M3@minimax:account_id:minimax-1",
+                    "claude:claude-sonnet-4-5@claude:organization:org-1",
+                ],
+                vec![
+                    "antigravity:gemini-3-pro@antigravity:email:one@example.com",
+                    "github-copilot:gpt-5.1@github-copilot:user:octo",
+                    "codex:gpt-5.4@codex:user:gio",
+                ],
+            ],
+        ));
+
+        let first = &model.routes[0].targets[0];
+        assert_eq!(first.model, "min:MiniMax-M3");
+        assert_eq!(
+            first.account.as_deref(),
+            Some("minimax:account_id:minimax-1")
+        );
+
+        let second = &model.routes[0].targets[1];
+        assert_eq!(second.model, "cld:claude-sonnet-4-5");
+        assert_eq!(second.account.as_deref(), Some("claude:organization:org-1"));
+
+        assert_eq!(model.routes[1].targets[0].model, "agw:gemini-3-pro");
+        assert_eq!(model.routes[1].targets[1].model, "cop:gpt-5.1");
+        assert_eq!(model.routes[1].targets[2].model, "cod:gpt-5.4");
+        validate_model(&model).expect("full provider prefixes are accepted after normalization");
     }
 
     #[test]

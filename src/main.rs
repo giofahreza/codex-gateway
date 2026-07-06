@@ -1101,6 +1101,11 @@ async fn dashboard() -> impl IntoResponse {
         gap: 8px;
         align-items: center;
       }
+      .custom-model-account-actions {
+        display: flex;
+        gap: 6px;
+        justify-content: flex-end;
+      }
       .custom-model-account-row code {
         overflow-wrap: anywhere;
       }
@@ -1738,6 +1743,9 @@ async fn dashboard() -> impl IntoResponse {
         .notification-account-row,
         .custom-model-account-row {
           grid-template-columns: 1fr;
+        }
+        .custom-model-account-actions {
+          justify-content: flex-start;
         }
         .notification-provider-actions {
           justify-content: flex-start;
@@ -3955,11 +3963,60 @@ async fn dashboard() -> impl IntoResponse {
             var title = account.label || account.account_id || key;
             return '<div class="custom-model-account-row">'
               + '<div><strong>' + escapeHtml(title) + '</strong><br><code>' + escapeHtml(key) + '</code></div>'
+              + '<span class="custom-model-account-actions">'
+              + '<button type="button" class="mini-btn" onclick="insertCustomModelAccountKey(' + keyArg + ')">Use</button>'
               + '<button type="button" class="mini-btn secondary-button" onclick="copyCustomModelAccountKey(' + keyArg + ')">Copy</button>'
+              + '</span>'
               + '</div>';
           }).join('');
           return '<div class="custom-model-account-provider"><strong>' + escapeHtml(label) + '</strong>' + rows + '</div>';
         }).join('');
+      }
+      function applyAccountKeyToRouteToken(token, key) {
+        var raw = String(token || '');
+        var leading = raw.match(/^\s*/)[0];
+        var trailing = raw.match(/\s*$/)[0];
+        var core = raw.trim();
+        if (!core) return raw + '@' + key;
+        var atIndex = core.indexOf('@');
+        if (atIndex !== -1) {
+          core = core.slice(0, atIndex).trim();
+        }
+        return leading + core + '@' + key + trailing;
+      }
+      function insertCustomModelAccountKey(key) {
+        key = String(key || '').trim();
+        if (!key) return;
+        var input = document.getElementById('customModelRoutesInput');
+        if (!input) return;
+        var value = input.value || '';
+        var start = input.selectionStart == null ? value.length : input.selectionStart;
+        var end = input.selectionEnd == null ? start : input.selectionEnd;
+        if (end > start) {
+          input.value = value.slice(0, start)
+            + applyAccountKeyToRouteToken(value.slice(start, end), key)
+            + value.slice(end);
+        } else {
+          var leftComma = value.lastIndexOf(',', start - 1);
+          var leftLine = value.lastIndexOf('\n', start - 1);
+          var tokenStart = Math.max(leftComma, leftLine) + 1;
+          var rightComma = value.indexOf(',', start);
+          var rightLine = value.indexOf('\n', start);
+          var tokenEndCandidates = [rightComma, rightLine].filter(function(index) { return index !== -1; });
+          var tokenEnd = tokenEndCandidates.length ? Math.min.apply(Math, tokenEndCandidates) : value.length;
+          var token = value.slice(tokenStart, tokenEnd);
+          if (token.trim()) {
+            var replacement = applyAccountKeyToRouteToken(token, key);
+            input.value = value.slice(0, tokenStart) + replacement + value.slice(tokenEnd);
+            start = tokenStart + replacement.length;
+          } else {
+            input.value = value.slice(0, start) + '@' + key + value.slice(end);
+            start += key.length + 1;
+          }
+        }
+        input.focus();
+        input.setSelectionRange(start, start);
+        setText('customModelStatus', 'Account key inserted into Routes.');
       }
       function copyCustomModelAccountKey(key) {
         if (!key) return;
