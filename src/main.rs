@@ -684,6 +684,33 @@ async fn dashboard() -> impl IntoResponse {
         margin-bottom: 10px;
         font-weight: 700;
       }
+      .settings-tabs {
+        display: flex;
+        gap: 8px;
+        margin: 10px 0 14px 0;
+        border-bottom: 1px solid var(--border);
+        overflow-x: auto;
+      }
+      .settings-tab {
+        border: 0;
+        border-bottom: 2px solid transparent;
+        border-radius: 0;
+        background: transparent;
+        color: var(--muted);
+        padding: 9px 10px;
+        white-space: nowrap;
+      }
+      .settings-tab:hover {
+        background: var(--surface-alt);
+        color: var(--text);
+      }
+      .settings-tab.is-active {
+        border-bottom-color: var(--accent);
+        color: var(--text);
+      }
+      .settings-panel[hidden] {
+        display: none;
+      }
       .notification-channel-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1053,6 +1080,29 @@ async fn dashboard() -> impl IntoResponse {
       .custom-model-form-row {
         display: grid;
         gap: 6px;
+      }
+      .custom-model-account-list {
+        display: grid;
+        gap: 8px;
+        max-height: 220px;
+        overflow: auto;
+        padding: 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-alt);
+      }
+      .custom-model-account-provider {
+        display: grid;
+        gap: 6px;
+      }
+      .custom-model-account-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+      }
+      .custom-model-account-row code {
+        overflow-wrap: anywhere;
       }
       .inline-checks {
         display: flex;
@@ -1685,7 +1735,8 @@ async fn dashboard() -> impl IntoResponse {
         }
         .notification-channel-grid,
         .notification-provider-head,
-        .notification-account-row {
+        .notification-account-row,
+        .custom-model-account-row {
           grid-template-columns: 1fr;
         }
         .notification-provider-actions {
@@ -2044,6 +2095,7 @@ async fn dashboard() -> impl IntoResponse {
           glm: []
         },
         customModels: [],
+        customModelAccounts: [],
         providerSettings: readProviderDashboardSettings(),
         notificationSettings: null,
         quotas: {
@@ -2178,6 +2230,17 @@ async fn dashboard() -> impl IntoResponse {
       }
       function resetProviderDashboardSettings() {
         saveAndRenderProviderDashboardSettings(normalizeProviderDashboardSettings(null));
+      }
+      function setAppSettingsTab(tab) {
+        var target = tab === 'notifications' ? 'notifications' : 'dashboard';
+        document.querySelectorAll('[data-settings-tab]').forEach(function(button) {
+          var active = button.getAttribute('data-settings-tab') === target;
+          button.classList.toggle('is-active', active);
+          button.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+        document.querySelectorAll('[data-settings-panel]').forEach(function(panel) {
+          panel.hidden = panel.getAttribute('data-settings-panel') !== target;
+        });
       }
       async function loadNotificationSettings() {
         setText('notificationStatus', 'Loading notification settings...');
@@ -2360,6 +2423,7 @@ async fn dashboard() -> impl IntoResponse {
         updateNotificationStatusText(data.message || (data.ok ? 'Test notification sent' : 'Test notification failed'));
       }
       function openAppSettingsModal() {
+        setAppSettingsTab('dashboard');
         renderProviderSettingsList();
         loadNotificationSettings();
         setMobileNavOpen(false);
@@ -3772,10 +3836,27 @@ async fn dashboard() -> impl IntoResponse {
           return target && target.enabled !== false && String(target.model || '').trim();
         });
       }
-      function customTargetTextarea(targets) {
-        return enabledCustomTargets(targets).map(function(target) {
-          return target.model;
-        }).join('\n');
+      function customTargetLabel(target) {
+        var model = String(target && target.model || '').trim();
+        var account = String(target && target.account || '').trim();
+        return account ? model + '@' + account : model;
+      }
+      function customRoutes(model) {
+        if (model && Array.isArray(model.routes)) return model.routes;
+        var routes = [];
+        var primary = enabledCustomTargets(model && model.primary_models);
+        if (primary.length) routes.push({ targets: primary });
+        enabledCustomTargets(model && model.fallback_models).forEach(function(target) {
+          routes.push({ targets: [target] });
+        });
+        return routes;
+      }
+      function customRoutesTextarea(routes) {
+        return (routes || []).map(function(group) {
+          return enabledCustomTargets(group && group.targets)
+            .map(customTargetLabel)
+            .join(', ');
+        }).filter(Boolean).join('\n');
       }
       function renderCustomTargetRow(label, targets, emptyText) {
         var enabledTargets = enabledCustomTargets(targets);
@@ -3783,7 +3864,7 @@ async fn dashboard() -> impl IntoResponse {
           ? '<span class="custom-model-targets">' + enabledTargets.map(function(target) {
               var weight = Number(target.weight || 1);
               var suffix = weight > 1 ? ' x' + weight : '';
-              return '<span class="custom-model-chip"><code>' + escapeHtml(target.model + suffix) + '</code></span>';
+              return '<span class="custom-model-chip"><code>' + escapeHtml(customTargetLabel(target) + suffix) + '</code></span>';
             }).join('') + '</span>'
           : '<span class="muted">' + escapeHtml(emptyText || 'None') + '</span>';
         return '<div class="custom-model-route-row">'
@@ -3796,7 +3877,21 @@ async fn dashboard() -> impl IntoResponse {
         var publicId = customModelPublicId(model);
         var title = model.display_name || alias || publicId;
         var state = renderAccountState({ enabled: model.enabled });
-        var loadBalance = model.load_balance !== false ? 'Load balance' : 'Ordered';
+        var routes = customRoutes(model);
+        var enabledGroups = routes.filter(function(group) {
+          return enabledCustomTargets(group && group.targets).length > 0;
+        });
+        var targetCount = model.target_count != null
+          ? model.target_count
+          : enabledGroups.reduce(function(total, group) {
+              return total + enabledCustomTargets(group.targets).length;
+            }, 0);
+        var routeGroupCount = model.route_group_count != null ? model.route_group_count : enabledGroups.length;
+        var routeRows = enabledGroups.length
+          ? enabledGroups.map(function(group, index) {
+              return renderCustomTargetRow('Step ' + (index + 1), group.targets, 'No targets');
+            }).join('')
+          : '<div class="muted">No enabled route targets</div>';
         var editArg = escapeHtml(jsString(alias));
         return '<div class="card custom-model-card">'
           + '<div class="card-header"><span class="card-email">' + escapeHtml(title) + '</span>' + state + '<span class="card-actions">'
@@ -3805,12 +3900,11 @@ async fn dashboard() -> impl IntoResponse {
           + '</span></div>'
           + '<div class="stat-pills">'
           + '<span class="stat-pill"><span class="stat-pill-label">id</span><span class="stat-pill-value"><code>' + escapeHtml(publicId) + '</code></span></span>'
-          + '<span class="stat-pill"><span class="stat-pill-label">mode</span><span class="stat-pill-value">' + escapeHtml(loadBalance) + '</span></span>'
-          + '<span class="stat-pill"><span class="stat-pill-label">fallbacks</span><span class="stat-pill-value">' + enabledCustomTargets(model.fallback_models).length + '</span></span>'
+          + '<span class="stat-pill"><span class="stat-pill-label">steps</span><span class="stat-pill-value">' + routeGroupCount + '</span></span>'
+          + '<span class="stat-pill"><span class="stat-pill-label">targets</span><span class="stat-pill-value">' + targetCount + '</span></span>'
           + '</div>'
           + '<div class="custom-model-route-list">'
-          + renderCustomTargetRow('Primary', model.primary_models, 'No primary target')
-          + renderCustomTargetRow('Fallback', model.fallback_models, 'No fallback targets')
+          + routeRows
           + '</div>'
           + '</div>';
       }
@@ -3833,7 +3927,51 @@ async fn dashboard() -> impl IntoResponse {
         const data = await res.json();
         const models = data.models || [];
         dashboardState.customModels = models;
+        dashboardState.customModelAccounts = data.accounts || [];
         renderCustomModels(models);
+        renderCustomModelAccountKeys();
+      }
+      function renderCustomModelAccountKeys() {
+        var list = document.getElementById('customModelAccountKeys');
+        if (!list) return;
+        var accounts = dashboardState.customModelAccounts || [];
+        if (!accounts.length) {
+          list.innerHTML = '<div>No account keys available</div>';
+          return;
+        }
+        var grouped = {};
+        accounts.forEach(function(account) {
+          var provider = account.provider || 'unknown';
+          if (!grouped[provider]) grouped[provider] = [];
+          grouped[provider].push(account);
+        });
+        var providers = Object.keys(grouped).sort();
+        list.innerHTML = providers.map(function(provider) {
+          var items = grouped[provider] || [];
+          var label = items[0].provider_label || providerLabels[provider] || provider;
+          var rows = items.map(function(account) {
+            var key = account.key || '';
+            var keyArg = escapeHtml(jsString(key));
+            var title = account.label || account.account_id || key;
+            return '<div class="custom-model-account-row">'
+              + '<div><strong>' + escapeHtml(title) + '</strong><br><code>' + escapeHtml(key) + '</code></div>'
+              + '<button type="button" class="mini-btn secondary-button" onclick="copyCustomModelAccountKey(' + keyArg + ')">Copy</button>'
+              + '</div>';
+          }).join('');
+          return '<div class="custom-model-account-provider"><strong>' + escapeHtml(label) + '</strong>' + rows + '</div>';
+        }).join('');
+      }
+      function copyCustomModelAccountKey(key) {
+        if (!key) return;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(key).then(function() {
+            notify('Account key copied');
+          }).catch(function() {
+            notify(key);
+          });
+        } else {
+          notify(key);
+        }
       }
       function openCustomModelModal(alias) {
         var model = alias ? findCustomModel(alias) : null;
@@ -3845,9 +3983,8 @@ async fn dashboard() -> impl IntoResponse {
         form.querySelector('input[name="alias"]').value = model ? normalizeCustomAlias(model.alias) : '';
         form.querySelector('input[name="display_name"]').value = model && model.display_name ? model.display_name : '';
         form.querySelector('input[name="enabled"]').checked = !model || model.enabled !== false;
-        form.querySelector('input[name="load_balance"]').checked = !model || model.load_balance !== false;
-        form.querySelector('textarea[name="primary_models"]').value = model ? customTargetTextarea(model.primary_models) : '';
-        form.querySelector('textarea[name="fallback_models"]').value = model ? customTargetTextarea(model.fallback_models) : '';
+        form.querySelector('textarea[name="routes"]').value = model ? customRoutesTextarea(customRoutes(model)) : '';
+        renderCustomModelAccountKeys();
         setText('customModelStatus', '');
         openModal('customModelModal');
       }
@@ -3856,30 +3993,33 @@ async fn dashboard() -> impl IntoResponse {
         var status = document.getElementById('customModelStatus');
         if (status) status.textContent = '';
       }
-      function parseCustomModelList(text) {
+      function parseCustomRouteGroups(text) {
         return String(text || '')
-          .split(/[\n,]+/)
-          .map(function(value) { return value.trim(); })
-          .filter(Boolean);
+          .split(/\n+/)
+          .map(function(line) {
+            return line.split(',')
+              .map(function(value) { return value.trim(); })
+              .filter(Boolean);
+          })
+          .filter(function(group) { return group.length > 0; });
       }
       async function submitCustomModelForm(e) {
         e.preventDefault();
         var form = e.target;
+        var routesText = form.querySelector('textarea[name="routes"]').value;
         var payload = {
           original_alias: form.querySelector('input[name="original_alias"]').value.trim() || undefined,
           alias: form.querySelector('input[name="alias"]').value.trim(),
           display_name: form.querySelector('input[name="display_name"]').value.trim() || undefined,
           enabled: form.querySelector('input[name="enabled"]').checked,
-          load_balance: form.querySelector('input[name="load_balance"]').checked,
-          primary_models: parseCustomModelList(form.querySelector('textarea[name="primary_models"]').value),
-          fallback_models: parseCustomModelList(form.querySelector('textarea[name="fallback_models"]').value)
+          routes: routesText
         };
         if (!payload.alias) {
           setText('customModelStatus', 'Alias is required.');
           return;
         }
-        if (!payload.primary_models.length) {
-          setText('customModelStatus', 'At least one primary model is required.');
+        if (!parseCustomRouteGroups(routesText).length) {
+          setText('customModelStatus', 'At least one route target is required.');
           return;
         }
         setText('customModelStatus', 'Saving custom model...');
@@ -4508,51 +4648,61 @@ async fn dashboard() -> impl IntoResponse {
     <div id="appSettingsModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="appSettingsTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
         <h2 id="appSettingsTitle" style="margin-top:0;">Settings</h2>
-        <div class="settings-block custom-model-form-row">
-          <label>Dashboard providers</label>
-          <div id="providerSettingsList" class="provider-settings-list"></div>
+        <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+          <button type="button" class="settings-tab is-active" role="tab" aria-selected="true" aria-controls="settingsDashboardPanel" data-settings-tab="dashboard">Dashboard</button>
+          <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settingsNotificationsPanel" data-settings-tab="notifications">Notifications</button>
         </div>
-        <div id="appSettingsStatus" class="muted" style="margin-top:10px;"></div>
-        <div class="settings-block">
-          <div class="settings-block-title">
-            <span>Notifications</span>
-            <label class="check-row" for="notificationEnabledInput">
-              <input id="notificationEnabledInput" type="checkbox">
-              Enabled
-            </label>
+        <div id="settingsDashboardPanel" class="settings-panel" role="tabpanel" data-settings-panel="dashboard">
+          <div class="settings-block custom-model-form-row">
+            <label>Dashboard providers</label>
+            <div id="providerSettingsList" class="provider-settings-list"></div>
           </div>
-          <div class="notification-channel-grid">
-            <div class="custom-model-form-row">
-              <label for="notificationChannelInput">Channel</label>
-              <select id="notificationChannelInput">
-                <option value="telegram">Telegram</option>
-                <option value="google_chat">Google Chat</option>
-              </select>
-            </div>
-            <div class="custom-model-form-row" id="telegramNotificationFields">
-              <label for="telegramBotTokenInput">Telegram Bot Token</label>
-              <input id="telegramBotTokenInput" type="password" autocomplete="off" placeholder="Telegram bot token">
-              <label for="telegramChatIdInput" style="margin-top:8px;">Telegram Chat ID</label>
-              <input id="telegramChatIdInput" autocomplete="off" placeholder="chat id">
-            </div>
-            <div class="custom-model-form-row" id="googleChatNotificationFields" hidden>
-              <label for="googleChatWebhookInput">Google Chat Webhook URL</label>
-              <textarea id="googleChatWebhookInput" rows="4" autocomplete="off" placeholder="Google Chat incoming webhook URL"></textarea>
-            </div>
-          </div>
-          <div class="notification-watch-toolbar">
-            <button type="button" class="mini-btn" onclick="setNotificationAllWatch(true)">Check all accounts</button>
-            <button type="button" class="mini-btn secondary-button" onclick="setNotificationAllWatch(false)">Uncheck all accounts</button>
-          </div>
-          <div id="notificationWatchList" class="notification-watch-list"></div>
-          <div id="notificationStatus" class="muted" style="margin-top:10px;"></div>
+          <div id="appSettingsStatus" class="muted" style="margin-top:10px;"></div>
           <div class="modal-actions" style="margin-top:12px;">
-            <button type="button" id="saveNotificationSettingsBtn">Save Notifications</button>
-            <button type="button" id="testNotificationBtn" class="secondary-button">Send Test</button>
+            <button type="button" id="resetProviderSettingsBtn" class="secondary-button">Reset default</button>
+          </div>
+        </div>
+        <div id="settingsNotificationsPanel" class="settings-panel" role="tabpanel" data-settings-panel="notifications" hidden>
+          <div class="settings-block">
+            <div class="settings-block-title">
+              <span>Notifications</span>
+              <label class="check-row" for="notificationEnabledInput">
+                <input id="notificationEnabledInput" type="checkbox">
+                Enabled
+              </label>
+            </div>
+            <div class="notification-channel-grid">
+              <div class="custom-model-form-row">
+                <label for="notificationChannelInput">Channel</label>
+                <select id="notificationChannelInput">
+                  <option value="telegram">Telegram</option>
+                  <option value="google_chat">Google Chat</option>
+                </select>
+              </div>
+              <div class="custom-model-form-row" id="telegramNotificationFields">
+                <label for="telegramBotTokenInput">Telegram Bot Token</label>
+                <input id="telegramBotTokenInput" type="password" autocomplete="off" placeholder="Telegram bot token">
+                <label for="telegramChatIdInput" style="margin-top:8px;">Telegram Chat ID</label>
+                <input id="telegramChatIdInput" autocomplete="off" placeholder="chat id">
+              </div>
+              <div class="custom-model-form-row" id="googleChatNotificationFields" hidden>
+                <label for="googleChatWebhookInput">Google Chat Webhook URL</label>
+                <textarea id="googleChatWebhookInput" rows="4" autocomplete="off" placeholder="Google Chat incoming webhook URL"></textarea>
+              </div>
+            </div>
+            <div class="notification-watch-toolbar">
+              <button type="button" class="mini-btn" onclick="setNotificationAllWatch(true)">Check all accounts</button>
+              <button type="button" class="mini-btn secondary-button" onclick="setNotificationAllWatch(false)">Uncheck all accounts</button>
+            </div>
+            <div id="notificationWatchList" class="notification-watch-list"></div>
+            <div id="notificationStatus" class="muted" style="margin-top:10px;"></div>
+            <div class="modal-actions" style="margin-top:12px;">
+              <button type="button" id="saveNotificationSettingsBtn">Save Notifications</button>
+              <button type="button" id="testNotificationBtn" class="secondary-button">Send Test</button>
+            </div>
           </div>
         </div>
         <div class="modal-actions" style="margin-top:16px;">
-          <button type="button" id="resetProviderSettingsBtn" class="secondary-button">Reset default</button>
           <button type="button" id="closeAppSettingsModalBtn">Done</button>
         </div>
       </div>
@@ -4578,20 +4728,15 @@ async fn dashboard() -> impl IntoResponse {
               <input id="customModelEnabledInput" name="enabled" type="checkbox" checked>
               Enabled
             </label>
-            <label class="check-row" for="customModelLoadBalanceInput">
-              <input id="customModelLoadBalanceInput" name="load_balance" type="checkbox" checked>
-              Load balance primary models
-            </label>
           </div>
           <div class="custom-model-form-row">
-            <label for="customModelPrimaryInput">Primary Models</label>
-            <textarea id="customModelPrimaryInput" name="primary_models" rows="4" placeholder="agw:gemini-2.5-pro&#10;gem:gemini-2.5-pro"></textarea>
-            <div class="muted">One model per line or comma separated.</div>
+            <label for="customModelRoutesInput">Routes</label>
+            <textarea id="customModelRoutesInput" name="routes" rows="7" placeholder="agw:gemini-2.5-pro@agw:email:user@example.com, gem:gemini-2.5-pro&#10;min:MiniMax-M3&#10;agw:gpt-oss-120b-medium"></textarea>
+            <div class="muted">One fallback step per line. Targets separated by comma on the same line are load-balanced. Add @account-key to restrict a target to one account.</div>
           </div>
           <div class="custom-model-form-row">
-            <label for="customModelFallbackInput">Fallback Models</label>
-            <textarea id="customModelFallbackInput" name="fallback_models" rows="4" placeholder="min:MiniMax-M3&#10;agw:gpt-oss-120b-medium"></textarea>
-            <div class="muted">Fallbacks are tried in order after all enabled primary targets fail.</div>
+            <label>Account keys</label>
+            <div id="customModelAccountKeys" class="custom-model-account-list muted">Loading account keys...</div>
           </div>
           <div id="customModelStatus" class="muted"></div>
           <div class="modal-actions" style="margin-top:8px;">
@@ -4672,6 +4817,11 @@ async fn dashboard() -> impl IntoResponse {
       });
       document.getElementById('closeAppSettingsModalBtn').addEventListener('click', closeAppSettingsModal);
       document.getElementById('resetProviderSettingsBtn').addEventListener('click', resetProviderDashboardSettings);
+      document.querySelectorAll('[data-settings-tab]').forEach(function(button) {
+        button.addEventListener('click', function() {
+          setAppSettingsTab(button.getAttribute('data-settings-tab'));
+        });
+      });
       document.getElementById('notificationChannelInput').addEventListener('change', updateNotificationChannelUi);
       document.getElementById('saveNotificationSettingsBtn').addEventListener('click', saveNotificationSettings);
       document.getElementById('testNotificationBtn').addEventListener('click', sendTestNotification);
@@ -5667,14 +5817,15 @@ async fn custom_models_json_route(State(state): State<AppState>, headers: Header
                 "alias": model.alias,
                 "display_name": model.display_name,
                 "enabled": model.enabled,
-                "load_balance": model.load_balance,
-                "primary_models": model.primary_models,
-                "fallback_models": model.fallback_models
+                "routes": model.routes.clone(),
+                "route_group_count": custom_models::route_group_count(&model),
+                "target_count": custom_models::target_count(&model)
             })
         })
         .collect::<Vec<_>>();
     axum::Json(serde_json::json!({
         "models": data,
+        "accounts": notification_account_options(&state),
         "path": custom_models::custom_models_path(&state.cfg)
     }))
     .into_response()
@@ -6077,7 +6228,13 @@ fn parse_custom_model_save(
             alias,
             display_name: form.get("display_name").cloned(),
             enabled: form_bool(&form, "enabled", true),
-            load_balance: form_bool(&form, "load_balance", true),
+            load_balance: true,
+            routes: custom_models::parse_route_groups(
+                form.get("routes")
+                    .or_else(|| form.get("route_groups"))
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            ),
             primary_models: custom_models::parse_model_list(
                 form.get("primary_models")
                     .map(String::as_str)
@@ -6114,6 +6271,7 @@ fn custom_model_from_json(value: &serde_json::Value) -> Result<custom_models::Cu
             .get("load_balance")
             .and_then(|value| value.as_bool())
             .unwrap_or(true),
+        routes: route_groups_from_json(value.get("routes").or_else(|| value.get("route_groups")))?,
         primary_models: targets_from_json(
             value.get("primary_models").or_else(|| value.get("models")),
         )?,
@@ -6123,6 +6281,39 @@ fn custom_model_from_json(value: &serde_json::Value) -> Result<custom_models::Cu
                 .or_else(|| value.get("fallbacks")),
         )?,
     })
+}
+
+fn route_groups_from_json(
+    value: Option<&serde_json::Value>,
+) -> Result<Vec<custom_models::CustomModelRouteGroup>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if let Some(text) = value.as_str() {
+        return Ok(custom_models::parse_route_groups(text));
+    }
+    let Some(items) = value.as_array() else {
+        return Err("routes must be a string or array".to_string());
+    };
+    let mut groups = Vec::new();
+    for item in items {
+        if let Some(text) = item.as_str() {
+            groups.extend(custom_models::parse_route_groups(text));
+            continue;
+        }
+        if let Some(items) = item.as_array() {
+            groups.push(custom_models::CustomModelRouteGroup {
+                targets: targets_from_json(Some(&serde_json::Value::Array(items.clone())))?,
+            });
+            continue;
+        }
+        let Some(object) = item.as_object() else {
+            return Err("route entries must be strings, arrays, or objects".to_string());
+        };
+        let targets = targets_from_json(object.get("targets").or_else(|| object.get("models")))?;
+        groups.push(custom_models::CustomModelRouteGroup { targets });
+    }
+    Ok(groups)
 }
 
 fn targets_from_json(
@@ -6142,6 +6333,7 @@ fn targets_from_json(
         if let Some(model) = item.as_str() {
             targets.push(custom_models::CustomModelTarget {
                 model: model.to_string(),
+                account: None,
                 enabled: true,
                 weight: 1,
             });
@@ -6156,6 +6348,11 @@ fn targets_from_json(
                 .and_then(|value| value.as_str())
                 .unwrap_or_default()
                 .to_string(),
+            account: object
+                .get("account")
+                .or_else(|| object.get("account_key"))
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string()),
             enabled: object
                 .get("enabled")
                 .and_then(|value| value.as_bool())
@@ -7986,15 +8183,24 @@ async fn custom_model_response(
             continue;
         }
 
+        let candidate_label = custom_models::target_label(candidate);
         let candidate_body = match rewrite_request_model(&body, &candidate.model) {
             Ok(body) => body,
             Err(err) => {
-                failures.push(format!("{}: {}", candidate.model, err));
+                failures.push(format!("{}: {}", candidate_label, err));
                 continue;
             }
         };
+        let scoped_state =
+            match scoped_state_for_custom_target_account(state.clone(), target, candidate) {
+                Ok(state) => state,
+                Err(err) => {
+                    failures.push(format!("{}: {}", candidate_label, err));
+                    continue;
+                }
+            };
         let response = dispatch_custom_target(
-            state.clone(),
+            scoped_state,
             headers.clone(),
             upstream_path,
             target,
@@ -8014,7 +8220,7 @@ async fn custom_model_response(
             .unwrap_or_default();
         failures.push(format!(
             "{} returned {}{}",
-            candidate.model,
+            candidate_label,
             status,
             if failure_body.trim().is_empty() {
                 String::new()
@@ -8055,47 +8261,42 @@ fn custom_model_candidate_order(
     state: &AppState,
     model: &custom_models::CustomModel,
 ) -> Vec<custom_models::CustomModelTarget> {
-    let mut primary = model
-        .primary_models
-        .iter()
-        .filter(|target| target.enabled)
-        .cloned()
-        .collect::<Vec<_>>();
-    if model.load_balance && primary.len() > 1 {
-        let alias = model.alias.clone();
-        let start_idx = {
-            let mut rr = state.custom_model_rr.lock().unwrap();
-            let len = primary.len();
-            let value = rr.entry(alias.clone()).or_insert(0);
-            *value %= len;
-            *value
-        };
-        primary.sort_by(|left, right| {
-            let left_score = custom_model_target_score(state, left);
-            let right_score = custom_model_target_score(state, right);
-            if left_score.is_better_than(&right_score) {
-                std::cmp::Ordering::Less
-            } else if right_score.is_better_than(&left_score) {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        });
-        if start_idx > 0 && start_idx < primary.len() {
-            primary.rotate_left(start_idx);
-        }
-        let mut rr = state.custom_model_rr.lock().unwrap();
-        rr.insert(alias, (start_idx + 1) % primary.len());
-    }
-
-    let mut out = primary;
-    out.extend(
-        model
-            .fallback_models
+    let mut out = Vec::new();
+    for (group_idx, group) in model.routes.iter().enumerate() {
+        let mut targets = group
+            .targets
             .iter()
             .filter(|target| target.enabled)
-            .cloned(),
-    );
+            .cloned()
+            .collect::<Vec<_>>();
+        if targets.len() > 1 {
+            let rr_key = format!("{}:{}", model.alias, group_idx);
+            let start_idx = {
+                let mut rr = state.custom_model_rr.lock().unwrap();
+                let len = targets.len();
+                let value = rr.entry(rr_key.clone()).or_insert(0);
+                *value %= len;
+                *value
+            };
+            targets.sort_by(|left, right| {
+                let left_score = custom_model_target_score(state, left);
+                let right_score = custom_model_target_score(state, right);
+                if left_score.is_better_than(&right_score) {
+                    std::cmp::Ordering::Less
+                } else if right_score.is_better_than(&left_score) {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            });
+            if start_idx > 0 && start_idx < targets.len() {
+                targets.rotate_left(start_idx);
+            }
+            let mut rr = state.custom_model_rr.lock().unwrap();
+            rr.insert(rr_key, (start_idx + 1) % targets.len());
+        }
+        out.extend(targets);
+    }
     out
 }
 
@@ -8103,11 +8304,128 @@ fn custom_model_target_score(
     state: &AppState,
     target: &custom_models::CustomModelTarget,
 ) -> AccountSelectionScore {
-    let mut score = best_provider_score_for_model(state, &target.model);
+    let mut score = match target.account.as_deref() {
+        Some(account) if !account.trim().is_empty() => {
+            best_provider_score_for_model_account(state, &target.model, account)
+        }
+        _ => best_provider_score_for_model(state, &target.model),
+    };
     let weight = u64::from(target.weight.max(1));
     score.historical_tokens /= weight;
     score.historical_requests /= weight;
     score
+}
+
+fn best_provider_score_for_model_account(
+    state: &AppState,
+    model: &str,
+    account_filter: &str,
+) -> AccountSelectionScore {
+    match source::v1::provider::target_from_model(model) {
+        TargetModel::Codex => {
+            let tokens = state.tokens.lock().unwrap().clone();
+            best_score_for_len(
+                tokens.len(),
+                |idx| {
+                    tokens[idx].enabled && codex_token_matches_account(&tokens[idx], account_filter)
+                },
+                |idx| codex_token_selection_score(state, idx, &tokens[idx]),
+            )
+        }
+        TargetModel::Antigravity => {
+            let accounts = state.agw_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| {
+                    accounts[idx].enabled
+                        && antigravity_account_matches(&accounts[idx], account_filter)
+                },
+                |idx| antigravity_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Gemini => {
+            let accounts = state.gemini_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| {
+                    accounts[idx].enabled && gemini_account_matches(&accounts[idx], account_filter)
+                },
+                |idx| gemini_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Qwen => {
+            let accounts = state.qwen_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| accounts[idx].enabled && qwen_account_matches(&accounts[idx], account_filter),
+                |idx| qwen_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::DeepSeek => {
+            let accounts = state.deepseek_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| {
+                    accounts[idx].enabled
+                        && deepseek_account_matches(&accounts[idx], account_filter)
+                },
+                |idx| deepseek_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Grok => {
+            let accounts = state.grok_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| accounts[idx].enabled && grok_account_matches(&accounts[idx], account_filter),
+                |idx| grok_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::MiniMax => {
+            let accounts = state.minimax_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| {
+                    accounts[idx].enabled && minimax_account_matches(&accounts[idx], account_filter)
+                },
+                |idx| minimax_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Copilot => {
+            let accounts = state.copilot_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| {
+                    accounts[idx].enabled && copilot_account_matches(&accounts[idx], account_filter)
+                },
+                |idx| copilot_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Claude => {
+            let accounts = state.claude_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| {
+                    accounts[idx].enabled && claude_account_matches(&accounts[idx], account_filter)
+                },
+                |idx| claude_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Glm => {
+            let accounts = state.glm_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| accounts[idx].enabled && glm_account_matches(&accounts[idx], account_filter),
+                |idx| glm_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Custom | TargetModel::CodexModels | TargetModel::UnifiedV1Models => {
+            AccountSelectionScore {
+                quota_pressure: Some(f64::INFINITY),
+                historical_tokens: u64::MAX,
+                historical_requests: u64::MAX,
+            }
+        }
+    }
 }
 
 fn best_provider_score_for_model(state: &AppState, model: &str) -> AccountSelectionScore {
@@ -8200,6 +8518,316 @@ fn best_provider_score_for_model(state: &AppState, model: &str) -> AccountSelect
             }
         }
     }
+}
+
+fn account_filter_matches(filter: &str, values: impl IntoIterator<Item = String>) -> bool {
+    let filter = filter.trim();
+    !filter.is_empty()
+        && values
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .any(|value| value.eq_ignore_ascii_case(filter))
+}
+
+fn codex_token_matches_account(token: &UpstreamToken, filter: &str) -> bool {
+    account_filter_matches(
+        filter,
+        [
+            codex_stats_key(token),
+            token.account_id.clone().unwrap_or_default(),
+            token.label.clone(),
+            token.file_name.clone().unwrap_or_default(),
+        ],
+    )
+}
+
+fn antigravity_account_matches(
+    account: &target::antigravity::accounts::AntigravityAccount,
+    filter: &str,
+) -> bool {
+    account_filter_matches(
+        filter,
+        [
+            antigravity_stats_key(account),
+            account.email.clone(),
+            account.label.clone(),
+            account.project_id.clone().unwrap_or_default(),
+            account.file_name.clone().unwrap_or_default(),
+        ],
+    )
+}
+
+fn gemini_account_matches(account: &target::gemini::accounts::GeminiAccount, filter: &str) -> bool {
+    account_filter_matches(
+        filter,
+        [
+            gemini_stats_key(account),
+            account.email.clone(),
+            account.label.clone(),
+            account.project_id.clone().unwrap_or_default(),
+            account.file_name.clone().unwrap_or_default(),
+        ],
+    )
+}
+
+fn qwen_account_matches(account: &target::qwen::accounts::QwenAccount, filter: &str) -> bool {
+    account_filter_matches(
+        filter,
+        [
+            qwen_stats_key(account),
+            account.account_id.clone(),
+            account.email.clone(),
+            account.subject.clone().unwrap_or_default(),
+            account.label.clone(),
+            account.resource_url.clone().unwrap_or_default(),
+            account.file_name.clone().unwrap_or_default(),
+        ],
+    )
+}
+
+fn deepseek_account_matches(
+    account: &target::deepseek::accounts::DeepSeekAccount,
+    filter: &str,
+) -> bool {
+    account_filter_matches(
+        filter,
+        [
+            deepseek_stats_key(account),
+            account.account_id.clone(),
+            account.label.clone(),
+            account.file_name.clone().unwrap_or_default(),
+        ],
+    )
+}
+
+fn grok_account_matches(account: &target::grok::accounts::GrokAccount, filter: &str) -> bool {
+    account_filter_matches(
+        filter,
+        [
+            grok_stats_key(account),
+            account.label.clone(),
+            account.name.clone().unwrap_or_default(),
+            account.email.clone().unwrap_or_default(),
+            account.user_id.clone().unwrap_or_default(),
+            account.team_id.clone().unwrap_or_default(),
+            account.file_name.clone().unwrap_or_default(),
+        ],
+    )
+}
+
+fn minimax_account_matches(
+    account: &target::minimax::accounts::MiniMaxAccount,
+    filter: &str,
+) -> bool {
+    account_filter_matches(
+        filter,
+        [
+            minimax_stats_key(account),
+            account.account_id.clone(),
+            account.label.clone(),
+            account.file_name.clone().unwrap_or_default(),
+        ],
+    )
+}
+
+fn copilot_account_matches(
+    account: &target::copilot::accounts::CopilotAccount,
+    filter: &str,
+) -> bool {
+    account_filter_matches(
+        filter,
+        [
+            copilot_stats_key(account),
+            account.account_id.clone(),
+            account.login.clone(),
+            account.label.clone(),
+            account.file_name.clone().unwrap_or_default(),
+        ],
+    )
+}
+
+fn claude_account_matches(account: &target::claude::accounts::ClaudeAccount, filter: &str) -> bool {
+    account_filter_matches(
+        filter,
+        [
+            claude_stats_key(account),
+            account.organization_uuid.clone(),
+            account.account_id.clone(),
+            account.label.clone(),
+            account.email.clone().unwrap_or_default(),
+            account.file_name.clone().unwrap_or_default(),
+        ],
+    )
+}
+
+fn glm_account_matches(account: &target::glm::accounts::GlmAccount, filter: &str) -> bool {
+    account_filter_matches(
+        filter,
+        [
+            glm_stats_key(account),
+            account.account_id.clone(),
+            account.label.clone(),
+            account.account_type.clone(),
+            account.file_name.clone().unwrap_or_default(),
+        ],
+    )
+}
+
+fn scoped_state_for_custom_target_account(
+    state: AppState,
+    target: TargetModel,
+    candidate: &custom_models::CustomModelTarget,
+) -> Result<AppState, String> {
+    let Some(account_filter) = candidate
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(state);
+    };
+
+    let mut scoped = state.clone();
+    match target {
+        TargetModel::Codex => {
+            let tokens = state.tokens.lock().unwrap().clone();
+            let filtered = tokens
+                .into_iter()
+                .filter(|token| token.enabled && codex_token_matches_account(token, account_filter))
+                .collect::<Vec<_>>();
+            if filtered.is_empty() {
+                return Err(format!("no Codex account matched '{}'", account_filter));
+            }
+            scoped.tokens = Arc::new(Mutex::new(filtered));
+            scoped.rr = Arc::new(Mutex::new(0));
+        }
+        TargetModel::Antigravity => {
+            let accounts = state.agw_accounts.lock().unwrap().clone();
+            let filtered = accounts
+                .into_iter()
+                .filter(|account| {
+                    account.enabled && antigravity_account_matches(account, account_filter)
+                })
+                .collect::<Vec<_>>();
+            if filtered.is_empty() {
+                return Err(format!(
+                    "no Antigravity account matched '{}'",
+                    account_filter
+                ));
+            }
+            scoped.agw_accounts = Arc::new(Mutex::new(filtered));
+            scoped.agw_rr = Arc::new(Mutex::new(0));
+        }
+        TargetModel::Gemini => {
+            let accounts = state.gemini_accounts.lock().unwrap().clone();
+            let filtered = accounts
+                .into_iter()
+                .filter(|account| {
+                    account.enabled && gemini_account_matches(account, account_filter)
+                })
+                .collect::<Vec<_>>();
+            if filtered.is_empty() {
+                return Err(format!("no Gemini account matched '{}'", account_filter));
+            }
+            scoped.gemini_accounts = Arc::new(Mutex::new(filtered));
+            scoped.gemini_rr = Arc::new(Mutex::new(0));
+        }
+        TargetModel::Qwen => {
+            let accounts = state.qwen_accounts.lock().unwrap().clone();
+            let filtered = accounts
+                .into_iter()
+                .filter(|account| account.enabled && qwen_account_matches(account, account_filter))
+                .collect::<Vec<_>>();
+            if filtered.is_empty() {
+                return Err(format!("no Qwen account matched '{}'", account_filter));
+            }
+            scoped.qwen_accounts = Arc::new(Mutex::new(filtered));
+            scoped.qwen_rr = Arc::new(Mutex::new(0));
+        }
+        TargetModel::DeepSeek => {
+            let accounts = state.deepseek_accounts.lock().unwrap().clone();
+            let filtered = accounts
+                .into_iter()
+                .filter(|account| {
+                    account.enabled && deepseek_account_matches(account, account_filter)
+                })
+                .collect::<Vec<_>>();
+            if filtered.is_empty() {
+                return Err(format!("no DeepSeek account matched '{}'", account_filter));
+            }
+            scoped.deepseek_accounts = Arc::new(Mutex::new(filtered));
+            scoped.deepseek_rr = Arc::new(Mutex::new(0));
+        }
+        TargetModel::Grok => {
+            let accounts = state.grok_accounts.lock().unwrap().clone();
+            let filtered = accounts
+                .into_iter()
+                .filter(|account| account.enabled && grok_account_matches(account, account_filter))
+                .collect::<Vec<_>>();
+            if filtered.is_empty() {
+                return Err(format!("no Grok account matched '{}'", account_filter));
+            }
+            scoped.grok_accounts = Arc::new(Mutex::new(filtered));
+            scoped.grok_rr = Arc::new(Mutex::new(0));
+        }
+        TargetModel::MiniMax => {
+            let accounts = state.minimax_accounts.lock().unwrap().clone();
+            let filtered = accounts
+                .into_iter()
+                .filter(|account| {
+                    account.enabled && minimax_account_matches(account, account_filter)
+                })
+                .collect::<Vec<_>>();
+            if filtered.is_empty() {
+                return Err(format!("no MiniMax account matched '{}'", account_filter));
+            }
+            scoped.minimax_accounts = Arc::new(Mutex::new(filtered));
+            scoped.minimax_rr = Arc::new(Mutex::new(0));
+        }
+        TargetModel::Copilot => {
+            let accounts = state.copilot_accounts.lock().unwrap().clone();
+            let filtered = accounts
+                .into_iter()
+                .filter(|account| {
+                    account.enabled && copilot_account_matches(account, account_filter)
+                })
+                .collect::<Vec<_>>();
+            if filtered.is_empty() {
+                return Err(format!("no Copilot account matched '{}'", account_filter));
+            }
+            scoped.copilot_accounts = Arc::new(Mutex::new(filtered));
+            scoped.copilot_rr = Arc::new(Mutex::new(0));
+        }
+        TargetModel::Claude => {
+            let accounts = state.claude_accounts.lock().unwrap().clone();
+            let filtered = accounts
+                .into_iter()
+                .filter(|account| {
+                    account.enabled && claude_account_matches(account, account_filter)
+                })
+                .collect::<Vec<_>>();
+            if filtered.is_empty() {
+                return Err(format!("no Claude account matched '{}'", account_filter));
+            }
+            scoped.claude_accounts = Arc::new(Mutex::new(filtered));
+            scoped.claude_rr = Arc::new(Mutex::new(0));
+        }
+        TargetModel::Glm => {
+            let accounts = state.glm_accounts.lock().unwrap().clone();
+            let filtered = accounts
+                .into_iter()
+                .filter(|account| account.enabled && glm_account_matches(account, account_filter))
+                .collect::<Vec<_>>();
+            if filtered.is_empty() {
+                return Err(format!("no GLM account matched '{}'", account_filter));
+            }
+            scoped.glm_accounts = Arc::new(Mutex::new(filtered));
+            scoped.glm_rr = Arc::new(Mutex::new(0));
+        }
+        TargetModel::Custom | TargetModel::CodexModels | TargetModel::UnifiedV1Models => {}
+    }
+    Ok(scoped)
 }
 
 fn best_score_for_len<FEnabled, FScore>(
@@ -8805,9 +9433,9 @@ fn custom_model_openai_entries(state: &AppState) -> Vec<serde_json::Value> {
                 "display_name": model.display_name.clone().unwrap_or_else(|| model.alias.clone()),
                 "provider_prefix": "ctm",
                 "upstream_model": model.alias,
-                "primary_models": model.primary_models,
-                "fallback_models": model.fallback_models,
-                "load_balance": model.load_balance
+                "routes": model.routes.clone(),
+                "route_group_count": custom_models::route_group_count(model),
+                "target_count": custom_models::target_count(model)
             })
         })
         .collect()
@@ -11436,18 +12064,12 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
             .display_name
             .clone()
             .unwrap_or_else(|| format!("Custom {}", model.alias));
-        let description = if model.fallback_models.is_empty() {
-            format!(
-                "Custom model alias routed through {}.",
-                custom_model_route_summary(model)
-            )
-        } else {
-            format!(
-                "Custom model alias routed through {} with {} fallback model(s).",
-                custom_model_route_summary(model),
-                model.fallback_models.len()
-            )
-        };
+        let route_summary = custom_model_route_summary(model);
+        let description = format!(
+            "Custom model alias routed through {} across {} route step(s). Comma-separated targets in a step are load-balanced; later steps are fallbacks.",
+            route_summary,
+            custom_models::route_group_count(model)
+        );
         models.push(codex_provider_model(
             &custom_models::public_model_id(&model.alias),
             &display_name,
@@ -11461,13 +12083,12 @@ fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
 }
 
 fn custom_model_route_summary(model: &custom_models::CustomModel) -> String {
-    model
-        .primary_models
-        .iter()
-        .filter(|target| target.enabled)
-        .map(|target| target.model.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
+    let summary = custom_models::route_summary(model);
+    if summary.trim().is_empty() {
+        "no enabled targets".to_string()
+    } else {
+        summary
+    }
 }
 
 fn codex_provider_model(

@@ -8,17 +8,27 @@ pub(crate) struct CustomModel {
     pub display_name: Option<String>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    #[serde(default = "default_load_balance")]
+    #[serde(default = "default_load_balance", skip_serializing)]
     pub load_balance: bool,
-    #[serde(default)]
+    #[serde(default, alias = "route_groups")]
+    pub routes: Vec<CustomModelRouteGroup>,
+    #[serde(default, skip_serializing)]
     pub primary_models: Vec<CustomModelTarget>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub fallback_models: Vec<CustomModelTarget>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct CustomModelRouteGroup {
+    #[serde(default)]
+    pub targets: Vec<CustomModelTarget>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CustomModelTarget {
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default = "default_weight")]
@@ -90,20 +100,19 @@ pub(crate) fn public_model_id(alias: &str) -> String {
 pub(crate) fn validate_model(model: &CustomModel) -> Result<(), String> {
     validate_alias(&model.alias)?;
     if model
-        .primary_models
+        .routes
         .iter()
+        .flat_map(|group| group.targets.iter())
         .filter(|target| target.enabled)
         .count()
         == 0
     {
-        return Err("at least one enabled primary model is required".to_string());
+        return Err("at least one enabled route target is required".to_string());
     }
-    for target in model
-        .primary_models
-        .iter()
-        .chain(model.fallback_models.iter())
-    {
-        validate_target(target)?;
+    for group in &model.routes {
+        for target in &group.targets {
+            validate_target(target)?;
+        }
     }
     Ok(())
 }
@@ -143,7 +152,7 @@ fn is_supported_target_prefix(model: &str) -> bool {
     !rest.trim().is_empty()
         && matches!(
             prefix.to_ascii_lowercase().as_str(),
-            "agw" | "gem" | "qwn" | "dsk" | "grk" | "min" | "cop" | "cod"
+            "agw" | "gem" | "qwn" | "dsk" | "grk" | "min" | "cop" | "cld" | "glm" | "cod"
         )
 }
 
@@ -155,6 +164,17 @@ pub(crate) fn normalize_model(mut model: CustomModel) -> CustomModel {
         .filter(|value| !value.is_empty());
     model.primary_models = normalize_targets(model.primary_models);
     model.fallback_models = normalize_targets(model.fallback_models);
+    model.routes = normalize_route_groups(model.routes);
+    if model.routes.is_empty() {
+        model.routes = legacy_route_groups(
+            model.load_balance,
+            model.primary_models.clone(),
+            model.fallback_models.clone(),
+        );
+    }
+    model.primary_models.clear();
+    model.fallback_models.clear();
+    model.load_balance = true;
     model
 }
 
@@ -175,7 +195,13 @@ fn normalize_targets(targets: Vec<CustomModelTarget>) -> Vec<CustomModelTarget> 
     targets
         .into_iter()
         .map(|mut target| {
-            target.model = target.model.trim().to_string();
+            let (model, account) = parse_target_spec(&target.model);
+            target.model = model;
+            target.account = target
+                .account
+                .or(account)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
             if target.weight == 0 {
                 target.weight = 1;
             }
@@ -185,18 +211,159 @@ fn normalize_targets(targets: Vec<CustomModelTarget>) -> Vec<CustomModelTarget> 
         .collect()
 }
 
+fn normalize_route_groups(groups: Vec<CustomModelRouteGroup>) -> Vec<CustomModelRouteGroup> {
+    groups
+        .into_iter()
+        .map(|group| CustomModelRouteGroup {
+            targets: normalize_targets(group.targets),
+        })
+        .filter(|group| !group.targets.is_empty())
+        .collect()
+}
+
+fn legacy_route_groups(
+    load_balance: bool,
+    primary: Vec<CustomModelTarget>,
+    fallback: Vec<CustomModelTarget>,
+) -> Vec<CustomModelRouteGroup> {
+    let mut groups = Vec::new();
+    let primary = normalize_targets(primary);
+    if load_balance {
+        if !primary.is_empty() {
+            groups.push(CustomModelRouteGroup { targets: primary });
+        }
+    } else {
+        groups.extend(primary.into_iter().map(|target| CustomModelRouteGroup {
+            targets: vec![target],
+        }));
+    }
+    groups.extend(
+        normalize_targets(fallback)
+            .into_iter()
+            .map(|target| CustomModelRouteGroup {
+                targets: vec![target],
+            }),
+    );
+    groups
+}
+
+fn parse_target_spec(value: &str) -> (String, Option<String>) {
+    let trimmed = value.trim();
+    let Some((model, account)) = trimmed.split_once('@') else {
+        return (trimmed.to_string(), None);
+    };
+    (
+        model.trim().to_string(),
+        Some(account.trim().to_string()).filter(|value| !value.is_empty()),
+    )
+}
+
 pub(crate) fn parse_model_list(value: &str) -> Vec<CustomModelTarget> {
     value
         .lines()
         .flat_map(|line| line.split(','))
         .map(str::trim)
         .filter(|model| !model.is_empty())
-        .map(|model| CustomModelTarget {
-            model: model.to_string(),
-            enabled: true,
-            weight: 1,
+        .map(|spec| {
+            let (model, account) = parse_target_spec(spec);
+            CustomModelTarget {
+                model,
+                account,
+                enabled: true,
+                weight: 1,
+            }
         })
         .collect()
+}
+
+pub(crate) fn parse_route_groups(value: &str) -> Vec<CustomModelRouteGroup> {
+    value
+        .lines()
+        .map(|line| CustomModelRouteGroup {
+            targets: line
+                .split(',')
+                .map(str::trim)
+                .filter(|spec| !spec.is_empty())
+                .map(|spec| {
+                    let (model, account) = parse_target_spec(spec);
+                    CustomModelTarget {
+                        model,
+                        account,
+                        enabled: true,
+                        weight: 1,
+                    }
+                })
+                .collect(),
+        })
+        .filter(|group| !group.targets.is_empty())
+        .collect()
+}
+
+pub(crate) fn target_label(target: &CustomModelTarget) -> String {
+    match target
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(account) => format!("{}@{}", target.model, account),
+        None => target.model.clone(),
+    }
+}
+
+pub(crate) fn route_summary(model: &CustomModel) -> String {
+    model
+        .routes
+        .iter()
+        .filter_map(|group| {
+            let labels = group
+                .targets
+                .iter()
+                .filter(|target| target.enabled)
+                .map(target_label)
+                .collect::<Vec<_>>();
+            if labels.is_empty() {
+                None
+            } else {
+                Some(labels.join(", "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
+
+pub(crate) fn target_count(model: &CustomModel) -> usize {
+    model
+        .routes
+        .iter()
+        .flat_map(|group| group.targets.iter())
+        .filter(|target| target.enabled)
+        .count()
+}
+
+pub(crate) fn route_group_count(model: &CustomModel) -> usize {
+    model
+        .routes
+        .iter()
+        .filter(|group| group.targets.iter().any(|target| target.enabled))
+        .count()
+}
+
+fn target(model: &str) -> CustomModelTarget {
+    let (model, account) = parse_target_spec(model);
+    CustomModelTarget {
+        model,
+        account,
+        enabled: true,
+        weight: 1,
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn route_group_from_specs(specs: &[&str]) -> CustomModelRouteGroup {
+    CustomModelRouteGroup {
+        targets: specs.iter().map(|spec| target(spec)).collect(),
+    }
 }
 
 #[cfg(test)]
@@ -204,28 +371,32 @@ mod tests {
     use super::*;
     use crate::Config;
 
-    fn custom_model(alias: &str, primary: Vec<&str>, fallback: Vec<&str>) -> CustomModel {
+    fn custom_model(alias: &str, routes: Vec<Vec<&str>>) -> CustomModel {
         CustomModel {
             alias: alias.to_string(),
             display_name: None,
             enabled: true,
             load_balance: true,
-            primary_models: primary
+            routes: routes
                 .into_iter()
-                .map(|model| CustomModelTarget {
-                    model: model.to_string(),
-                    enabled: true,
-                    weight: 1,
+                .map(|group| CustomModelRouteGroup {
+                    targets: group.into_iter().map(target).collect(),
                 })
                 .collect(),
-            fallback_models: fallback
-                .into_iter()
-                .map(|model| CustomModelTarget {
-                    model: model.to_string(),
-                    enabled: true,
-                    weight: 1,
-                })
-                .collect(),
+            primary_models: Vec::new(),
+            fallback_models: Vec::new(),
+        }
+    }
+
+    fn legacy_custom_model(alias: &str, primary: Vec<&str>, fallback: Vec<&str>) -> CustomModel {
+        CustomModel {
+            alias: alias.to_string(),
+            display_name: None,
+            enabled: true,
+            load_balance: true,
+            routes: Vec::new(),
+            primary_models: primary.into_iter().map(target).collect(),
+            fallback_models: fallback.into_iter().map(target).collect(),
         }
     }
 
@@ -247,22 +418,34 @@ mod tests {
         assert_eq!(normalize_alias(" ctm:my-model "), "my-model");
         assert_eq!(public_model_id("ctm:my-model"), "ctm:my-model");
 
-        let parsed = parse_model_list("agw:gemini-2.5-pro, min:MiniMax-M3\ncop:gpt-5.1");
+        let parsed = parse_model_list(
+            "agw:gemini-2.5-pro@agw:email:a@example.com, min:MiniMax-M3\ncop:gpt-5.1",
+        );
         assert_eq!(parsed.len(), 3);
         assert_eq!(parsed[0].model, "agw:gemini-2.5-pro");
+        assert_eq!(
+            parsed[0].account.as_deref(),
+            Some("agw:email:a@example.com")
+        );
         assert_eq!(parsed[1].model, "min:MiniMax-M3");
         assert_eq!(parsed[2].model, "cop:gpt-5.1");
+
+        let groups =
+            parse_route_groups("agw:gemini-2.5-pro@one, gem:gemini-2.5-pro@two\nmin:MiniMax-M3");
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].targets.len(), 2);
+        assert_eq!(groups[1].targets[0].model, "min:MiniMax-M3");
     }
 
     #[test]
     fn rejects_invalid_custom_model_targets() {
-        let no_primary = custom_model("alias", Vec::new(), Vec::new());
-        assert!(validate_model(&no_primary).is_err());
+        let no_routes = custom_model("alias", Vec::new());
+        assert!(validate_model(&no_routes).is_err());
 
-        let recursive = custom_model("alias", vec!["ctm:other"], Vec::new());
+        let recursive = custom_model("alias", vec![vec!["ctm:other"]]);
         assert!(validate_model(&recursive).is_err());
 
-        let unsupported = custom_model("alias", vec!["openai:gpt-4"], Vec::new());
+        let unsupported = custom_model("alias", vec![vec!["openai:gpt-4"]]);
         assert!(validate_model(&unsupported).is_err());
     }
 
@@ -272,16 +455,33 @@ mod tests {
         let dir = std::env::temp_dir().join(unique);
         let cfg = test_config(dir.to_string_lossy().to_string());
 
-        let first = custom_model("demo", vec!["agw:gemini-2.5-pro"], Vec::new());
-        let second = custom_model("ctm:demo", vec!["min:MiniMax-M3"], vec!["cop:gpt-5.1"]);
+        let first = custom_model("demo", vec![vec!["agw:gemini-2.5-pro"]]);
+        let second = custom_model(
+            "ctm:demo",
+            vec![vec!["min:MiniMax-M3"], vec!["cop:gpt-5.1"]],
+        );
         save(&cfg, &[first, second]).expect("save custom models");
 
         let loaded = load(&cfg);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].alias, "demo");
-        assert_eq!(loaded[0].primary_models[0].model, "min:MiniMax-M3");
-        assert_eq!(loaded[0].fallback_models[0].model, "cop:gpt-5.1");
+        assert_eq!(loaded[0].routes[0].targets[0].model, "min:MiniMax-M3");
+        assert_eq!(loaded[0].routes[1].targets[0].model, "cop:gpt-5.1");
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_primary_and_fallback_models_migrate_to_route_groups() {
+        let model = normalize_model(legacy_custom_model(
+            "demo",
+            vec!["agw:gemini-2.5-pro", "gem:gemini-2.5-pro"],
+            vec!["min:MiniMax-M3"],
+        ));
+        assert_eq!(model.routes.len(), 2);
+        assert_eq!(model.routes[0].targets.len(), 2);
+        assert_eq!(model.routes[1].targets[0].model, "min:MiniMax-M3");
+        assert!(model.primary_models.is_empty());
+        assert!(model.fallback_models.is_empty());
     }
 }
