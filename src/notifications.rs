@@ -312,7 +312,7 @@ fn normalize_channel(value: &str) -> String {
 
 fn error_message_text(context: &crate::UsageContext, message: &str, observed_at: &str) -> String {
     let mut lines = vec![
-        "codex-gateway account alert".to_string(),
+        "IO Gateway account alert".to_string(),
         format!("Time: {}", observed_at),
         format!("Provider: {}", context.provider_name),
         format!("Account: {}", display_account(context)),
@@ -808,7 +808,7 @@ fn model_quota_event_text(
         "reset / available again"
     };
     let mut lines = vec![
-        "codex-gateway model quota alert".to_string(),
+        "IO Gateway model quota alert".to_string(),
         format!("Time: {}", observed_at),
         format!("Provider: {}", snapshot.provider_label),
         format!("Account: {}", display_snapshot_account(snapshot)),

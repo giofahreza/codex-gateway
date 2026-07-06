@@ -414,7 +414,7 @@ async fn dashboard() -> impl IntoResponse {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Codex Gateway Dashboard</title>
+    <title>IO Gateway Dashboard</title>
     <style>
       :root {
         color-scheme: dark;
@@ -1988,7 +1988,7 @@ async fn dashboard() -> impl IntoResponse {
     <main id="dashboardContent" class="page-shell">
       <header class="page-header">
         <div class="page-title-block">
-          <h1>Codex Gateway Usage</h1>
+          <h1>IO Gateway Usage</h1>
           <div id="pageSubtitle" class="page-subtitle muted">Loading accounts...</div>
         </div>
         <button type="button" id="mobileMenuBtn" class="mobile-menu-button secondary-button" aria-label="Open navigation menu" aria-controls="headerActions" aria-expanded="false">
@@ -6739,7 +6739,7 @@ async fn notification_test_route(State(state): State<AppState>, headers: HeaderM
         return response;
     }
     let settings = state.notification_settings.lock().unwrap().clone();
-    let text = format!("codex-gateway test notification\nTime: {}", now_rfc3339());
+    let text = format!("IO Gateway test notification\nTime: {}", now_rfc3339());
     match notifications::send_notification(&state.client, &settings, &text).await {
         Ok(()) => axum::Json(serde_json::json!({
             "ok": true,

@@ -1,6 +1,6 @@
-# codex-gateway
+# IO Gateway
 
-Simple local proxy for Codex CLI that rotates multiple Codex accounts behind one shared API key.
+Local multi-provider AI gateway that rotates multiple accounts (Codex, Gemini, Qwen, DeepSeek, MiniMax, GLM, Grok, Copilot, Claude, and more) behind one shared API key.
 
 ## Who is this app for
 
@@ -169,7 +169,7 @@ Example entry in `~/.codex/config.toml`:
 
 ```toml
 [model_providers.codex_gateway]
-name = "Local Codex Gateway"
+name = "Local IO Gateway"
 base_url = "http://127.0.0.1:8319"
 env_key = "CODEX_GATEWAY_KEY"
 wire_api = "responses"
@@ -200,7 +200,7 @@ curl http://127.0.0.1:8319/v1/responses \
   -H "Accept: application/json" \
   --data '{
     "model": "gpt-5.2",
-    "input": "Write a one-line hello from Codex Gateway."
+    "input": "Write a one-line hello from IO Gateway."
   }'
 ```
 
@@ -540,7 +540,7 @@ The gateway is a drop-in replacement for the `model_provider` in `~/.codex/confi
 
 ```toml
 [model_providers.minimax_via_gateway]
-name = "MiniMax via codex-gateway"
+name = "MiniMax via IO Gateway"
 base_url = "http://DEPLOY_HOST:DEPLOY_PORT/v1"
 experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
 wire_api = "responses"
@@ -626,7 +626,7 @@ curl http://127.0.0.1:8319/v1/chat/completions \
 
 ```toml
 [model_providers.glm_via_gateway]
-name = "GLM via codex-gateway"
+name = "GLM via IO Gateway"
 base_url = "http://127.0.0.1:8319/v1"
 experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
 wire_api = "responses"
@@ -692,7 +692,7 @@ curl http://127.0.0.1:8319/v1/responses \
 
 ```toml
 [model_providers.copilot_via_gateway]
-name = "GitHub Copilot via codex-gateway"
+name = "GitHub Copilot via IO Gateway"
 base_url = "http://127.0.0.1:8319/v1"
 experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
 wire_api = "responses"
@@ -774,7 +774,7 @@ curl http://127.0.0.1:8319/v1/responses \
 
 ```toml
 [model_providers.claude_via_gateway]
-name = "Claude via codex-gateway"
+name = "Claude via IO Gateway"
 base_url = "http://127.0.0.1:8319/v1"
 experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
 wire_api = "responses"
