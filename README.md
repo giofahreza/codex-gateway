@@ -1,92 +1,50 @@
 # IO Gateway
 
-Local multi-provider AI gateway that rotates multiple accounts (Codex, Gemini, Qwen, DeepSeek, MiniMax, GLM, Grok, Copilot, Claude, and more) behind one shared API key.
+Local multi-provider AI gateway that rotates multiple accounts across ten AI providers behind one shared API key. Supports the OpenAI Responses API, OpenAI Chat Completions API, and Anthropic Messages API — so Codex CLI, Claude Code, and any OpenAI-compatible client can all point at the same gateway and simply switch providers by changing the `model` field.
 
-## Who is this app for
+## Supported Providers
 
-People with multiple Codex accounts who want to share usage evenly from a single Codex CLI setup.
+| Provider | Prefix | Auth method |
+|---|---|---|
+| Codex / OpenAI (via ChatGPT) | `cod:` | OAuth (browser redirect) |
+| Antigravity (Google Cloud) | `agw:` | OAuth (Google) |
+| Gemini (Google AI Studio) | `gem:` | OAuth (Google) |
+| Qwen (Alibaba) | `qwn:` | Browser token extraction |
+| DeepSeek | `dsk:` | API key |
+| MiniMax | `min:` | API key |
+| Grok (xAI) | `grk:` | OAuth device code |
+| GitHub Copilot | `cop:` | GitHub device code |
+| Claude (Anthropic) | `cld:` | PKCE OAuth |
+| GLM / Z.AI | `glm:` | API key |
 
-## What it does
+---
 
-- Accepts Codex CLI requests on a local port.
-- Validates a single shared proxy key.
-- Rotates upstream Codex tokens in round‑robin for even usage.
-- Forwards requests to the Codex backend with required headers.
+## Who Is This For
 
-## Dashboard
+Anyone who runs multiple AI accounts and wants to:
 
-Open `http://127.0.0.1:8319/` to see per‑account usage and errors.
+- Share load evenly across accounts without changing client config.
+- Expose a single endpoint that clients can call with any supported model.
+- Manage all accounts from a single dashboard without touching credential files manually.
+- Receive Telegram or Google Chat alerts when an account hits an error or exhausts its quota.
 
-If `admin_auth.enabled` is on, the dashboard requires:
-- the configured admin API key
-- a 6-digit TOTP code from Google Authenticator
+---
 
-## Codex Login (Web UI)
+## Quick Start
 
-Open `http://127.0.0.1:8319/` and scroll to **Codex OAuth Login**.
+### 1. Build
 
-Flow:
-1. Click **Start Login** (it will open a new tab; if blocked, copy the URL shown).
-2. Complete login in the new tab.
-3. Copy the callback URL (it will fail to connect on the server).
-4. Paste the callback URL into the form and click **Submit**.
-5. The credential is saved into `auth_dir` and immediately loaded.
+```bash
+cargo build --release
+```
 
-## Files
-
-- `config.json` – runtime config (create from `config.example.json`).
-- `auths/` – Codex JSON credentials (copied from your deployed AIProxyAPI auth dir).
-- `src/main.rs` – Rust gateway implementation.
-
-## Setup
-
-1. Copy and edit config:
+### 2. Create config
 
 ```bash
 cp config.example.json config.json
 ```
 
-2. Put Codex credential files in `auths/` (type `codex`, containing `access_token`).
-
-3. Set your shared proxy key in your shell:
-
-```bash
-export CODEX_GATEWAY_KEY="your-random-key"
-```
-
-4. Configure admin login for dashboard/account management.
-
-You can either put the values in `config.json`:
-
-```json
-"admin_auth": {
-  "enabled": true,
-  "api_key": "your-admin-api-key",
-  "totp_secret": "BASE32_SECRET_FROM_GOOGLE_AUTHENTICATOR",
-  "session_ttl_seconds": 43200
-}
-```
-
-Or set them with environment variables:
-
-```bash
-export ADMIN_AUTH_ENABLED=true
-export ADMIN_AUTH_API_KEY="your-admin-api-key"
-export ADMIN_AUTH_TOTP_SECRET="BASE32_SECRET_FROM_GOOGLE_AUTHENTICATOR"
-export ADMIN_AUTH_SESSION_TTL_SECONDS=43200
-```
-
-`totp_secret` must be a Base32 TOTP secret that Google Authenticator can import.
-
-5. Run the gateway:
-
-```bash
-cargo run
-```
-
-## Config
-
-`config.json`:
+Edit `config.json` — minimum required fields:
 
 ```json
 {
@@ -94,11 +52,48 @@ cargo run
   "upstream_base": "https://chatgpt.com/backend-api/codex",
   "proxy_api_key": "your-shared-proxy-key",
   "tokens": [],
-  "auth_dir": "/root/dev/yow/gpt-gateway/auths",
+  "auth_dir": "./auths"
+}
+```
+
+### 3. Set your shared key
+
+```bash
+export CODEX_GATEWAY_KEY="your-shared-proxy-key"
+```
+
+All clients use this single key in the `Authorization: Bearer` header.
+
+### 4. Run
+
+```bash
+cargo run --release
+# or after building:
+./target/release/codex-gateway
+```
+
+Dashboard: `http://127.0.0.1:8319/`
+
+API docs: `http://127.0.0.1:8319/docs/`
+
+---
+
+## Configuration
+
+### config.json
+
+```json
+{
+  "listen": "0.0.0.0:8319",
+  "upstream_base": "https://chatgpt.com/backend-api/codex",
+  "proxy_api_key": "your-shared-proxy-key",
+  "tokens": [],
+  "auth_dir": "./auths",
+  "disabled_files": [],
   "admin_auth": {
     "enabled": true,
     "api_key": "your-admin-api-key",
-    "totp_secret": "BASE32_SECRET_FROM_GOOGLE_AUTHENTICATOR",
+    "totp_secret": "BASE32_SECRET",
     "session_ttl_seconds": 43200
   },
   "oauth": {
@@ -118,7 +113,7 @@ cargo run
       "claude": {
         "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
         "redirect_uri": "https://platform.claude.com/oauth/code/callback",
-        "scopes": ["org:create_api_key", "user:profile", "user:inference", "user:sessions:claude_code", "user:mcp_servers", "user:file_upload"],
+        "scopes": ["org:create_api_key", "user:profile", "user:inference"],
         "authorize_url": "https://claude.com/cai/oauth/authorize",
         "token_url": "https://platform.claude.com/v1/oauth/token",
         "base_url": "https://api.anthropic.com"
@@ -128,44 +123,287 @@ cargo run
 }
 ```
 
-Notes:
-- `tokens` is optional. If empty, tokens are loaded from `auth_dir`.
-- Tokens are de‑duplicated and rotated in round‑robin order.
-- `admin_auth.api_key` falls back to `proxy_api_key` if left empty, but using a separate key is safer.
-- `admin_auth.totp_secret` can also be provided by `ADMIN_AUTH_TOTP_SECRET`.
-- `admin_auth.session_ttl_seconds` defaults to 12 hours.
-- `oauth.providers.qwen` and `oauth.providers.claude` are optional. Built-in defaults are used when omitted, and any field can also be overridden with `QWEN_OAUTH_*` or `CLAUDE_OAUTH_*` environment variables from `.env.example`.
+**Notes:**
 
-## Qwen Browser Token Flow
+- `tokens` is optional. Tokens are loaded from `auth_dir` credential files when empty.
+- `disabled_files` lists credential filenames that should be loaded but kept disabled at startup.
+- `admin_auth.api_key` falls back to `proxy_api_key` when omitted; a separate key is safer.
+- `admin_auth.session_ttl_seconds` defaults to 43200 (12 hours), min 300, max 604800 (7 days).
+- OAuth provider configs are optional; built-in defaults are used when omitted.
 
-This gateway now follows the same Qwen login model used by [`encryptarun/qwen-api`](https://github.com/encryptarun/qwen-api): it validates a browser token from `chat.qwen.ai` instead of sending the user into a normal OAuth authorize/callback flow.
+### Environment variable overrides
 
-Local setup:
+Admin auth:
 
-1. Start the gateway with `cargo run`.
-2. Open `http://127.0.0.1:8319/login/qwen/start`.
-3. The helper page will tell you to open `https://chat.qwen.ai`, sign in, and run the browser token extractor against `localStorage.token`.
-4. Paste that token back into the helper page, or paste it into the dashboard Qwen modal.
-5. Confirm a `type: "qwen"` auth file appears under `auth_dir`, then verify the account with `curl http://127.0.0.1:8319/qwen/accounts.json`.
+```bash
+ADMIN_AUTH_ENABLED=true
+ADMIN_AUTH_API_KEY=your-admin-key
+ADMIN_AUTH_TOTP_SECRET=BASE32_SECRET
+ADMIN_AUTH_SESSION_TTL_SECONDS=43200
+```
 
-Relevant Qwen environment variables for this flow:
+Antigravity / Gemini Google OAuth:
 
-- `QWEN_OAUTH_VALIDATE_URL`
-- `QWEN_OAUTH_REFRESH_URL`
-- `QWEN_OAUTH_SESSION_URL`
-- `QWEN_OAUTH_BASE_URL`
+```bash
+ANTIGRAVITY_GOOGLE_CLIENT_ID=...
+ANTIGRAVITY_GOOGLE_CLIENT_SECRET=...
+GEMINI_GOOGLE_CLIENT_ID=...
+GEMINI_GOOGLE_CLIENT_SECRET=...
+```
 
-Operational notes:
+Qwen OAuth fields can be overridden individually with `QWEN_OAUTH_*` (e.g. `QWEN_OAUTH_BASE_URL`). Claude OAuth fields with `CLAUDE_OAUTH_*`.
 
-- The local helper route is `GET /login/qwen/start`. It serves instructions and the extractor snippet; it does not redirect into `https://chat.qwen.ai/oauth/authorize`.
-- The usable Qwen API base for responses/models is normalized to `https://portal.qwen.ai/v1`. Older saved credentials that still point at `https://chat.qwen.ai/api/v1` are remapped at runtime.
-- Direct token submission still uses `POST /login/qwen/start` with `{"token":"..."}`.
-- Browser-token-backed Qwen accounts refresh through the upstream `/auths/` session endpoint and keep the original browser token unless the upstream explicitly returns a replacement refresh token.
-- The legacy device-code flow is no longer used.
+---
 
-## Codex CLI config
+## Admin Dashboard
 
-Example entry in `~/.codex/config.toml`:
+Open `http://127.0.0.1:8319/` to access the dashboard.
+
+When `admin_auth.enabled` is `true`, the dashboard prompts for:
+- The admin API key
+- A 6-digit TOTP code from Google Authenticator (set up with `totp_secret`)
+
+Sessions are persisted to disk and survive server restarts. Session duration is configurable.
+
+### Dashboard sections
+
+**Overview bar** — live counts: total requests, error rate, number of accounts across all providers, attention items (accounts with recent errors).
+
+**Context Usage chart** — token usage over time (input, output, cache, reasoning tokens). Configurable range: 1 hour, 1 day, 1 week, or custom (up to 720 hours). Configurable bucket size: 1 / 5 / 15 / 30 / 60 minutes. Per-model breakdown toggle. Filterable by account.
+
+**Custom Models** — create and manage `ctm:` alias routes with load balancing across multiple provider targets and fallback chains.
+
+**Provider sections** — per-provider account cards showing:
+- Request count, error count, token usage (input / output / cache / reasoning)
+- Last seen / last success / last error timestamps
+- Live quota from upstream (provider-specific: balance, rolling window, weekly window, model breakdown)
+- Enable / disable / delete controls
+- Re-auth flow for providers with expiring tokens
+
+**Settings modal** — notification channel (Telegram or Google Chat) configuration and per-account alert subscriptions.
+
+**Theme toggle** — dark / light, persisted to localStorage.
+
+**Mobile responsive** — hamburger menu for small screens.
+
+---
+
+## API Surface
+
+All client requests use `Authorization: Bearer <CODEX_GATEWAY_KEY>`.
+
+### Unified endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /v1/models` | Unified model catalog across all enabled providers |
+| `POST /v1/responses` | OpenAI Responses API (primary endpoint) |
+| `POST /v1/chat/completions` | OpenAI Chat Completions API |
+| `POST /claude/v1/messages` | Anthropic Messages API |
+| `POST /claude/messages` | Anthropic Messages API (alternate path) |
+| `GET /codex/models` | Codex-path model catalog |
+| `POST /codex/responses` | Codex-path Responses API |
+
+### Admin endpoints (session cookie required)
+
+| Endpoint | Description |
+|---|---|
+| `GET /health` | Health check — returns `ok` |
+| `GET /dashboard.json` | Full dashboard data JSON |
+| `GET /quota.json` | Codex account quota data |
+| `POST /credentials/delete` | Delete a credential file |
+| `POST /credentials/toggle` | Enable or disable a credential |
+| `GET/POST /notifications/settings` | Read or update notification settings |
+| `POST /notifications/test` | Send a test notification |
+| `GET /usage/summary.json` | Aggregate usage summary |
+| `GET /usage/history.json` | Time-bucketed usage history |
+| `GET /usage/context-history.json` | Per-request context history |
+| `GET /custom-models.json` | List all custom model aliases |
+| `POST /custom-models/save` | Create or replace a custom model alias |
+| `POST /custom-models/delete` | Delete a custom model alias |
+| `GET /temp-files/:name` | Download a temp file (images, etc.) |
+| `GET /docs/` | Swagger UI |
+| `GET /api-docs/openapi.json` | OpenAPI spec |
+
+### Per-provider account / login routes
+
+Each provider exposes:
+
+- `GET /{provider}/accounts.json` — list accounts
+- `GET /{provider}/quota.json` — live quota data
+- `POST /login/{provider}/start` — initiate login
+- `POST /login/{provider}/submit` — complete login
+
+Providers: `codex`, `antigravity`, `gemini`, `qwen`, `deepseek`, `minimax`, `grok`, `copilot`, `claude`, `glm`.
+
+---
+
+## Provider Routing
+
+The gateway picks the upstream provider from the `model` field — no separate per-provider URL prefixes required. Clients stay on `/v1/*` and switch providers by changing only the model name.
+
+### Default routing rules
+
+| Model pattern | Provider |
+|---|---|
+| `gpt-*` and unmatched names | Codex (OpenAI via ChatGPT) |
+| `gemini-3-pro-image`, `gemini-3-pro-high`, `gemini-3-pro-low`, `gemini-2.5-flash-thinking` | Antigravity |
+| `gemini-*` (standard) | Gemini (Google AI Studio) |
+| `qwen*` | Qwen |
+| `deepseek*` | DeepSeek |
+| `grok*` | Grok |
+| `claude*` | Claude (Anthropic OAuth) |
+| `glm*` | GLM / Z.AI |
+| `MiniMax-*` (via Claude endpoint) | MiniMax Anthropic bridge |
+| `ctm:alias` | Custom model alias |
+
+### Provider prefix overrides
+
+Prefix a model id with a three-letter provider code followed by `:` to force a specific provider regardless of model name. The gateway strips the prefix before forwarding:
+
+| Prefix | Provider |
+|---|---|
+| `agw:` | Antigravity |
+| `gem:` | Gemini |
+| `qwn:` | Qwen |
+| `dsk:` | DeepSeek |
+| `grk:` | Grok |
+| `min:` | MiniMax |
+| `cop:` | GitHub Copilot |
+| `cld:` | Claude |
+| `glm:` | GLM / Z.AI |
+| `cod:` | Codex / OpenAI |
+
+Examples:
+
+```
+agw:gemini-2.5-pro   → Antigravity with upstream model gemini-2.5-pro
+gem:gemini-2.5-pro   → native Gemini with upstream model gemini-2.5-pro
+cop:gpt-5.1          → GitHub Copilot with upstream model gpt-5.1
+cld:claude-sonnet-4  → Claude OAuth with upstream model claude-sonnet-4
+```
+
+Prefixed model ids are returned by `GET /v1/models` and should be used in client config and model pickers.
+
+---
+
+## Custom Models
+
+Custom models expose a stable `ctm:alias` that routes requests to one or more real provider targets with optional load balancing and fallback chains. Stored in `custom-models.json` under `auth_dir`; no database required.
+
+### Create / replace an alias
+
+```bash
+curl -sS http://127.0.0.1:8319/custom-models/save \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "alias": "workhorse",
+    "display_name": "Workhorse",
+    "enabled": true,
+    "load_balance": true,
+    "primary_models": [
+      {"model": "agw:gemini-2.5-pro", "weight": 2},
+      {"model": "gem:gemini-2.5-pro", "weight": 1}
+    ],
+    "fallback_models": [
+      {"model": "min:MiniMax-M3"},
+      {"model": "dsk:deepseek-v4-pro"}
+    ]
+  }'
+```
+
+### Use the alias
+
+```bash
+curl -sS http://127.0.0.1:8319/v1/responses \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{"model":"ctm:workhorse","input":"Reply with OK only."}'
+```
+
+### Delete an alias
+
+```bash
+curl -sS http://127.0.0.1:8319/custom-models/delete \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/json" \
+  --data '{"alias":"workhorse"}'
+```
+
+### Rules
+
+- `alias` is normalized: `workhorse` and `ctm:workhorse` refer to the same alias.
+- Aliases must not be empty and must not contain whitespace, `:`, `/`, or `\`.
+- A custom model must have at least one enabled primary target.
+- `load_balance: true` — enabled primary targets are sorted by provider/account usage score and rotated on ties. A higher `weight` biases selection toward that target.
+- `load_balance: false` — primary targets are tried in configured order.
+- Fallback targets are tried in configured order after all primary targets.
+- Fallback triggers on HTTP `400` or higher from the selected target.
+- If every target fails, the response is `502` with the failed target list in the error body.
+- Disabled custom models are hidden from `/v1/models` and return `503` when called directly.
+- To rename an alias, send `original_alias` (or `previous_alias`) alongside the new alias; the old alias is deleted after the new one is saved.
+- Custom model aliases appear in `GET /v1/models`, `GET /codex/models`.
+- Targets cannot point at another `ctm:` alias (no recursive routing).
+
+---
+
+## Account Management
+
+### Round-robin rotation
+
+Each provider maintains its own round-robin counter. Accounts are rotated per-request. Disabled accounts are skipped. Custom models use usage-weighted selection when `load_balance` is enabled.
+
+### Enable / disable accounts
+
+Toggle an account without deleting it from the dashboard or via:
+
+```bash
+curl -sS http://127.0.0.1:8319/credentials/toggle \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "file=my-account.json&enabled=false"
+```
+
+### Delete accounts
+
+```bash
+curl -sS http://127.0.0.1:8319/credentials/delete \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "file=my-account.json"
+```
+
+Deleting removes the credential file from disk and unloads it from memory immediately.
+
+---
+
+## Provider Setup
+
+### Codex (OpenAI via ChatGPT)
+
+OAuth browser redirect flow. From the dashboard, click **+ Add account → Codex (ChatGPT)**:
+
+1. Click **Start Login** — opens a new tab for ChatGPT OAuth.
+2. Complete login in the browser.
+3. Copy the callback URL (the browser will fail to load it — that's expected).
+4. Paste the callback URL back into the dashboard form and click **Submit**.
+5. The credential is saved to `auth_dir` and loaded immediately.
+
+Or via API:
+
+```bash
+# Start
+curl http://127.0.0.1:8319/login/codex/start -b "$ADMIN_COOKIE"
+
+# Submit callback URL
+curl http://127.0.0.1:8319/login/codex/submit \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode "redirect_url=https://..."
+```
+
+#### Codex CLI config
 
 ```toml
 [model_providers.codex_gateway]
@@ -180,145 +418,452 @@ model = "gpt-5.2-codex"
 model_provider = "codex_gateway"
 ```
 
-Then run Codex CLI with that profile.
+---
 
-## Quick API test with curl
+### Antigravity (Google Cloud)
 
-List available models:
+OAuth flow using Google credentials. From the dashboard, click **+ Add account → Antigravity (Google)**:
+
+1. Click **Start Login** — opens Google OAuth.
+2. Complete login and grant permissions.
+3. The credential is saved automatically via the callback.
+
+Or via API:
 
 ```bash
-curl http://127.0.0.1:8319/v1/models \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY"
+curl http://127.0.0.1:8319/login/antigravity/start -b "$ADMIN_COOKIE"
 ```
 
-Send a basic text request:
+Antigravity models include advanced Gemini variants and image generation:
+
+- `agw:gemini-2.5-pro`, `agw:gemini-2.5-flash`, `agw:gemini-3-pro`
+- `agw:gemini-3-pro-image`, `agw:gemini-3-pro-high`, `agw:gemini-3-pro-low`
+- `agw:gemini-2.5-flash-thinking`
+- `agw:claude-sonnet-4-6`, `agw:claude-opus-4-6-thinking`
+
+---
+
+### Gemini (Google AI Studio)
+
+OAuth flow using Google credentials. Same flow as Antigravity. From the dashboard, click **+ Add account → Gemini (Google)**.
+
+Standard Gemini models: `gem:gemini-2.5-pro`, `gem:gemini-2.5-flash`, `gem:gemini-2.5-flash-lite`, `gem:gemini-3-pro`.
+
+---
+
+### Qwen
+
+Browser token extraction flow (no standard OAuth redirect):
+
+1. From the dashboard, click **+ Add account → Qwen** (or open `http://127.0.0.1:8319/login/qwen/start`).
+2. The helper page shows instructions: open `https://chat.qwen.ai`, sign in, run the token extractor snippet against `localStorage.token`.
+3. Paste the extracted token back into the dashboard form or send it to:
+
+```bash
+curl -sS http://127.0.0.1:8319/login/qwen/start \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/json" \
+  -d '{"token":"BROWSER_TOKEN","label":"personal"}'
+```
+
+The gateway validates and saves the credential. Tokens refresh automatically via the upstream session endpoint.
+
+**Note:** The API base is normalized to `https://portal.qwen.ai/v1`. Older credentials pointing at `https://chat.qwen.ai/api/v1` are remapped at runtime.
+
+```bash
+# Check registered accounts
+curl http://127.0.0.1:8319/qwen/accounts.json -b "$ADMIN_COOKIE"
+```
+
+#### Codex CLI config
+
+```toml
+[model_providers.qwen_via_gateway]
+name = "Qwen via IO Gateway"
+base_url = "http://127.0.0.1:8319/v1"
+experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+wire_api = "responses"
+
+[profiles.qwen]
+model = "qwn:qwen3.7-max"
+model_provider = "qwen_via_gateway"
+```
+
+---
+
+### DeepSeek
+
+API key flow. From the dashboard, click **+ Add account → DeepSeek**, or:
+
+```bash
+curl -sS http://127.0.0.1:8319/login/deepseek/start \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/json" \
+  -d '{"api_key":"sk-...","label":"personal","base_url":"https://api.deepseek.com"}'
+```
+
+The gateway validates the key against `GET /models` before saving. Balance is pulled from `GET /user/balance` (cached 60 s) and shown on each account card.
+
+Tool calls and reasoning summaries are translated to/from DeepSeek's chat-completions format transparently.
 
 ```bash
 curl http://127.0.0.1:8319/v1/responses \
   -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
-  --data '{
-    "model": "gpt-5.2",
-    "input": "Write a one-line hello from IO Gateway."
-  }'
+  -d '{"model":"deepseek-v4-pro","input":"Reply with one short line."}'
 ```
 
-Generate an image and save the streamed PNG to `/tmp/codex-gateway.png`:
+#### Codex CLI config
 
-```bash
-tmp=$(mktemp)
-curl -sS -N http://127.0.0.1:8319/v1/responses \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
-  -H "Content-Type: application/json" \
-  -H "Accept: text/event-stream" \
-  --data '{
-    "model": "gpt-5.2",
-    "input": "Create a simple red square icon on a white background.",
-    "tools": [{"type": "image_generation"}],
-    "stream": true
-  }' > "$tmp"
+```toml
+[model_providers.deepseek_via_gateway]
+name = "DeepSeek via IO Gateway"
+base_url = "http://127.0.0.1:8319/v1"
+experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+wire_api = "responses"
 
-sed -n 's/^data: //p' "$tmp" \
-  | jq -r 'select(.type=="response.image_generation_call.partial_image") | .partial_image_b64' \
-  | tail -n 1 \
-  | base64 -d > /tmp/codex-gateway.png
+[profiles.deepseek]
+model = "dsk:deepseek-v4-pro"
+model_provider = "deepseek_via_gateway"
 ```
 
-## Provider Routing
+---
 
-The public API surface is source-oriented:
+### MiniMax
 
-- `GET /v1/models` returns the unified model catalog across enabled providers with provider-prefixed model ids.
-- `POST /v1/responses` is the primary OpenAI-compatible execution endpoint.
-- `POST /v1/chat/completions` is also available for provider-prefixed targets that expose native chat completions, including GLM.
-- The gateway picks the target adapter from the `model` id instead of exposing provider-specific `/provider/v1/*` APIs.
-
-Current routing rules:
-
-- `gpt-*` and unmatched models go to the Codex target.
-- `qwen*` goes to Qwen.
-- `deepseek*` goes to DeepSeek.
-- `grok*` goes to Grok.
-- `claude*` goes to the native Claude OAuth target.
-- `glm*` goes to GLM/Z.AI.
-- Standard `gemini-*` models go to the native Gemini target.
-- Antigravity-only Gemini variants such as `gemini-3-pro-image`, `gemini-3-pro-high`, `gemini-3-pro-low`, and `gemini-2.5-flash-thinking` go to Antigravity.
-
-This means clients should stay on `/v1/*` and switch providers by changing only the `model` field. Use the prefixed `id` values returned by `/v1/models` when building model pickers or saved client config.
-
-Provider prefixes can force a specific target while keeping the upstream model id unchanged. Prefixes are exactly three letters and must not include whitespace after the colon. The gateway strips the prefix before forwarding to the provider:
-
-- `agw:gemini-2.5-pro` routes to Antigravity with upstream model `gemini-2.5-pro`.
-- `gem:gemini-2.5-pro` routes to the native Gemini target with upstream model `gemini-2.5-pro`.
-- Supported prefixes: `agw` Antigravity, `gem` Gemini, `qwn` Qwen, `dsk` DeepSeek, `grk` Grok, `min` MiniMax, `cop` GitHub Copilot, `cld` Claude, `glm` GLM/Z.AI, `cod` Codex/OpenAI.
-- Old unprefixed model names still work exactly as before.
-
-### Custom models
-
-Custom models expose a stable alias such as `ctm:workhorse` and route it to one or more real provider models. They are configured from the admin dashboard Custom model section or the admin-only API below. The gateway stores them in `custom-models.json` under `auth_dir`; no database is required.
-
-Custom model aliases are returned by `GET /v1/models`, `GET /models`, and `GET /codex/models`. They can be used from `POST /v1/responses`, `POST /codex/responses`, `POST /claude/messages`, and `POST /claude/responses`.
-
-Save or replace an alias:
+API key flow. From the dashboard, click **+ Add account → MiniMax**, or:
 
 ```bash
-curl -sS http://127.0.0.1:8319/custom-models/save \
+curl -sS http://127.0.0.1:8319/login/minimax/start \
   -b "$ADMIN_COOKIE" \
   -H "Content-Type: application/json" \
-  --data '{
-    "alias": "workhorse",
-    "display_name": "Workhorse",
-    "enabled": true,
-    "load_balance": true,
-    "primary_models": [
-      {"model": "agw:gemini-2.5-pro"},
-      {"model": "gem:gemini-2.5-pro"}
-    ],
-    "fallback_models": [
-      {"model": "min:MiniMax-M3"},
-      {"model": "agw:gpt-oss"}
-    ]
-  }'
+  -d '{"api_key":"eyJ...","label":"personal"}'
 ```
 
-Call it like any other model:
+Routing:
+
+- `POST /v1/responses` → MiniMax native `/v1/responses` (Codex Responses body forwarded as-is).
+- `POST /claude/messages` with a `MiniMax-*` model → MiniMax Anthropic-compatible `/anthropic/v1/messages`.
+
+Dashboard shows 5-hour and weekly rolling quota windows with per-model breakdown, pulled from MiniMax's coding plan API.
 
 ```bash
-curl -sS http://127.0.0.1:8319/v1/responses \
+curl http://127.0.0.1:8319/v1/responses \
   -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
-  --data '{"model":"ctm:workhorse","input":"Reply with OK only."}'
+  -d '{"model":"MiniMax-M3","input":"say hi in one word"}'
 ```
 
-Delete an alias:
+#### Codex CLI config
+
+```toml
+[model_providers.minimax_via_gateway]
+name = "MiniMax via IO Gateway"
+base_url = "http://127.0.0.1:8319/v1"
+experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+wire_api = "responses"
+
+[profiles.minimax]
+model = "MiniMax-M3"
+model_provider = "minimax_via_gateway"
+model_context_window = 1000000
+model_reasoning_effort = "high"
+```
+
+#### Claude Code config
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8319/claude",
+    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
+    "ANTHROPIC_MODEL": "MiniMax-M3",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "MiniMax-M3",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "MiniMax-M3",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "MiniMax-M3"
+  }
+}
+```
+
+---
+
+### Grok (xAI)
+
+OAuth device code flow. From the dashboard, click **+ Add account → Grok (xAI)**, or:
 
 ```bash
-curl -sS http://127.0.0.1:8319/custom-models/delete \
+# Step 1: start device code flow
+curl -sS http://127.0.0.1:8319/login/grok/start \
   -b "$ADMIN_COOKIE" \
   -H "Content-Type: application/json" \
-  --data '{"alias":"workhorse"}'
+  -d '{"label":"personal"}'
 ```
 
-Custom model rules:
+Open the returned verification URL, enter the user code, then submit:
 
-- `alias` is normalized by trimming whitespace and removing an optional `ctm:` prefix. `workhorse` and `ctm:workhorse` refer to the same alias.
-- Aliases must not be empty and must not contain whitespace, `:`, `/`, or `\`.
-- A custom model must have at least one enabled primary target.
-- Targets may use these provider prefixes: `agw`, `gem`, `qwn`, `dsk`, `grk`, `min`, `cop`, `cld`, `glm`, and `cod`. Unprefixed targets still use the normal provider routing rules.
-- Targets cannot point at another custom model, so recursive `ctm:` routes are rejected.
-- Disabled custom models are hidden from model catalogs and return `503` if called directly.
-- Disabled primary or fallback target entries are skipped.
-- When `load_balance` is `true`, enabled primary targets are sorted by provider/account usage score and rotated on ties. The optional target `weight` lowers that target's usage score before comparison, so a higher weight makes it more likely to be selected when other signals are similar.
-- When `load_balance` is `false`, enabled primary targets are tried in the configured order.
-- Fallback targets are always appended after primary targets and are tried in configured order.
-- The gateway falls back only when the selected target returns HTTP status `400` or higher. Successful responses, including short or model-truncated responses, are returned as-is.
-- If every target fails, the response is `502` with the failed target list in the error message.
-- Saving an existing alias replaces it. To rename, send `original_alias` or `previous_alias`; the old alias is removed after the new one is saved.
+```bash
+# Step 2: poll for completion (the dashboard does this automatically)
+curl http://127.0.0.1:8319/login/grok/status?state=STATE \
+  -b "$ADMIN_COOKIE"
+```
 
-Rule coverage was manually verified on the live server with curl: admin auth, validation errors, load-balancing rotation, ordered routing, disabled target skipping, fallback chaining, all-target failure, disabled model behavior, alias normalization, rename, catalog exposure, file-backed persistence after service restart, and cleanup.
+Grok tokens expire periodically. Re-auth from the dashboard when the account shows auth errors.
 
-Generate an image through Antigravity using the unified `/v1/responses` endpoint:
+#### Codex CLI config
+
+```toml
+[model_providers.grok_via_gateway]
+name = "Grok via IO Gateway"
+base_url = "http://127.0.0.1:8319/v1"
+experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+wire_api = "responses"
+
+[profiles.grok]
+model = "grk:grok-4.3"
+model_provider = "grok_via_gateway"
+```
+
+---
+
+### GitHub Copilot
+
+GitHub device code flow. From the dashboard, click **+ Add account → GitHub Copilot**, or:
+
+```bash
+# Step 1: start device code flow
+curl -X POST http://127.0.0.1:8319/login/copilot/start \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/json" \
+  -d '{"account_type":"individual"}'
+```
+
+Open the returned GitHub verification URL, enter the user code, then submit the `device_code`:
+
+```bash
+# Step 2: submit device_code after GitHub confirms
+curl -X POST http://127.0.0.1:8319/login/copilot/submit \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d 'device_code=DEVICE_CODE'
+```
+
+The `cop:` prefix is required so Copilot GPT model names do not collide with the Codex target.
+
+Routing:
+
+- `POST /v1/responses` → Copilot `/responses`.
+- `POST /claude/messages` → Copilot Responses bridge (translates Claude Messages → Copilot Responses).
+
+```bash
+curl http://127.0.0.1:8319/v1/responses \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"cop:gpt-5.1","input":"say hi in one word"}'
+```
+
+#### Codex CLI config
+
+```toml
+[model_providers.copilot_via_gateway]
+name = "GitHub Copilot via IO Gateway"
+base_url = "http://127.0.0.1:8319/v1"
+experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+wire_api = "responses"
+
+[profiles.copilot]
+model = "cop:gpt-5.1"
+model_provider = "copilot_via_gateway"
+model_reasoning_effort = "high"
+```
+
+#### Claude Code config
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8319/claude",
+    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
+    "ANTHROPIC_MODEL": "cop:claude-sonnet-4",
+    "ANTHROPIC_SMALL_FAST_MODEL": "cop:claude-sonnet-4"
+  }
+}
+```
+
+---
+
+### Claude (Anthropic)
+
+PKCE OAuth flow. From the dashboard, click **+ Add account → Claude**:
+
+1. Click **Start Login** — opens Anthropic OAuth.
+2. Complete login in the browser.
+3. Copy the displayed `CODE#STATE` value or the callback URL.
+4. Paste it into the dashboard form and click **Submit**.
+
+Or via API:
+
+```bash
+# Step 1: get authorization URL
+curl -sS 'http://127.0.0.1:8319/login/claude/start?label=personal' \
+  -b "$ADMIN_COOKIE"
+
+# Step 2: submit code or callback URL after OAuth completes
+curl -sS http://127.0.0.1:8319/login/claude/submit \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode 'redirect_url=CODE#STATE'
+```
+
+Cookie fallback (when browser OAuth is unavailable):
+
+```bash
+curl -sS http://127.0.0.1:8319/login/claude/start \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/json" \
+  -d '{"cookie":"CLAUDE_AI_COOKIE","label":"personal","organization_uuid":"..."}'
+```
+
+Direct token fallback:
+
+```bash
+curl -sS http://127.0.0.1:8319/login/claude/start \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/json" \
+  -d '{"access_token":"...","refresh_token":"...","label":"personal"}'
+```
+
+Access tokens are refreshed automatically when they expire.
+
+```bash
+curl http://127.0.0.1:8319/v1/responses \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"cld:claude-sonnet-4-20250514","input":"say hi in one word"}'
+```
+
+#### Codex CLI config
+
+```toml
+[model_providers.claude_via_gateway]
+name = "Claude via IO Gateway"
+base_url = "http://127.0.0.1:8319/v1"
+experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+wire_api = "responses"
+
+[profiles.claude]
+model = "cld:claude-sonnet-4-20250514"
+model_provider = "claude_via_gateway"
+model_reasoning_effort = "high"
+```
+
+#### Claude Code config
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8319/claude",
+    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
+    "ANTHROPIC_MODEL": "cld:claude-sonnet-4-20250514",
+    "ANTHROPIC_SMALL_FAST_MODEL": "cld:claude-3-5-haiku-20241022"
+  }
+}
+```
+
+---
+
+### GLM / Z.AI
+
+API key flow with two account types:
+
+- `api_usage` — standard Z.AI API key. OpenAI/Codex requests use `https://api.z.ai/api/paas/v4`; Claude Messages requests are translated through Chat Completions.
+- `subscription` — GLM Coding Plan subscription key. OpenAI/Codex requests use `https://api.z.ai/api/coding/paas/v4`; Claude Messages pass through to `https://api.z.ai/api/anthropic`.
+
+```bash
+curl -sS http://127.0.0.1:8319/login/glm/start \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/json" \
+  -d '{"api_key":"ZAI_API_KEY","label":"personal","account_type":"api_usage"}'
+```
+
+Routing:
+
+- `POST /v1/responses` → GLM's OpenAI-compatible `/chat/completions` (translated).
+- `POST /v1/chat/completions` → GLM `/chat/completions` (passthrough).
+- `POST /claude/messages` → depends on account type (translate or passthrough).
+
+```bash
+# Via Responses API
+curl http://127.0.0.1:8319/v1/responses \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm:glm-5.2","input":"say hi in one word"}'
+
+# Via native Chat Completions
+curl http://127.0.0.1:8319/v1/chat/completions \
+  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm:glm-5.2","messages":[{"role":"user","content":"say hi"}]}'
+```
+
+#### Codex CLI config
+
+```toml
+[model_providers.glm_via_gateway]
+name = "GLM via IO Gateway"
+base_url = "http://127.0.0.1:8319/v1"
+experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+wire_api = "responses"
+
+[profiles.glm]
+model = "glm:glm-5.2"
+model_provider = "glm_via_gateway"
+model_reasoning_effort = "high"
+```
+
+#### Claude Code config
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8319/claude",
+    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
+    "ANTHROPIC_MODEL": "glm:glm-5.2",
+    "ANTHROPIC_SMALL_FAST_MODEL": "glm:glm-5.2"
+  }
+}
+```
+
+---
+
+## Image Input
+
+The gateway forwards image parts from Responses API requests to every upstream target. Clients can attach images using either of these content-part shapes:
+
+```json
+{"type": "input_image", "image_url": "data:image/png;base64,..."}
+```
+
+```json
+{"type": "image_url", "image_url": {"url": "https://example.com/x.png"}}
+```
+
+Per-target translation:
+
+| Target | Translation |
+|---|---|
+| Codex | Passthrough — native Responses API |
+| Grok | Passthrough — native Responses API |
+| MiniMax / Qwen | OpenAI Chat Completions content array |
+| DeepSeek | Anthropic Messages content array |
+| Gemini / Antigravity | Google Generative `parts` array |
+| Claude | Anthropic Messages content array |
+
+Text-only requests are kept as a plain string for backward compatibility.
+
+### Image generation
+
+Generate an image through Antigravity and save the PNG:
 
 ```bash
 tmp=$(mktemp)
@@ -336,192 +881,109 @@ curl -sS -N http://127.0.0.1:8319/v1/responses \
 sed -n 's/^data: //p' "$tmp" \
   | jq -r 'select(.type=="response.image_generation_call.partial_image") | .partial_image_b64' \
   | tail -n 1 \
-  | base64 -d > /tmp/antigravity-image.png
+  | base64 -d > /tmp/image.png
 ```
 
-## Image Input Support
+---
 
-The gateway forwards image parts from Codex Responses API requests to every upstream target. The client can attach images using either of these content-part shapes:
+## Tool Calls / Agentic Loop
 
-```json
-{
-  "type": "input_image",
-  "image_url": "data:image/png;base64,...."
-}
+The gateway translates `tools` arrays and `tool_calls` / `functionCall` responses between OpenAI Responses format and each provider's native format. Codex CLI multi-step agentic loops (shell tool, repeated tool call turns) work end-to-end across all providers.
+
+| Provider | Agentic loop |
+|---|---|
+| Codex (gpt-5.5, gpt-5.4, gpt-5.4-mini, codex-auto-review) | Native |
+| MiniMax-M3 | Via native Responses and Anthropic endpoints |
+| DeepSeek (deepseek-v4-pro / flash) | Via Anthropic Messages bridge |
+| Gemini (gemini-2.5-pro / flash / flash-lite, gemini-3-pro) | Tools forwarded, functionCall translated |
+| Antigravity (all models) | Same as Gemini |
+| Qwen (qwen3-coder-plus, qwen3.5-plus, qwen3.6-plus, qwen3.7-plus, qwen3.7-max) | Tools forwarded to Chat Completions, tool_calls translated back |
+| GitHub Copilot | Via Copilot Responses endpoint |
+| Claude | Native Anthropic Messages |
+
+---
+
+## Notifications
+
+The gateway can send alerts when an account hits an error or a model crosses a quota threshold. Configure from the dashboard **Settings** modal or via API.
+
+Supported channels: **Telegram** and **Google Chat** (webhook).
+
+### Configure via API
+
+```bash
+# Read current settings
+curl http://127.0.0.1:8319/notifications/settings -b "$ADMIN_COOKIE"
+
+# Update Telegram settings
+curl -sS http://127.0.0.1:8319/notifications/settings \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "enabled": true,
+    "channel": "telegram",
+    "telegram": {
+      "bot_token": "123456:ABC-DEF...",
+      "chat_id": "-1001234567890"
+    },
+    "watched_accounts": ["account-key-1", "account-key-2"]
+  }'
+
+# Send a test notification
+curl -sS -X POST http://127.0.0.1:8319/notifications/test -b "$ADMIN_COOKIE"
 ```
 
-```json
-{
-  "type": "image_url",
-  "image_url": { "url": "https://example.com/x.png" }
-}
+Alert types:
+
+- **Account error** — fired when a watched account returns an upstream error.
+- **Model quota transition** — fired when a model moves between fully-used and available states.
+
+---
+
+## Usage Tracking
+
+The gateway records per-request usage metrics to disk and keeps them in memory across all providers.
+
+Per-account stats: requests, errors, input tokens, output tokens, total tokens, cache tokens, reasoning tokens, first seen, last seen, last success, last error.
+
+Stats survive server restarts (written to `usage-stats.json` under `auth_dir`).
+
+### Usage history chart
+
+The dashboard chart shows time-bucketed history for the configured range. The same data is available via API:
+
+```bash
+# Aggregate history, last 24 hours, 15-minute buckets
+curl 'http://127.0.0.1:8319/usage/history.json?hours=24&bucket_minutes=15' \
+  -b "$ADMIN_COOKIE"
+
+# Per-model breakdown
+curl 'http://127.0.0.1:8319/usage/context-history.json?hours=24&bucket_minutes=15&per_model=true' \
+  -b "$ADMIN_COOKIE"
+
+# Filter by account
+curl 'http://127.0.0.1:8319/usage/context-history.json?hours=24&account=ACCOUNT_KEY' \
+  -b "$ADMIN_COOKIE"
 ```
 
-Each target translates the input into its own native content shape:
+---
 
-- **Codex** (passthrough) — native Responses API, no translation.
-- **Grok** (passthrough) — native Responses API, no translation.
-- **MiniMax / Qwen** — OpenAI Chat-Completions content array `[{type: "text", text: ...}, {type: "image_url", image_url: {url: ...}}]`.
-- **DeepSeek** — Anthropic Messages content array with `text` blocks and `image` blocks (base64 or url source).
-- **Gemini** — Google Generative `parts` array with `text`, `inline_data` (data URL), or `file_data` (remote URL).
-- **Antigravity** — same as Gemini, but routed through the Antigravity Cloud endpoint.
+## Quick API Tests
 
-Text-only requests are still flattened to a string `content` for backward compatibility — only requests that contain image parts produce a content array.
-
-### Model compatibility on this server
-
-This list reflects the models exposed by the live `/v1/models` endpoint on the gateway host (`DEPLOY_HOST:DEPLOY_PORT` as of the latest deploy) and whether each one actually accepted an attached image in a smoke test against a real screenshot.
-
-#### ✅ Receives image correctly
-
-| Provider | Models |
-|---|---|
-| minimax | `MiniMax-M3` (note: `MiniMax-M2.7` and the older `MiniMax-M2.x` line are text-only) |
-| openai (codex) | `codex-auto-review`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5` |
-| gemini | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-3-pro` |
-| antigravity | `gemini-2.5-flash-thinking`, `gemini-3.1-flash-image`, `gemini-3.1-flash-lite`, `gemini-3.1-pro-low`, `gemini-3.3-flash-extra-low`, `gemini-3.3-flash-low`, `gemini-3-flash-agent`, `gemini-pro-agent`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking` |
-| qwen | `qwen3-vl-plus` (dedicated VL model), `qwen3-coder-plus`, `qwen3.5-plus`, `qwen3.5-flash`, `qwen3.5-max-2026-03-08`, `qwen3.5-27b`, `qwen3.5-omni-flash`, `qwen3.5-omni-plus`, `qwen3.5-397b-a17b`, `qwen3.6-plus`, `qwen3.6-plus-preview`, `qwen3.6-max-preview`, `qwen3.7-plus`, `qwen3.7-max`, `qwen-latest-series-invite-beta-v16`, `qwen-latest-series-invite-beta-v24`, `qwen-plus-2025-07-28`, `qwen3-omni-flash-2025-12-01` |
-| deepseek | `deepseek-v4-pro`, `deepseek-v4-flash` |
-
-#### ❌ Cannot receive image (model itself is text-only)
-
-| Provider | Models | Why |
-|---|---|---|
-| minimax | `MiniMax-M2`, `MiniMax-M2.1`, `MiniMax-M2.1-highspeed`, `MiniMax-M2.5`, `MiniMax-M2.5-highspeed`, `MiniMax-M2.7`, `MiniMax-M2.7-highspeed` | Only `MiniMax-M3` supports vision. The M2.x family replies "Cannot see image. Please describe." |
-
-#### ⚠️ Upstream model is not available in this account (gateway forwards correctly, upstream 404s/400s)
-
-These are not gateway bugs — the request reaches the upstream, the upstream just doesn't have the model. Pick a different model in the same family.
-
-| Model | Upstream error |
-|---|---|
-| `gemini-2.5-flash-image-preview` | Gemini 404 — not in the configured project |
-| `gemini-3-flash` | Gemini 404 — not in the configured project |
-| `gemini-3.1-pro-high` | Antigravity 400 — not in the antigravity catalog |
-| `gemini-3-pro-image` | Antigravity 404 — not in the antigravity catalog |
-
-#### ⚠️ Upstream explicitly rejects image (model doesn't support vision)
-
-| Model | Why |
-|---|---|
-| `gpt-5.3-codex-spark` | OpenAI returns 400 "Model 'gpt-5.3-codex-spark' does not support image inputs". Use `gpt-5.4`, `gpt-5.5`, etc. for vision. |
-
-#### 🔑 Auth / permission issue (image support not tested)
-
-| Model | Why |
-|---|---|
-| `gpt-oss-120b-medium` | The current Codex account isn't entitled to this model ("not supported when using Codex with a ChatGPT account"). |
-| All `grok-*` models | The Grok OAuth token expired on `2026-06-19T14:16:17+00:00`. Re-auth the Grok account on the dashboard (`/admin` → Grok → re-auth) to restore. Once refreshed, the standard grok chat models accept image input. |
-
-#### Best models for image input on this server
-
-Ranked by quality of the answer in the smoke test against the same screenshot:
-
-1. `gemini-2.5-pro`
-2. `gpt-5.5`
-3. `claude-sonnet-4-6`
-4. `claude-opus-4-6-thinking`
-5. `qwen3-vl-plus` (Qwen's dedicated vision-language model)
-6. `qwen3.7-plus`
-7. `MiniMax-M3`
-
-#### Agentic loop status per provider (does Codex CLI get to drive it to completion?)
-
-The "agentic loop" check is the same one `codex` does on the desktop: send a
-multi-step task ("create file, cat it, delete it"), and let the model keep
-calling the `shell` tool turn after turn until it claims the work is done.
-A provider passes when the model actually invokes the tool (and re-invokes it
-after a synthetic tool result) instead of hallucinating completion.
-
-| Provider | Agentic loop | Notes |
-|---|---|---|
-| `codex` (gpt-5.5, gpt-5.4, gpt-5.4-mini, codex-auto-review) | ✅ | Native Codex backend, the reference behaviour. |
-| `MiniMax-M3` | ✅ | Routed through MiniMax's native Responses endpoint for Codex and the Anthropic endpoint for Claude Code. |
-| `MiniMax-M2.7` and the other M2.x line | ⚠️ | Text-only — returns "Cannot see image" but does iterate tool calls. |
-| `deepseek-v4-pro` / `deepseek-v4-flash` | ✅ | Goes through Anthropic messages; tool calls and reasoning are translated. |
-| `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-3-pro` | ✅ | After the gateway forwards `functionDeclarations` and translates `functionCall` parts. |
-| `antigravity` (`claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gemini-*-thinking`, `gemini-*-image`, …) | ✅ | Same fix as Gemini — tools forwarded, function_call items emitted. |
-| `qwen3-coder-plus`, `qwen3.5-plus`, `qwen3.6-plus`, `qwen3.7-plus`, `qwen3.7-max` | ✅ | Previously the gateway was dropping the `tools` array so qwen hallucinated completion; now it forwards them to `qwen.aikit.club/v1/chat/completions` and renders the `tool_calls` back into Responses-API function_call items. |
-| `qwen3-vl-plus` and other dedicated VL qwen models | ✅ | Image input + tool use both work. |
-| `grok-4.3`, `grok-4.20-...` | 🔑 | Gateway forwards tools correctly but the OAuth token expired on `2026-06-19T14:16:17+00:00`; re-auth on the dashboard to restore. |
-
-## DeepSeek
-
-DeepSeek still uses the same source-facing `/v1/*` API after you add credentials.
-
-- Add a DeepSeek account from the homepage at `http://127.0.0.1:8319/`
-- Or submit a key directly to `POST /login/deepseek/start` as JSON:
-
-```json
-{
-  "api_key": "sk-...",
-  "label": "optional",
-  "base_url": "https://api.deepseek.com"
-}
-```
-
-List DeepSeek models:
+List all available models (across all enabled providers):
 
 ```bash
 curl http://127.0.0.1:8319/v1/models \
   -H "Authorization: Bearer $CODEX_GATEWAY_KEY"
 ```
 
-Send a basic DeepSeek request through the unified Responses bridge:
+Basic text request (Codex):
 
 ```bash
 curl http://127.0.0.1:8319/v1/responses \
   -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
-  --data '{
-    "model": "deepseek-v4-pro",
-    "input": "Reply with one short line."
-  }'
-```
-
-Notes:
-- The gateway validates the key against DeepSeek `GET /models` before saving it.
-- Tool-call turns and reasoning summaries are translated into DeepSeek’s chat-completions format so Codex CLI can keep using the Responses API against the gateway instead of talking to DeepSeek directly.
-
-### DeepSeek balance on the dashboard
-
-Each DeepSeek account card on the dashboard shows the current balance pulled from `GET /user/balance` (cached for 60 seconds per account). The bar shows `Balance USD` with the `total_balance` (and the `topped_up_balance` / `granted_balance` breakdown if one of them is non-zero). If the upstream is unreachable the card shows the upstream error text instead.
-
-## Troubleshooting
-
-- `403 cloudflare`: usually missing headers or wrong upstream. Use the provided gateway build.
-- `Instructions are required`: your payload is too minimal (Codex CLI sends proper instructions).
-- `502 Bad Gateway`: port collision or proxy isn’t running.
-
-## MiniMax provider
-
-MiniMax is exposed as an OpenAI-compatible target. Add a MiniMax API key through the dashboard, or `POST /login/minimax/start` with JSON `{"api_key":"...","label":"optional","base_url":"optional"}`.
-
-Public routing (no `/minimax/*` routes are exposed to clients):
-
-- `POST /v1/responses` and `POST /codex/responses` route MiniMax models to MiniMax's native `/v1/responses` endpoint and forward the Codex Responses body without translating it to chat completions.
-- `POST /claude/v1/messages` and `POST /claude/messages` route `MiniMax-*` models to MiniMax's Anthropic-compatible `/anthropic/v1/messages` endpoint and forward the Claude Messages body as-is.
-- If an account's `base_url` is explicitly configured to end with `/v1/chat/completions` or `/chat/completions`, the gateway keeps the old chat-completions fallback for OpenAI/Codex Responses requests.
-- `GET /v1/models` and `GET /codex/models` include live MiniMax models such as `MiniMax-M3`, `MiniMax-M2.7`, and `MiniMax-M2.7-highspeed` whenever a MiniMax account is enabled.
-- Auth: `Authorization: Bearer <proxy_api_key>` or `x-api-key: <proxy_api_key>`.
-
-### MiniMax usage and quota on the dashboard
-
-The dashboard pulls the same numbers shown on <https://platform.minimax.io/console/usage> for each MiniMax account:
-
-* `GET /v1/api/openplatform/coding_plan/remains` is called on every account refresh; the response is cached for 60 seconds.
-* The two large progress bars on the MiniMax card are the **5-hour rolling window** and the **weekly window** that the platform console highlights. The bar fill is `used_percent = 100 − remaining_percent`; the label is `used_percent% used · resets in <reset_label>` (e.g. `12.3% used · resets in 4h 38m`).
-* Below the headline bars, a per-model breakdown is shown for the same windows so you can see which model in the M-series is driving the usage.
-* If the upstream returns `base_resp.status_msg` (e.g. `account is not subscribed`) the message is shown beneath the bars.
-* If the account key is invalid the card shows the upstream error text instead of a bar.
-
-Examples:
-
-```bash
-curl http://127.0.0.1:8319/v1/responses \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"MiniMax-M3","input":"say hi in one word"}'
+  -d '{"model":"gpt-5.2","input":"Reply with one line."}'
 ```
 
 Streaming:
@@ -534,266 +996,77 @@ curl http://127.0.0.1:8319/v1/responses \
   -d '{"model":"MiniMax-M3","input":"say hi","stream":true}'
 ```
 
-### Using MiniMax with the Codex CLI
-
-The gateway is a drop-in replacement for the `model_provider` in `~/.codex/config.toml` that the official MiniMax docs describe (https://platform.minimax.io/docs/token-plan/codex). Add the following to `config.toml`:
-
-```toml
-[model_providers.minimax_via_gateway]
-name = "MiniMax via IO Gateway"
-base_url = "http://DEPLOY_HOST:DEPLOY_PORT/v1"
-experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
-wire_api = "responses"
-
-[profiles.minimax]
-model = "MiniMax-M3"
-model_provider = "minimax_via_gateway"
-model_context_window = 1000000
-model_reasoning_effort = "high"
-```
-
-The model catalog fields documented at the link above (`default_reasoning_level`, `input_modalities: ["text", "image"]`, `supports_parallel_tool_calls: true`, etc.) all work end-to-end through the gateway.
-
-### Using MiniMax with Claude Code
-
-The gateway can also stand in for MiniMax's Anthropic endpoint from the official Claude Code guide (https://platform.minimax.io/docs/token-plan/claude-code). Configure Claude Code with the gateway as the Anthropic base URL:
-
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://DEPLOY_HOST:DEPLOY_PORT/claude",
-    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
-    "ANTHROPIC_MODEL": "MiniMax-M3[1m]",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "MiniMax-M3[1m]",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "MiniMax-M3[1m]",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "MiniMax-M3[1m]"
-  }
-}
-```
-
-## GLM/Z.AI provider
-
-GLM is exposed as a Z.AI API-key provider with two account types:
-
-- `api_usage`: normal Z.AI API usage keys. This is the default. OpenAI/Codex requests use `https://api.z.ai/api/paas/v4`; Claude Messages requests are translated through Chat Completions.
-- `subscription`: GLM Coding Plan subscription keys. OpenAI/Codex requests use `https://api.z.ai/api/coding/paas/v4`; Claude Messages requests pass through to `https://api.z.ai/api/anthropic`.
-
-Add a GLM account from the dashboard, or submit a key directly:
+Via Claude Code endpoint:
 
 ```bash
-curl -sS http://127.0.0.1:8319/login/glm/start \
-  -b "$ADMIN_COOKIE" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "api_key": "ZAI_API_KEY",
-    "label": "personal",
-    "account_type": "api_usage"
-  }'
-```
-
-Routing:
-
-- Use the `glm:` prefix to force GLM, for example `glm:glm-5.2`.
-- Unprefixed `glm*` model ids also route to GLM.
-- `POST /v1/responses` and `POST /codex/responses` translate OpenAI/Codex Responses input, tools, tool output, and streaming events to GLM's OpenAI-compatible `/chat/completions` route.
-- `POST /v1/chat/completions` passes OpenAI Chat Completions requests through to GLM's OpenAI-compatible route.
-- `POST /claude/v1/messages` and `POST /claude/messages` use the account type: API-usage accounts translate Anthropic Messages to Chat Completions and synthesize Anthropic responses; subscription accounts pass Anthropic Messages through to GLM's Anthropic-compatible route.
-- `GET /v1/models` and `GET /codex/models` include `glm:` model ids whenever a GLM account is enabled.
-- The dashboard shows the live model catalog from `/models`. Z.AI does not currently expose a stable GLM quota endpoint through this route, so account load balancing uses gateway-recorded usage first.
-
-For subscription keys, keep the Coding Plan base URLs separate in saved credentials: Anthropic Messages uses `https://api.z.ai/api/anthropic`, while OpenAI Chat Completions uses `https://api.z.ai/api/coding/paas/v4`.
-
-Example:
-
-```bash
-curl http://127.0.0.1:8319/v1/responses \
+curl http://127.0.0.1:8319/claude/v1/messages \
   -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"glm:glm-5.2","input":"say hi in one word"}'
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"cld:claude-sonnet-4-20250514","max_tokens":256,"messages":[{"role":"user","content":"say hi"}]}'
 ```
 
-Native chat completions:
+---
+
+## Process Management (PM2)
+
+The repo includes `ecosystem.config.cjs` for PM2:
 
 ```bash
-curl http://127.0.0.1:8319/v1/chat/completions \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"glm:glm-5.2","messages":[{"role":"user","content":"say hi"}]}'
+pm2 start ecosystem.config.cjs
+pm2 save
+pm2 startup
 ```
 
-### Using GLM with the Codex CLI
+Set `ANTIGRAVITY_GOOGLE_CLIENT_ID`, `ANTIGRAVITY_GOOGLE_CLIENT_SECRET`, `GEMINI_GOOGLE_CLIENT_ID`, and `GEMINI_GOOGLE_CLIENT_SECRET` in the shell environment before starting PM2 so they are forwarded to the gateway process.
 
-```toml
-[model_providers.glm_via_gateway]
-name = "GLM via IO Gateway"
-base_url = "http://127.0.0.1:8319/v1"
-experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
-wire_api = "responses"
+---
 
-[profiles.glm]
-model = "glm:glm-5.2"
-model_provider = "glm_via_gateway"
-model_reasoning_effort = "high"
-```
+## Files
 
-### Using GLM with Claude Code
+| Path | Description |
+|---|---|
+| `config.json` | Runtime config (create from `config.example.json`) |
+| `auths/` | Credential JSON files, one per account |
+| `auths/custom-models.json` | Custom model alias definitions |
+| `auths/usage-stats.json` | Persisted per-account usage counters |
+| `auths/usage-history.json` | Per-request token history for charts |
+| `auths/notification-settings.json` | Notification channel and watched accounts |
+| `auths/admin-sessions.json` | Active admin sessions (survives restarts) |
+| `ecosystem.config.cjs` | PM2 process config |
+| `src/main.rs` | Main gateway source (~12k lines, includes embedded dashboard HTML/JS/CSS) |
 
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8319/claude",
-    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
-    "ANTHROPIC_MODEL": "glm:glm-5.2",
-    "ANTHROPIC_SMALL_FAST_MODEL": "glm:glm-5.2"
-  }
-}
-```
+---
 
-## GitHub Copilot provider
-
-GitHub Copilot is exposed as an OpenAI Responses target and as an Anthropic Messages bridge for Claude Code. Add a Copilot account from the dashboard, or start the device-code flow with:
+## Building and Testing
 
 ```bash
-curl -X POST http://127.0.0.1:8319/login/copilot/start \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"account_type":"individual"}'
+# Full build
+cargo build
+
+# Release build
+cargo build --release
+
+# Run tests (216 tests)
+cargo test --bin codex-gateway
+
+# Check JS syntax in embedded dashboard
+awk '/<script>/{flag=1;next} /<\/script>/{flag=0} flag' src/main.rs > /tmp/d.js
+node --check /tmp/d.js
 ```
 
-Open the returned GitHub verification URL, enter the user code, then submit the returned `device_code`:
+Pre-existing warnings in `src/target/qwen/auth.rs` and similar files are unrelated to the UI and can be ignored.
 
-```bash
-curl -X POST http://127.0.0.1:8319/login/copilot/submit \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d 'device_code=DEVICE_CODE'
-```
+---
 
-Public routing:
+## Troubleshooting
 
-- Use the `cop:` prefix so Copilot GPT models do not collide with the native Codex target. The gateway strips the prefix before calling Copilot.
-- `POST /v1/responses` and `POST /codex/responses` forward the Responses body to Copilot `/responses`.
-- `POST /claude/v1/messages` and `POST /claude/messages` translate Claude Messages to Copilot Responses and return Anthropic-compatible output.
-- `GET /v1/models` and `GET /codex/models` include Copilot models when a Copilot account is enabled.
-- The dashboard reads Copilot quota snapshots from GitHub's Copilot user metadata and live model availability from the Copilot `/models` endpoint.
-- Copilot model metadata includes `model_picker_category`, `policy_state`, `billing_tier`, `premium`, `utility_model`, and `app_accessible`. The gateway only exposes Copilot models that were manually verified through this app's `/v1/responses` path; inaccessible Copilot `/models` entries are filtered out. The verified Copilot set is currently GPT-3.5 Turbo, GPT-4.1, GPT-4o, and GPT-4o mini variants, all observed as non-premium because premium-interaction quota did not decrease during curl tests.
-
-Example:
-
-```bash
-curl http://127.0.0.1:8319/v1/responses \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"cop:gpt-5.1","input":"say hi in one word"}'
-```
-
-### Using GitHub Copilot with the Codex CLI
-
-```toml
-[model_providers.copilot_via_gateway]
-name = "GitHub Copilot via IO Gateway"
-base_url = "http://127.0.0.1:8319/v1"
-experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
-wire_api = "responses"
-
-[profiles.copilot]
-model = "cop:gpt-5.1"
-model_provider = "copilot_via_gateway"
-model_reasoning_effort = "high"
-```
-
-### Using GitHub Copilot with Claude Code
-
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8319/claude",
-    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
-    "ANTHROPIC_MODEL": "cop:claude-sonnet-4",
-    "ANTHROPIC_SMALL_FAST_MODEL": "cop:claude-sonnet-4"
-  }
-}
-```
-
-## Claude OAuth provider
-
-Claude is exposed as a native Anthropic OAuth target. Add a Claude account from the dashboard with the same pattern as Codex login: click **Start Login**, complete Claude login in the browser, copy the displayed `CODE#STATE` value or callback URL, and paste it back into the dashboard. The gateway stores the PKCE verifier server-side and saves only the OAuth token file under `auth_dir`.
-
-```bash
-curl -sS 'http://127.0.0.1:8319/login/claude/start?label=personal' \
-  -b "$ADMIN_COOKIE"
-```
-
-Open the returned `url`, finish login, then submit the displayed code or callback URL:
-
-```bash
-curl -sS http://127.0.0.1:8319/login/claude/submit \
-  -b "$ADMIN_COOKIE" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  --data-urlencode 'redirect_url=CODE#STATE'
-```
-
-Cookie fallback is still supported when browser OAuth is unavailable:
-
-```bash
-curl -sS http://127.0.0.1:8319/login/claude/start \
-  -b "$ADMIN_COOKIE" \
-  -H "Content-Type: application/json" \
-  -d '{"cookie":"CLAUDE_AI_COOKIE","label":"personal","organization_uuid":"required-for-cookie-fallback"}'
-```
-
-Direct token fallback is also supported when you already have trusted Anthropic OAuth tokens:
-
-```bash
-curl -sS http://127.0.0.1:8319/login/claude/start \
-  -b "$ADMIN_COOKIE" \
-  -H "Content-Type: application/json" \
-  -d '{"access_token":"OAUTH_ACCESS_TOKEN","refresh_token":"OAUTH_REFRESH_TOKEN","label":"personal"}'
-```
-
-Public routing:
-
-- Use the `cld:` prefix when you want to force Claude, for example `cld:claude-sonnet-4-20250514`.
-- Unprefixed `claude*` model ids also route to the native Claude target.
-- `POST /v1/responses` and `POST /codex/responses` translate OpenAI Responses input/tools to Anthropic Messages and map the reply back to Responses format.
-- `POST /claude/v1/messages` and `POST /claude/messages` pass Anthropic Messages through to the Anthropic API using the saved OAuth token.
-- `GET /v1/models` and `GET /codex/models` include `cld:` model ids when a Claude account is enabled.
-- Access tokens are refreshed from the saved refresh token when they expire.
-
-Example:
-
-```bash
-curl http://127.0.0.1:8319/v1/responses \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"cld:claude-sonnet-4-20250514","input":"say hi in one word"}'
-```
-
-### Using Claude with the Codex CLI
-
-```toml
-[model_providers.claude_via_gateway]
-name = "Claude via IO Gateway"
-base_url = "http://127.0.0.1:8319/v1"
-experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
-wire_api = "responses"
-
-[profiles.claude]
-model = "cld:claude-sonnet-4-20250514"
-model_provider = "claude_via_gateway"
-model_reasoning_effort = "high"
-```
-
-### Using Claude with Claude Code
-
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8319/claude",
-    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
-    "ANTHROPIC_MODEL": "cld:claude-sonnet-4-20250514",
-    "ANTHROPIC_SMALL_FAST_MODEL": "cld:claude-3-5-haiku-20241022"
-  }
-}
-```
+| Symptom | Likely cause |
+|---|---|
+| `403 cloudflare` | Missing upstream headers or wrong `upstream_base` |
+| `Instructions are required` | Request body is too minimal; Codex CLI sends proper instructions automatically |
+| `502 Bad Gateway` | Port collision, gateway not running, or all upstream accounts failed |
+| `503 No upstream credentials configured` | No accounts loaded for the requested provider |
+| Account shows auth errors after a while | Token expired — re-auth from the dashboard (common for Grok, Copilot) |
+| Qwen model returns empty | Ensure `base_url` is normalized to `https://portal.qwen.ai/v1` |
+| Model not found in `/v1/models` | Provider has no enabled accounts; add and enable at least one account |
