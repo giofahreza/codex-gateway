@@ -48,11 +48,6 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
     axum::Json(serde_json::json!({ "accounts": accounts }))
 }
 
-pub async fn quota_json(State(state): State<crate::AppState>) -> impl IntoResponse {
-    let accounts = super::quota::get_quota_summaries(&state).await;
-    axum::Json(serde_json::json!({ "accounts": accounts }))
-}
-
 pub async fn login_start(State(state): State<crate::AppState>) -> impl IntoResponse {
     let (url, state_token) = match super::auth::build_auth_url() {
         Ok(values) => values,

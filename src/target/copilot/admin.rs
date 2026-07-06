@@ -77,7 +77,7 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
     axum::Json(serde_json::json!({ "accounts": accounts }))
 }
 
-pub async fn quota_json(State(state): State<crate::AppState>) -> impl IntoResponse {
+pub async fn quota_accounts(state: &crate::AppState) -> Vec<serde_json::Value> {
     let accounts = state.copilot_accounts.lock().unwrap().clone();
     let mut out = Vec::with_capacity(accounts.len());
     for account in accounts {
@@ -160,8 +160,7 @@ pub async fn quota_json(State(state): State<crate::AppState>) -> impl IntoRespon
             "raw_usage": raw_usage
         }));
     }
-    let accounts = out;
-    axum::Json(serde_json::json!({ "accounts": accounts }))
+    out
 }
 
 fn model_entries(models: &[super::accounts::CopilotModelInfo]) -> Vec<serde_json::Value> {

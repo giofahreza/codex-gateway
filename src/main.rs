@@ -5633,9 +5633,25 @@ async fn quota_json_route(State(state): State<AppState>, headers: HeaderMap) -> 
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::codex::admin::quota_json(State(state))
-        .await
-        .into_response()
+    let accounts = target::codex::quota::get_quota_summaries(&state).await;
+    quota_accounts_json_response(&state, "codex", "Codex", accounts)
+}
+
+fn quota_accounts_json_response(
+    state: &AppState,
+    provider: &str,
+    provider_label: &str,
+    accounts: Vec<serde_json::Value>,
+) -> Response {
+    notifications::notify_model_quota_transitions(
+        state,
+        provider,
+        provider_label,
+        &accounts,
+        notification_account_options(state),
+        &now_rfc3339(),
+    );
+    axum::Json(serde_json::json!({ "accounts": accounts })).into_response()
 }
 
 async fn custom_models_json_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -6252,9 +6268,8 @@ async fn agw_quota_json_route(State(state): State<AppState>, headers: HeaderMap)
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::antigravity::admin::quota_json(State(state))
-        .await
-        .into_response()
+    let accounts = target::antigravity::quota::get_quota_summaries(&state).await;
+    quota_accounts_json_response(&state, "agw", "Antigravity", accounts)
 }
 
 async fn agw_login_start_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -6292,27 +6307,24 @@ async fn gemini_quota_json_route(State(state): State<AppState>, headers: HeaderM
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::gemini::admin::quota_json(State(state))
-        .await
-        .into_response()
+    let accounts = target::gemini::quota::get_quota_summaries(&state).await;
+    quota_accounts_json_response(&state, "gemini", "Gemini", accounts)
 }
 
 async fn minimax_quota_json_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::minimax::admin::quota_json(State(state))
-        .await
-        .into_response()
+    let accounts = target::minimax::quota::get_quota_summaries(&state).await;
+    quota_accounts_json_response(&state, "minimax", "MiniMax", accounts)
 }
 
 async fn deepseek_quota_json_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::deepseek::admin::quota_json(State(state))
-        .await
-        .into_response()
+    let accounts = target::deepseek::quota::get_quota_summaries(&state).await;
+    quota_accounts_json_response(&state, "deepseek", "DeepSeek", accounts)
 }
 
 async fn gemini_login_start_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -6350,9 +6362,8 @@ async fn qwen_quota_json_route(State(state): State<AppState>, headers: HeaderMap
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::qwen::admin::quota_json(State(state))
-        .await
-        .into_response()
+    let accounts = target::qwen::quota::get_quota_summaries(&state).await;
+    quota_accounts_json_response(&state, "qwen", "Qwen", accounts)
 }
 
 async fn qwen_login_start_route(
@@ -6455,9 +6466,8 @@ async fn copilot_quota_json_route(State(state): State<AppState>, headers: Header
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::copilot::admin::quota_json(State(state))
-        .await
-        .into_response()
+    let accounts = target::copilot::admin::quota_accounts(&state).await;
+    quota_accounts_json_response(&state, "copilot", "GitHub Copilot", accounts)
 }
 
 async fn copilot_login_start_route(
@@ -6500,9 +6510,8 @@ async fn claude_quota_json_route(State(state): State<AppState>, headers: HeaderM
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::claude::admin::quota_json(State(state))
-        .await
-        .into_response()
+    let accounts = target::claude::quota::get_quota_summaries(&state).await;
+    quota_accounts_json_response(&state, "claude", "Claude", accounts)
 }
 
 async fn claude_login_start_route(
@@ -6546,9 +6555,8 @@ async fn glm_quota_json_route(State(state): State<AppState>, headers: HeaderMap)
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::glm::admin::quota_json(State(state))
-        .await
-        .into_response()
+    let accounts = target::glm::quota::get_quota_summaries(&state).await;
+    quota_accounts_json_response(&state, "glm", "GLM (Z.AI)", accounts)
 }
 
 async fn glm_login_start_route(

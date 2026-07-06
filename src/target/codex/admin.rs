@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use super::{auth, quota, tokens};
+use super::{auth, tokens};
 
 #[derive(Deserialize)]
 pub(crate) struct CallbackForm {
@@ -25,11 +25,6 @@ pub(crate) struct DeleteForm {
 pub(crate) struct ToggleForm {
     file_name: String,
     enabled: String,
-}
-
-pub async fn quota_json(State(state): State<crate::AppState>) -> impl IntoResponse {
-    let accounts = quota::get_quota_summaries(&state).await;
-    axum::Json(serde_json::json!({ "accounts": accounts }))
 }
 
 pub async fn login_start(State(state): State<crate::AppState>) -> impl IntoResponse {
