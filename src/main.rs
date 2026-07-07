@@ -1157,7 +1157,7 @@ async fn dashboard() -> impl IntoResponse {
       }
       .custom-model-target {
         display: grid;
-        grid-template-columns: minmax(110px, 0.7fr) minmax(140px, 1.2fr) minmax(140px, 1fr) 70px auto auto;
+        grid-template-columns: minmax(110px, 0.75fr) minmax(150px, 1.25fr) minmax(120px, 0.85fr) minmax(150px, 1fr) 70px auto auto;
         gap: 8px;
         align-items: center;
         padding: 8px;
@@ -1172,19 +1172,6 @@ async fn dashboard() -> impl IntoResponse {
       .custom-model-target select,
       .custom-model-target input {
         min-height: 32px;
-      }
-      .custom-model-target-accounts {
-        text-align: left;
-        padding: 4px 8px;
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        color: var(--text);
-        cursor: pointer;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        max-width: 100%;
       }
       .custom-model-target-weight {
         text-align: center;
@@ -2295,6 +2282,7 @@ async fn dashboard() -> impl IntoResponse {
         },
         customModels: [],
         customModelAccounts: [],
+        customModelModelOptions: [],
         providerSettings: readProviderDashboardSettings(),
         notificationSettings: null,
         quotas: {
@@ -4090,7 +4078,8 @@ async fn dashboard() -> impl IntoResponse {
       function customTargetLabel(target) {
         var model = String(target && target.model || '').trim();
         var account = String(target && target.account || '').trim();
-        return account ? model + '@' + account : model;
+        var condition = String(target && target.account_condition || target && target.accountCondition || '').toLowerCase();
+        return account ? model + (condition === 'except' ? '@!' : '@') + account : model;
       }
       function customRoutes(model) {
         if (model && Array.isArray(model.routes)) return model.routes;
@@ -4179,6 +4168,7 @@ async fn dashboard() -> impl IntoResponse {
         const models = data.models || [];
         dashboardState.customModels = models;
         dashboardState.customModelAccounts = data.accounts || [];
+        dashboardState.customModelModelOptions = data.model_options || [];
         renderCustomModels(models);
         renderCustomModelAccountKeys();
       }
@@ -4218,11 +4208,16 @@ async fn dashboard() -> impl IntoResponse {
         var at = raw.indexOf('@');
         var modelPart = at < 0 ? raw : raw.slice(0, at).trim();
         var account = at < 0 ? '' : raw.slice(at + 1).trim();
+        var accountCondition = 'only';
+        if (account.charAt(0) === '!') {
+          accountCondition = 'except';
+          account = account.slice(1).trim();
+        }
         var colon = modelPart.indexOf(':');
         var prefix = colon < 0 ? '' : modelPart.slice(0, colon).trim();
         var model = colon < 0 ? modelPart.trim() : modelPart.slice(colon + 1).trim();
         var canonical = customModelCanonicalizePrefix(prefix);
-        return { provider: canonical || prefix.toLowerCase(), model: model, account: account };
+        return { provider: canonical || prefix.toLowerCase(), model: model, account: account, accountCondition: account ? accountCondition : 'all' };
       }
       const customModelEditorState = { steps: [], lastFocusedTargetId: null };
       let customModelEditorCounter = 0;
@@ -4237,7 +4232,8 @@ async fn dashboard() -> impl IntoResponse {
           id: customModelNewId('t'),
           provider: provider,
           model: partial.model || '',
-          accounts: Array.isArray(partial.accounts) ? partial.accounts.slice() : [],
+          account: partial.account || '',
+          accountCondition: partial.accountCondition || partial.account_condition || (partial.account ? 'only' : 'all'),
           weight: Number(partial.weight) > 0 ? Number(partial.weight) : 1,
           enabled: partial.enabled !== false
         };
@@ -4256,22 +4252,18 @@ async fn dashboard() -> impl IntoResponse {
             var split = customModelSplitTargetSpec(raw.model || '');
             var weight = Number(raw.weight) > 0 ? Number(raw.weight) : 1;
             var enabled = raw.enabled !== false;
-            var bucketKey = split.provider + '|' + split.model + '|' + weight + '|' + enabled;
-            var existing = stepTargets.find(function (x) { return x._key === bucketKey; });
-            var account = String(raw.account || '').trim();
-            if (existing) {
-              if (account && existing.accounts.indexOf(account) === -1) existing.accounts.push(account);
-            } else {
-              stepTargets.push(Object.assign(customModelEmptyTarget({
-                provider: split.provider || customModelProviderCatalog[0].prefix,
-                model: split.model,
-                accounts: account ? [account] : [],
-                weight: weight,
-                enabled: enabled
-              }), { _key: bucketKey }));
-            }
+            var account = String(raw.account || split.account || '').trim();
+            var rawCondition = String(raw.account_condition || raw.accountCondition || split.accountCondition || '').toLowerCase();
+            var accountCondition = account ? (rawCondition === 'except' ? 'except' : 'only') : 'all';
+            stepTargets.push(customModelEmptyTarget({
+              provider: split.provider || customModelProviderCatalog[0].prefix,
+              model: split.model,
+              account: account,
+              accountCondition: accountCondition,
+              weight: weight,
+              enabled: enabled
+            }));
           });
-          stepTargets.forEach(function (t) { delete t._key; });
           steps.push({ id: customModelNewId('s'), targets: stepTargets });
         });
         if (!steps.length) steps.push(customModelEmptyStep());
@@ -4316,27 +4308,84 @@ async fn dashboard() -> impl IntoResponse {
         var providerOptions = customModelProviderCatalog.map(function (p) {
           return '<option value="' + escapeHtml(p.prefix) + '"' + (target.provider === p.prefix ? ' selected' : '') + '>' + escapeHtml(p.label) + '</option>';
         }).join('');
-        var placeholder = (customModelProviderCatalog.find(function (p) { return p.prefix === target.provider; }) || {}).placeholder || 'model-id';
+        var modelOptions = customModelModelOptions(target.provider, target.model);
+        var accountCondition = target.accountCondition === 'except' ? 'except' : target.accountCondition === 'only' ? 'only' : 'all';
+        var accountConditionOptions = [
+          { value: 'all', label: 'All accounts' },
+          { value: 'only', label: 'Only account' },
+          { value: 'except', label: 'Except account' }
+        ].map(function(option) {
+          return '<option value="' + option.value + '"' + (accountCondition === option.value ? ' selected' : '') + '>' + option.label + '</option>';
+        }).join('');
+        var accountOptions = customModelAccountOptions(target.provider, target.account);
+        var accountSelectAttrs = accountCondition === 'all' ? ' hidden disabled' : '';
         var weight = Math.max(1, Math.floor(Number(target.weight) || 1));
         var enabled = target.enabled !== false;
-        var accountLabel = customModelAccountPickerLabel(target);
         return ''
           + '<div class="custom-model-target' + (enabled ? '' : ' disabled') + '" data-step-id="' + escapeHtml(stepId) + '" data-target-id="' + escapeHtml(target.id) + '">'
           +   '<select class="custom-model-target-provider" data-target-field="provider" data-target-id="' + escapeHtml(target.id) + '" aria-label="Provider">' + providerOptions + '</select>'
-          +   '<input class="custom-model-target-model" type="text" data-target-field="model" data-target-id="' + escapeHtml(target.id) + '" value="' + escapeHtml(target.model) + '" placeholder="' + escapeHtml(placeholder) + '" autocomplete="off">'
-          +   '<button type="button" class="custom-model-target-accounts" data-target-action="open-picker" data-target-id="' + escapeHtml(target.id) + '" title="Click to choose accounts">' + escapeHtml(accountLabel) + '</button>'
+          +   '<select class="custom-model-target-model" data-target-field="model" data-target-id="' + escapeHtml(target.id) + '" aria-label="Model">' + modelOptions + '</select>'
+          +   '<select class="custom-model-target-account-condition" data-target-field="account_condition" data-target-id="' + escapeHtml(target.id) + '" aria-label="Account condition">' + accountConditionOptions + '</select>'
+          +   '<select class="custom-model-target-account" data-target-field="account" data-target-id="' + escapeHtml(target.id) + '" aria-label="Account"' + accountSelectAttrs + '>' + accountOptions + '</select>'
           +   '<input class="custom-model-target-weight" type="number" min="1" step="1" data-target-field="weight" data-target-id="' + escapeHtml(target.id) + '" value="' + weight + '" aria-label="Weight" title="Weight">'
           +   '<label class="check-row" title="Enabled"><input type="checkbox" data-target-field="enabled" data-target-id="' + escapeHtml(target.id) + '"' + (enabled ? ' checked' : '') + '> on</label>'
           +   '<span class="custom-model-target-toolbar">'
           +     '<button type="button" class="mini-btn danger" data-target-action="remove" data-target-id="' + escapeHtml(target.id) + '">Remove</button>'
           +   '</span>'
-          +   '<div class="custom-model-account-picker-popover" data-target-picker="' + escapeHtml(target.id) + '" hidden></div>'
           + '</div>';
       }
-      function customModelAccountPickerLabel(target) {
-        if (!target.accounts || !target.accounts.length) return 'All accounts (*)';
-        if (target.accounts.length === 1) return '1 account';
-        return target.accounts.length + ' accounts';
+      function customModelModelOptions(provider, currentModel) {
+        var canonical = customModelCanonicalizePrefix(provider) || String(provider || '').toLowerCase();
+        var options = (dashboardState.customModelModelOptions || []).filter(function(option) {
+          return String(option.provider || '').toLowerCase() === canonical;
+        });
+        var current = String(currentModel || '').trim();
+        var seen = new Set();
+        var html = current ? '' : '<option value="" selected>Choose model</option>';
+        options.forEach(function(option) {
+          var value = String(option.model || '').trim();
+          if (!value || seen.has(value)) return;
+          seen.add(value);
+          var label = option.display_name && option.display_name !== value
+            ? option.display_name + ' (' + value + ')'
+            : value;
+          html += '<option value="' + escapeHtml(value) + '"' + (value === current ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+        });
+        if (current && !seen.has(current)) {
+          html = '<option value="' + escapeHtml(current) + '" selected>' + escapeHtml(current) + '</option>' + html;
+        }
+        if (!current && !seen.size) {
+          var fallbackModel = (customModelProviderCatalog.find(function (p) { return p.prefix === canonical; }) || {}).placeholder || 'model-id';
+          html += '<option value="' + escapeHtml(fallbackModel) + '">' + escapeHtml(fallbackModel) + '</option>';
+        }
+        if (!html) {
+          var fallback = (customModelProviderCatalog.find(function (p) { return p.prefix === canonical; }) || {}).placeholder || 'model-id';
+          html = current
+            ? '<option value="' + escapeHtml(current) + '" selected>' + escapeHtml(current) + '</option>'
+            : '<option value="" selected>Choose model</option><option value="' + escapeHtml(fallback) + '">' + escapeHtml(fallback) + '</option>';
+        }
+        return html;
+      }
+      function customModelAccountOptions(provider, currentAccount) {
+        var canonical = customModelCanonicalizePrefix(provider) || String(provider || '').toLowerCase();
+        var accounts = (dashboardState.customModelAccounts || []).filter(function (a) {
+          var accountProvider = customModelCanonicalizePrefix(a.provider) || String(a.provider || '').toLowerCase();
+          return !canonical || accountProvider === canonical;
+        });
+        var current = String(currentAccount || '').trim();
+        var seen = new Set();
+        var html = '<option value="">Any account</option>';
+        accounts.forEach(function (a) {
+          var key = String(a.key || '').trim();
+          if (!key || seen.has(key)) return;
+          seen.add(key);
+          var title = a.label || a.account_id || key;
+          html += '<option value="' + escapeHtml(key) + '"' + (key === current ? ' selected' : '') + '>' + escapeHtml(title) + '</option>';
+        });
+        if (current && !seen.has(current)) {
+          html += '<option value="' + escapeHtml(current) + '" selected>' + escapeHtml(current) + '</option>';
+        }
+        return html;
       }
       function renderCustomModelPreview() {
         var previewEl = document.getElementById('customModelPreview');
@@ -4413,7 +4462,8 @@ async fn dashboard() -> impl IntoResponse {
           if (t) {
             if (patch.provider != null) t.provider = patch.provider;
             if (patch.model != null) t.model = patch.model;
-            if (patch.accounts != null) t.accounts = patch.accounts.slice();
+            if (patch.account != null) t.account = patch.account;
+            if (patch.accountCondition != null) t.accountCondition = patch.accountCondition;
             if (patch.weight != null) t.weight = Math.max(1, Math.floor(Number(patch.weight) || 1));
             if (patch.enabled != null) t.enabled = !!patch.enabled;
             return;
@@ -4445,7 +4495,8 @@ async fn dashboard() -> impl IntoResponse {
         if (!target) return;
         var canonical = customModelCanonicalizePrefix(target.provider) || (target.provider || '').toLowerCase();
         var filtered = accounts.filter(function (a) {
-          return !canonical || (a.provider || '').toLowerCase() === canonical;
+          var accountProvider = customModelCanonicalizePrefix(a.provider) || String(a.provider || '').toLowerCase();
+          return !canonical || accountProvider === canonical;
         });
         var html = ''
           + '<div class="custom-model-account-picker-head">'
@@ -4474,32 +4525,35 @@ async fn dashboard() -> impl IntoResponse {
       function serializeCustomModelEditor(state) {
         var routes = [];
         state.steps.forEach(function (step) {
-          var lineTokens = [];
+          var targets = [];
           step.targets.forEach(function (t) {
             var provider = (t.provider || '').toLowerCase();
             var model = String(t.model || '').trim();
             if (!provider || !model) return;
             var enabled = t.enabled !== false;
+            if (!enabled) return;
             var weight = Math.max(1, Math.floor(Number(t.weight) || 1));
-            var weightSuffix = weight > 1 ? ' x' + weight : '';
-            var accounts = (t.accounts || []).map(function (x) { return String(x || '').trim(); }).filter(Boolean);
-            if (!accounts.length) {
-              if (!enabled) return;
-              lineTokens.push(provider + ':' + model + weightSuffix);
-            } else {
-              accounts.forEach(function (acct) {
-                lineTokens.push(provider + ':' + model + '@' + acct + weightSuffix);
-              });
+            var account = String(t.account || '').trim();
+            var condition = account ? (t.accountCondition === 'except' ? 'except' : 'only') : 'all';
+            var target = {
+              model: provider + ':' + model,
+              weight: weight,
+              enabled: enabled
+            };
+            if (account && condition !== 'all') {
+              target.account = account;
+              if (condition === 'except') target.account_condition = 'except';
             }
+            targets.push(target);
           });
-          if (lineTokens.length) {
-            routes.push({ targets: lineTokens.map(function (tok) {
-              return { model: tok, weight: 1 };
-            }) });
+          if (targets.length) {
+            routes.push({ targets: targets });
           }
         });
         var text = routes.map(function (g) {
-          return g.targets.map(function (t) { return t.model; }).join(', ');
+          return g.targets.map(function (t) {
+            return customTargetLabel(t) + (Number(t.weight || 1) > 1 ? ' x' + t.weight : '');
+          }).join(', ');
         }).join('\n');
         return { routes: routes, text: text };
       }
@@ -4524,6 +4578,10 @@ async fn dashboard() -> impl IntoResponse {
               messages.push('Custom models cannot target another custom model.');
             } else if (!canonical || customModelProviderPrefixes.indexOf(canonical) < 0) {
               messages.push('Unsupported provider prefix "' + provider + '" for "' + model + '".');
+            }
+            var condition = t.accountCondition === 'except' ? 'except' : t.accountCondition === 'only' ? 'only' : 'all';
+            if (condition !== 'all' && !String(t.account || '').trim()) {
+              messages.push('Choose an account for "' + model + '" or use All accounts.');
             }
           });
           if (!stepEnabled) messages.push('At least one enabled target is required in this step.');
@@ -4590,11 +4648,12 @@ async fn dashboard() -> impl IntoResponse {
           var step = customModelEditorState.steps[i];
           var t = step.targets.find(function (x) { return x.id === targetId; });
           if (t) {
-            if (t.accounts.indexOf(key) === -1) t.accounts.push(key);
+            t.account = key;
+            if (t.accountCondition === 'all') t.accountCondition = 'only';
             closeCustomModelAccountPickers();
             renderCustomModelEditor();
             renderCustomModelFieldErrors();
-            setText('customModelStatus', 'Account key added to target.');
+            setText('customModelStatus', 'Account selected for target.');
             return;
           }
         }
@@ -4603,10 +4662,10 @@ async fn dashboard() -> impl IntoResponse {
         var accounts = dashboardState.customModelAccounts || [];
         var acct = accounts.find(function (a) { return a.key === key; });
         if (!acct) return null;
-        var want = (acct.provider || '').toLowerCase();
+        var want = customModelCanonicalizePrefix(acct.provider) || String(acct.provider || '').toLowerCase();
         for (var i = 0; i < customModelEditorState.steps.length; i++) {
           var t = customModelEditorState.steps[i].targets.find(function (x) {
-            return (x.provider || '').toLowerCase() === want;
+            return (customModelCanonicalizePrefix(x.provider) || String(x.provider || '').toLowerCase()) === want;
           });
           if (t) return t.id;
         }
@@ -4665,6 +4724,11 @@ async fn dashboard() -> impl IntoResponse {
           if (aliasInput) aliasInput.focus();
           return;
         }
+        var stepErrorKeys = Object.keys(errors.steps || {});
+        if (stepErrorKeys.length) {
+          setText('customModelStatus', errors.steps[stepErrorKeys[0]]);
+          return;
+        }
         var totalEnabled = 0;
         customModelEditorState.steps.forEach(function (s) {
           s.targets.forEach(function (t) {
@@ -4680,7 +4744,7 @@ async fn dashboard() -> impl IntoResponse {
           alias: form.querySelector('input[name="alias"]').value.trim(),
           display_name: form.querySelector('input[name="display_name"]').value.trim() || undefined,
           enabled: form.querySelector('input[name="enabled"]').checked,
-          routes: serialized.text
+          routes: serialized.routes
         };
         setText('customModelStatus', 'Saving custom model...');
         var res = await adminFetch('/custom-models/save', {
@@ -4732,7 +4796,7 @@ async fn dashboard() -> impl IntoResponse {
             var paction = pickerBtn.getAttribute('data-picker-action');
             var ptid = pickerBtn.getAttribute('data-target-id');
             if (paction === 'select-all' || paction === 'clear') {
-              patchCustomModelTarget(ptid, { accounts: [] });
+              patchCustomModelTarget(ptid, { account: '', accountCondition: 'all' });
               closeCustomModelAccountPickers();
               renderCustomModelEditor();
               return;
@@ -4750,7 +4814,7 @@ async fn dashboard() -> impl IntoResponse {
               if (t) {
                 var set = new Set(t.accounts);
                 if (el.checked) set.add(key); else set.delete(key);
-                patchCustomModelTarget(pickTid, { accounts: Array.from(set) });
+                patchCustomModelTarget(pickTid, { account: Array.from(set)[0] || '', accountCondition: set.size ? 'only' : 'all' });
                 renderCustomModelEditor();
                 return;
               }
@@ -4761,7 +4825,7 @@ async fn dashboard() -> impl IntoResponse {
           if (!tid) return;
           var field = el.getAttribute('data-target-field');
           if (field === 'provider') {
-            patchCustomModelTarget(tid, { provider: el.value, accounts: [] });
+            patchCustomModelTarget(tid, { provider: el.value, model: '', account: '', accountCondition: 'all' });
             closeCustomModelAccountPickers();
             renderCustomModelEditor();
             renderCustomModelFieldErrors();
@@ -4770,6 +4834,33 @@ async fn dashboard() -> impl IntoResponse {
           if (field === 'model') {
             patchCustomModelTarget(tid, { model: el.value });
             renderCustomModelPreview();
+            renderCustomModelFieldErrors();
+            return;
+          }
+          if (field === 'account_condition') {
+            var condition = el.value === 'except' ? 'except' : el.value === 'only' ? 'only' : 'all';
+            var patch = { accountCondition: condition };
+            if (condition === 'all') patch.account = '';
+            patchCustomModelTarget(tid, patch);
+            renderCustomModelEditor();
+            renderCustomModelFieldErrors();
+            return;
+          }
+          if (field === 'account') {
+            var account = String(el.value || '').trim();
+            var currentCondition = 'all';
+            for (var ci = 0; ci < customModelEditorState.steps.length; ci++) {
+              var currentTarget = customModelEditorState.steps[ci].targets.find(function (x) { return x.id === tid; });
+              if (currentTarget) {
+                currentCondition = currentTarget.accountCondition === 'except' ? 'except' : currentTarget.accountCondition === 'only' ? 'only' : 'all';
+                break;
+              }
+            }
+            patchCustomModelTarget(tid, {
+              account: account,
+              accountCondition: account ? (currentCondition === 'all' ? 'only' : currentCondition) : 'all'
+            });
+            renderCustomModelEditor();
             renderCustomModelFieldErrors();
             return;
           }
@@ -5520,14 +5611,14 @@ async fn dashboard() -> impl IntoResponse {
           </div>
           <div class="custom-model-form-row">
             <label>Fallback steps</label>
-            <div class="muted">Each step runs if the previous one fails. Targets inside the same step are load-balanced. Pick multiple accounts on a target to spread load across them; leave empty to use any account.</div>
+            <div class="muted">Each step runs if the previous one fails. Targets inside the same step are load-balanced. Use the account condition to route to any account, one account, or every account except the selected account.</div>
             <div id="customModelSteps" class="custom-model-steps"></div>
             <div><button type="button" id="addCustomStepBtn" class="mini-btn">+ Add fallback step</button></div>
             <div id="customModelAliasError" class="custom-model-field-error"></div>
           </div>
           <div class="custom-model-form-row">
             <label>Account keys</label>
-            <div class="muted">Quick "Use" inserts the key into the most recently focused target. The picker on each target supports multiple accounts.</div>
+            <div class="muted">Quick "Use" selects the key on the most recently focused target.</div>
             <div id="customModelAccountKeys" class="custom-model-account-list muted">Loading account keys...</div>
           </div>
           <div class="custom-model-form-row">
@@ -6666,6 +6757,9 @@ async fn custom_models_json_route(State(state): State<AppState>, headers: Header
         return response;
     }
     let models = state.custom_models.lock().unwrap().clone();
+    let model_headers = internal_proxy_api_headers(&state);
+    let model_options =
+        custom_model_options_from_catalog(collect_unified_v1_models(&state, &model_headers).await);
     let data = models
         .into_iter()
         .map(|model| {
@@ -6682,10 +6776,76 @@ async fn custom_models_json_route(State(state): State<AppState>, headers: Header
         .collect::<Vec<_>>();
     axum::Json(serde_json::json!({
         "models": data,
+        "model_options": model_options,
         "accounts": notification_account_options(&state),
         "path": custom_models::custom_models_path(&state.cfg)
     }))
     .into_response()
+}
+
+fn internal_proxy_api_headers(state: &AppState) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", state.cfg.proxy_api_key)) {
+        headers.insert(axum::http::header::AUTHORIZATION, value);
+    }
+    headers
+}
+
+fn custom_model_options_from_catalog(models: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut out = models
+        .into_iter()
+        .filter_map(|model| {
+            let provider = model
+                .get("provider_prefix")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if provider.is_empty() || provider == "ctm" {
+                return None;
+            }
+            let id = model
+                .get("id")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let upstream_model = model
+                .get("upstream_model")
+                .and_then(|value| value.as_str())
+                .unwrap_or(id.as_str())
+                .trim()
+                .to_string();
+            if upstream_model.is_empty() {
+                return None;
+            }
+            let display_name = model
+                .get("display_name")
+                .or_else(|| model.get("name"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(upstream_model.as_str())
+                .to_string();
+            Some(serde_json::json!({
+                "provider": provider,
+                "model": upstream_model,
+                "id": id,
+                "display_name": display_name
+            }))
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|left, right| {
+        left.get("provider")
+            .and_then(|value| value.as_str())
+            .cmp(&right.get("provider").and_then(|value| value.as_str()))
+            .then_with(|| {
+                left.get("model")
+                    .and_then(|value| value.as_str())
+                    .cmp(&right.get("model").and_then(|value| value.as_str()))
+            })
+    });
+    out
 }
 
 async fn custom_models_save_route(
@@ -7191,6 +7351,7 @@ fn targets_from_json(
             targets.push(custom_models::CustomModelTarget {
                 model: model.to_string(),
                 account: None,
+                account_condition: custom_models::CustomModelAccountCondition::Only,
                 enabled: true,
                 weight: 1,
             });
@@ -7210,6 +7371,22 @@ fn targets_from_json(
                 .or_else(|| object.get("account_key"))
                 .and_then(|value| value.as_str())
                 .map(|value| value.to_string()),
+            account_condition: object
+                .get("account_condition")
+                .or_else(|| object.get("account_mode"))
+                .or_else(|| object.get("condition"))
+                .and_then(|value| value.as_str())
+                .map(|value| {
+                    if value.eq_ignore_ascii_case("except")
+                        || value.eq_ignore_ascii_case("exclude")
+                        || value.eq_ignore_ascii_case("without")
+                    {
+                        custom_models::CustomModelAccountCondition::Except
+                    } else {
+                        custom_models::CustomModelAccountCondition::Only
+                    }
+                })
+                .unwrap_or_default(),
             enabled: object
                 .get("enabled")
                 .and_then(|value| value.as_bool())
@@ -9162,15 +9339,48 @@ fn custom_model_target_score(
     target: &custom_models::CustomModelTarget,
 ) -> AccountSelectionScore {
     let mut score = match target.account.as_deref() {
-        Some(account) if !account.trim().is_empty() => {
-            best_provider_score_for_model_account(state, &target.model, account)
-        }
+        Some(account) if !account.trim().is_empty() => match target.account_condition {
+            custom_models::CustomModelAccountCondition::Only => {
+                best_provider_score_for_model_account(state, &target.model, account)
+            }
+            custom_models::CustomModelAccountCondition::Except => {
+                best_provider_score_for_model_except_account(state, &target.model, account)
+            }
+        },
         _ => best_provider_score_for_model(state, &target.model),
     };
     let weight = u64::from(target.weight.max(1));
     score.historical_tokens /= weight;
     score.historical_requests /= weight;
     score
+}
+
+fn custom_account_condition_matches(
+    is_match: bool,
+    condition: custom_models::CustomModelAccountCondition,
+) -> bool {
+    match condition {
+        custom_models::CustomModelAccountCondition::Only => is_match,
+        custom_models::CustomModelAccountCondition::Except => !is_match,
+    }
+}
+
+fn custom_account_condition_error(
+    provider: &str,
+    account_filter: &str,
+    condition: custom_models::CustomModelAccountCondition,
+) -> String {
+    match condition {
+        custom_models::CustomModelAccountCondition::Only => {
+            format!("no {} account matched '{}'", provider, account_filter)
+        }
+        custom_models::CustomModelAccountCondition::Except => {
+            format!(
+                "no {} account remained after excluding '{}'",
+                provider, account_filter
+            )
+        }
+    }
 }
 
 fn best_provider_score_for_model_account(
@@ -9272,6 +9482,125 @@ fn best_provider_score_for_model_account(
             best_score_for_len(
                 accounts.len(),
                 |idx| accounts[idx].enabled && glm_account_matches(&accounts[idx], account_filter),
+                |idx| glm_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Custom | TargetModel::CodexModels | TargetModel::UnifiedV1Models => {
+            AccountSelectionScore {
+                quota_pressure: Some(f64::INFINITY),
+                historical_tokens: u64::MAX,
+                historical_requests: u64::MAX,
+            }
+        }
+    }
+}
+
+fn best_provider_score_for_model_except_account(
+    state: &AppState,
+    model: &str,
+    account_filter: &str,
+) -> AccountSelectionScore {
+    match source::v1::provider::target_from_model(model) {
+        TargetModel::Codex => {
+            let tokens = state.tokens.lock().unwrap().clone();
+            best_score_for_len(
+                tokens.len(),
+                |idx| {
+                    tokens[idx].enabled
+                        && !codex_token_matches_account(&tokens[idx], account_filter)
+                },
+                |idx| codex_token_selection_score(state, idx, &tokens[idx]),
+            )
+        }
+        TargetModel::Antigravity => {
+            let accounts = state.agw_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| {
+                    accounts[idx].enabled
+                        && !antigravity_account_matches(&accounts[idx], account_filter)
+                },
+                |idx| antigravity_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Gemini => {
+            let accounts = state.gemini_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| {
+                    accounts[idx].enabled && !gemini_account_matches(&accounts[idx], account_filter)
+                },
+                |idx| gemini_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Qwen => {
+            let accounts = state.qwen_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| {
+                    accounts[idx].enabled && !qwen_account_matches(&accounts[idx], account_filter)
+                },
+                |idx| qwen_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::DeepSeek => {
+            let accounts = state.deepseek_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| {
+                    accounts[idx].enabled
+                        && !deepseek_account_matches(&accounts[idx], account_filter)
+                },
+                |idx| deepseek_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Grok => {
+            let accounts = state.grok_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| {
+                    accounts[idx].enabled && !grok_account_matches(&accounts[idx], account_filter)
+                },
+                |idx| grok_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::MiniMax => {
+            let accounts = state.minimax_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| {
+                    accounts[idx].enabled
+                        && !minimax_account_matches(&accounts[idx], account_filter)
+                },
+                |idx| minimax_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Copilot => {
+            let accounts = state.copilot_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| {
+                    accounts[idx].enabled
+                        && !copilot_account_matches(&accounts[idx], account_filter)
+                },
+                |idx| copilot_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Claude => {
+            let accounts = state.claude_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| {
+                    accounts[idx].enabled && !claude_account_matches(&accounts[idx], account_filter)
+                },
+                |idx| claude_account_selection_score(state, &accounts[idx]),
+            )
+        }
+        TargetModel::Glm => {
+            let accounts = state.glm_accounts.lock().unwrap().clone();
+            best_score_for_len(
+                accounts.len(),
+                |idx| accounts[idx].enabled && !glm_account_matches(&accounts[idx], account_filter),
                 |idx| glm_account_selection_score(state, &accounts[idx]),
             )
         }
@@ -9544,6 +9873,7 @@ fn scoped_state_for_custom_target_account(
     else {
         return Ok(state);
     };
+    let condition = candidate.account_condition;
 
     let mut scoped = state.clone();
     match target {
@@ -9551,10 +9881,20 @@ fn scoped_state_for_custom_target_account(
             let tokens = state.tokens.lock().unwrap().clone();
             let filtered = tokens
                 .into_iter()
-                .filter(|token| token.enabled && codex_token_matches_account(token, account_filter))
+                .filter(|token| {
+                    token.enabled
+                        && custom_account_condition_matches(
+                            codex_token_matches_account(token, account_filter),
+                            condition,
+                        )
+                })
                 .collect::<Vec<_>>();
             if filtered.is_empty() {
-                return Err(format!("no Codex account matched '{}'", account_filter));
+                return Err(custom_account_condition_error(
+                    "Codex",
+                    account_filter,
+                    condition,
+                ));
             }
             scoped.tokens = Arc::new(Mutex::new(filtered));
             scoped.rr = Arc::new(Mutex::new(0));
@@ -9564,13 +9904,18 @@ fn scoped_state_for_custom_target_account(
             let filtered = accounts
                 .into_iter()
                 .filter(|account| {
-                    account.enabled && antigravity_account_matches(account, account_filter)
+                    account.enabled
+                        && custom_account_condition_matches(
+                            antigravity_account_matches(account, account_filter),
+                            condition,
+                        )
                 })
                 .collect::<Vec<_>>();
             if filtered.is_empty() {
-                return Err(format!(
-                    "no Antigravity account matched '{}'",
-                    account_filter
+                return Err(custom_account_condition_error(
+                    "Antigravity",
+                    account_filter,
+                    condition,
                 ));
             }
             scoped.agw_accounts = Arc::new(Mutex::new(filtered));
@@ -9581,11 +9926,19 @@ fn scoped_state_for_custom_target_account(
             let filtered = accounts
                 .into_iter()
                 .filter(|account| {
-                    account.enabled && gemini_account_matches(account, account_filter)
+                    account.enabled
+                        && custom_account_condition_matches(
+                            gemini_account_matches(account, account_filter),
+                            condition,
+                        )
                 })
                 .collect::<Vec<_>>();
             if filtered.is_empty() {
-                return Err(format!("no Gemini account matched '{}'", account_filter));
+                return Err(custom_account_condition_error(
+                    "Gemini",
+                    account_filter,
+                    condition,
+                ));
             }
             scoped.gemini_accounts = Arc::new(Mutex::new(filtered));
             scoped.gemini_rr = Arc::new(Mutex::new(0));
@@ -9594,10 +9947,20 @@ fn scoped_state_for_custom_target_account(
             let accounts = state.qwen_accounts.lock().unwrap().clone();
             let filtered = accounts
                 .into_iter()
-                .filter(|account| account.enabled && qwen_account_matches(account, account_filter))
+                .filter(|account| {
+                    account.enabled
+                        && custom_account_condition_matches(
+                            qwen_account_matches(account, account_filter),
+                            condition,
+                        )
+                })
                 .collect::<Vec<_>>();
             if filtered.is_empty() {
-                return Err(format!("no Qwen account matched '{}'", account_filter));
+                return Err(custom_account_condition_error(
+                    "Qwen",
+                    account_filter,
+                    condition,
+                ));
             }
             scoped.qwen_accounts = Arc::new(Mutex::new(filtered));
             scoped.qwen_rr = Arc::new(Mutex::new(0));
@@ -9607,11 +9970,19 @@ fn scoped_state_for_custom_target_account(
             let filtered = accounts
                 .into_iter()
                 .filter(|account| {
-                    account.enabled && deepseek_account_matches(account, account_filter)
+                    account.enabled
+                        && custom_account_condition_matches(
+                            deepseek_account_matches(account, account_filter),
+                            condition,
+                        )
                 })
                 .collect::<Vec<_>>();
             if filtered.is_empty() {
-                return Err(format!("no DeepSeek account matched '{}'", account_filter));
+                return Err(custom_account_condition_error(
+                    "DeepSeek",
+                    account_filter,
+                    condition,
+                ));
             }
             scoped.deepseek_accounts = Arc::new(Mutex::new(filtered));
             scoped.deepseek_rr = Arc::new(Mutex::new(0));
@@ -9620,10 +9991,20 @@ fn scoped_state_for_custom_target_account(
             let accounts = state.grok_accounts.lock().unwrap().clone();
             let filtered = accounts
                 .into_iter()
-                .filter(|account| account.enabled && grok_account_matches(account, account_filter))
+                .filter(|account| {
+                    account.enabled
+                        && custom_account_condition_matches(
+                            grok_account_matches(account, account_filter),
+                            condition,
+                        )
+                })
                 .collect::<Vec<_>>();
             if filtered.is_empty() {
-                return Err(format!("no Grok account matched '{}'", account_filter));
+                return Err(custom_account_condition_error(
+                    "Grok",
+                    account_filter,
+                    condition,
+                ));
             }
             scoped.grok_accounts = Arc::new(Mutex::new(filtered));
             scoped.grok_rr = Arc::new(Mutex::new(0));
@@ -9633,11 +10014,19 @@ fn scoped_state_for_custom_target_account(
             let filtered = accounts
                 .into_iter()
                 .filter(|account| {
-                    account.enabled && minimax_account_matches(account, account_filter)
+                    account.enabled
+                        && custom_account_condition_matches(
+                            minimax_account_matches(account, account_filter),
+                            condition,
+                        )
                 })
                 .collect::<Vec<_>>();
             if filtered.is_empty() {
-                return Err(format!("no MiniMax account matched '{}'", account_filter));
+                return Err(custom_account_condition_error(
+                    "MiniMax",
+                    account_filter,
+                    condition,
+                ));
             }
             scoped.minimax_accounts = Arc::new(Mutex::new(filtered));
             scoped.minimax_rr = Arc::new(Mutex::new(0));
@@ -9647,11 +10036,19 @@ fn scoped_state_for_custom_target_account(
             let filtered = accounts
                 .into_iter()
                 .filter(|account| {
-                    account.enabled && copilot_account_matches(account, account_filter)
+                    account.enabled
+                        && custom_account_condition_matches(
+                            copilot_account_matches(account, account_filter),
+                            condition,
+                        )
                 })
                 .collect::<Vec<_>>();
             if filtered.is_empty() {
-                return Err(format!("no Copilot account matched '{}'", account_filter));
+                return Err(custom_account_condition_error(
+                    "Copilot",
+                    account_filter,
+                    condition,
+                ));
             }
             scoped.copilot_accounts = Arc::new(Mutex::new(filtered));
             scoped.copilot_rr = Arc::new(Mutex::new(0));
@@ -9661,11 +10058,19 @@ fn scoped_state_for_custom_target_account(
             let filtered = accounts
                 .into_iter()
                 .filter(|account| {
-                    account.enabled && claude_account_matches(account, account_filter)
+                    account.enabled
+                        && custom_account_condition_matches(
+                            claude_account_matches(account, account_filter),
+                            condition,
+                        )
                 })
                 .collect::<Vec<_>>();
             if filtered.is_empty() {
-                return Err(format!("no Claude account matched '{}'", account_filter));
+                return Err(custom_account_condition_error(
+                    "Claude",
+                    account_filter,
+                    condition,
+                ));
             }
             scoped.claude_accounts = Arc::new(Mutex::new(filtered));
             scoped.claude_rr = Arc::new(Mutex::new(0));
@@ -9674,10 +10079,20 @@ fn scoped_state_for_custom_target_account(
             let accounts = state.glm_accounts.lock().unwrap().clone();
             let filtered = accounts
                 .into_iter()
-                .filter(|account| account.enabled && glm_account_matches(account, account_filter))
+                .filter(|account| {
+                    account.enabled
+                        && custom_account_condition_matches(
+                            glm_account_matches(account, account_filter),
+                            condition,
+                        )
+                })
                 .collect::<Vec<_>>();
             if filtered.is_empty() {
-                return Err(format!("no GLM account matched '{}'", account_filter));
+                return Err(custom_account_condition_error(
+                    "GLM",
+                    account_filter,
+                    condition,
+                ));
             }
             scoped.glm_accounts = Arc::new(Mutex::new(filtered));
             scoped.glm_rr = Arc::new(Mutex::new(0));

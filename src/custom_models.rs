@@ -29,10 +29,24 @@ pub(crate) struct CustomModelTarget {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "is_default_account_condition",
+        alias = "account_mode"
+    )]
+    pub account_condition: CustomModelAccountCondition,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default = "default_weight")]
     pub weight: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CustomModelAccountCondition {
+    #[default]
+    Only,
+    Except,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -51,6 +65,10 @@ fn default_load_balance() -> bool {
 
 fn default_weight() -> u32 {
     1
+}
+
+fn is_default_account_condition(condition: &CustomModelAccountCondition) -> bool {
+    matches!(condition, CustomModelAccountCondition::Only)
 }
 
 pub(crate) fn custom_models_path(cfg: &crate::Config) -> PathBuf {
@@ -224,13 +242,21 @@ fn normalize_targets(targets: Vec<CustomModelTarget>) -> Vec<CustomModelTarget> 
     targets
         .into_iter()
         .map(|mut target| {
-            let (model, account) = parse_target_spec(&target.model);
+            let (model, account, condition) = parse_target_spec(&target.model);
             target.model = model;
             target.account = target
                 .account
                 .or(account)
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
+            if matches!(target.account_condition, CustomModelAccountCondition::Only)
+                && matches!(condition, CustomModelAccountCondition::Except)
+            {
+                target.account_condition = condition;
+            }
+            if target.account.is_none() {
+                target.account_condition = CustomModelAccountCondition::Only;
+            }
             if target.weight == 0 {
                 target.weight = 1;
             }
@@ -276,14 +302,24 @@ fn legacy_route_groups(
     groups
 }
 
-fn parse_target_spec(value: &str) -> (String, Option<String>) {
+fn parse_target_spec(value: &str) -> (String, Option<String>, CustomModelAccountCondition) {
     let trimmed = value.trim();
     let Some((model, account)) = trimmed.split_once('@') else {
-        return (normalize_target_model_id(trimmed), None);
+        return (
+            normalize_target_model_id(trimmed),
+            None,
+            CustomModelAccountCondition::Only,
+        );
+    };
+    let account = account.trim();
+    let (account, condition) = match account.strip_prefix('!') {
+        Some(account) => (account.trim(), CustomModelAccountCondition::Except),
+        None => (account, CustomModelAccountCondition::Only),
     };
     (
         normalize_target_model_id(model),
-        Some(account.trim().to_string()).filter(|value| !value.is_empty()),
+        Some(account.to_string()).filter(|value| !value.is_empty()),
+        condition,
     )
 }
 
@@ -294,10 +330,11 @@ pub(crate) fn parse_model_list(value: &str) -> Vec<CustomModelTarget> {
         .map(str::trim)
         .filter(|model| !model.is_empty())
         .map(|spec| {
-            let (model, account) = parse_target_spec(spec);
+            let (model, account, account_condition) = parse_target_spec(spec);
             CustomModelTarget {
                 model,
                 account,
+                account_condition,
                 enabled: true,
                 weight: 1,
             }
@@ -314,10 +351,11 @@ pub(crate) fn parse_route_groups(value: &str) -> Vec<CustomModelRouteGroup> {
                 .map(str::trim)
                 .filter(|spec| !spec.is_empty())
                 .map(|spec| {
-                    let (model, account) = parse_target_spec(spec);
+                    let (model, account, account_condition) = parse_target_spec(spec);
                     CustomModelTarget {
                         model,
                         account,
+                        account_condition,
                         enabled: true,
                         weight: 1,
                     }
@@ -335,6 +373,14 @@ pub(crate) fn target_label(target: &CustomModelTarget) -> String {
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
+        Some(account)
+            if matches!(
+                target.account_condition,
+                CustomModelAccountCondition::Except
+            ) =>
+        {
+            format!("{}@!{}", target.model, account)
+        }
         Some(account) => format!("{}@{}", target.model, account),
         None => target.model.clone(),
     }
@@ -379,10 +425,11 @@ pub(crate) fn route_group_count(model: &CustomModel) -> usize {
 }
 
 fn target(model: &str) -> CustomModelTarget {
-    let (model, account) = parse_target_spec(model);
+    let (model, account, account_condition) = parse_target_spec(model);
     CustomModelTarget {
         model,
         account,
+        account_condition,
         enabled: true,
         weight: 1,
     }
@@ -460,9 +507,17 @@ mod tests {
         assert_eq!(parsed[2].model, "cop:gpt-5.1");
 
         let groups =
-            parse_route_groups("agw:gemini-2.5-pro@one, gem:gemini-2.5-pro@two\nmin:MiniMax-M3");
+            parse_route_groups("agw:gemini-2.5-pro@one, gem:gemini-2.5-pro@!two\nmin:MiniMax-M3");
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].targets.len(), 2);
+        assert_eq!(
+            groups[0].targets[1].account_condition,
+            CustomModelAccountCondition::Except
+        );
+        assert_eq!(
+            target_label(&groups[0].targets[1]),
+            "gem:gemini-2.5-pro@!two"
+        );
         assert_eq!(groups[1].targets[0].model, "min:MiniMax-M3");
     }
 

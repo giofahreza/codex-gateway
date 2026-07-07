@@ -303,16 +303,28 @@ curl -sS http://127.0.0.1:8319/custom-models/save \
     "display_name": "Workhorse",
     "enabled": true,
     "load_balance": true,
-    "primary_models": [
-      {"model": "agw:gemini-2.5-pro", "weight": 2},
-      {"model": "gem:gemini-2.5-pro", "weight": 1}
-    ],
-    "fallback_models": [
-      {"model": "min:MiniMax-M3"},
-      {"model": "dsk:deepseek-v4-pro"}
+    "routes": [
+      {
+        "targets": [
+          {"model": "agw:gemini-2.5-pro", "weight": 2},
+          {
+            "model": "gem:gemini-2.5-pro",
+            "account": "gemini:email:slow@example.com",
+            "account_condition": "except"
+          }
+        ]
+      },
+      {
+        "targets": [
+          {"model": "min:MiniMax-M3"},
+          {"model": "dsk:deepseek-v4-pro"}
+        ]
+      }
     ]
   }'
 ```
+
+For a custom model target, omit `account` to use any enabled account for that provider. Set `account` with the default `account_condition` of `only` to pin the target to one account, or set `"account_condition": "except"` to use all enabled accounts except the selected account.
 
 ### Use the alias
 
