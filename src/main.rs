@@ -315,6 +315,10 @@ async fn main() {
         .route("/admin/logout", any(admin_logout_route))
         .route("/dashboard.json", any(dashboard_json))
         .route("/quota.json", any(quota_json_route))
+        .route(
+            "/codex/rate-limit-reset-credit/consume",
+            any(codex_rate_limit_reset_consume_route),
+        )
         .route("/credentials/delete", any(delete_credential_route))
         .route("/credentials/toggle", any(toggle_credential_route))
         .route("/login/codex/start", any(login_start_route))
@@ -1448,6 +1452,53 @@ async fn dashboard() -> impl IntoResponse {
         font-size: 13px;
         margin-bottom: 10px;
       }
+      .reset-credit-details {
+        clear: both;
+        margin: 2px 0 10px;
+        line-height: 1.45;
+      }
+      .reset-credit-details summary {
+        cursor: pointer;
+        color: var(--secondary-text);
+        font-weight: 700;
+      }
+      .reset-credit-count {
+        color: var(--muted);
+      }
+      .reset-credit-list {
+        display: grid;
+        gap: 8px;
+        margin-top: 6px;
+      }
+      .reset-credit-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        flex-wrap: wrap;
+        padding: 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-alt);
+      }
+      .reset-credit-main {
+        flex: 1 1 220px;
+        min-width: 0;
+      }
+      .reset-credit-title {
+        color: var(--text);
+        font-weight: 700;
+        overflow-wrap: anywhere;
+      }
+      .reset-credit-meta {
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+      .reset-credit-empty {
+        margin-top: 6px;
+      }
       .quota-bar-wrap {
         flex: 1;
         min-width: 180px;
@@ -2188,7 +2239,8 @@ async fn dashboard() -> impl IntoResponse {
       let openQwenRows = new Set();
       const openAccountDetails = {
         models: new Set(),
-        connection: new Set()
+        connection: new Set(),
+        resetCredits: new Set()
       };
       let activeTipEl = null;
       let activeTipTimer = null;
@@ -3328,6 +3380,57 @@ async fn dashboard() -> impl IntoResponse {
         }
         return bars ? '<div class="card-quota">' + bars + '</div>' : '';
       }
+      function formatResetCreditExpiry(credit) {
+        if (!credit || !credit.expires_at) return 'No expiration';
+        var ts = Date.parse(credit.expires_at);
+        if (!Number.isFinite(ts)) return 'Expires at ' + credit.expires_at;
+        return 'Expires at ' + new Date(ts).toLocaleString();
+      }
+      function resetCreditDisplayName(credit) {
+        if (!credit) return 'Usage limit reset';
+        return credit.title || credit.description || credit.id || 'Usage limit reset';
+      }
+      function renderCodexResetCredits(a, quota) {
+        var summary = quota && quota.rate_limit_reset_credits;
+        if (!summary) return '';
+        var label = accountLabel(a);
+        var fileArg = escapeHtml(jsString(a && a.file_name || ''));
+        var labelArg = escapeHtml(jsString(label));
+        var accountArg = escapeHtml(jsString(a && a.account_id || ''));
+        var key = accountDetailStateKey('codex', a, a && (a.file_name || a.label || a.account_id) || label);
+        var credits = Array.isArray(summary.credits) ? summary.credits.filter(function(credit) {
+          var status = String(credit && credit.status || 'available').toLowerCase();
+          return credit && status === 'available';
+        }) : [];
+        var count = Number(summary.available_count);
+        if (!Number.isFinite(count)) count = credits.length;
+        count = Math.max(0, Math.max(count, credits.length));
+        var html = '<details class="reset-credit-details muted"' + detailToggleAttrs('resetCredits', key) + '><summary>Available reset limit <span class="reset-credit-count">(' + count + ')</span></summary>';
+        if (count <= 0) {
+          return html + '<div class="quota-status reset-credit-empty">No usage limit resets available</div></details>';
+        }
+        if (!credits.length) {
+          return html
+            + '<div class="reset-credit-list"><div class="reset-credit-item">'
+            + '<div class="reset-credit-main"><div class="reset-credit-title">Next available reset credit</div><div class="reset-credit-meta">Credit details are not available from the upstream summary.</div></div>'
+            + '<button type="button" class="mini-btn secondary-button" onclick="redeemCodexReset(' + fileArg + ', ' + labelArg + ', ' + accountArg + ', \'\', \'next available reset\')">Reset limit</button>'
+            + '</div></div></details>';
+        }
+        html += '<div class="reset-credit-list">';
+        html += credits.map(function(credit) {
+          var title = resetCreditDisplayName(credit);
+          var expiry = formatResetCreditExpiry(credit);
+          var meta = expiry + (credit.id ? ' | ' + credit.id : '');
+          return '<div class="reset-credit-item">'
+            + '<div class="reset-credit-main"><div class="reset-credit-title">' + escapeHtml(title) + '</div><div class="reset-credit-meta">' + escapeHtml(meta) + '</div></div>'
+            + '<button type="button" class="mini-btn secondary-button" onclick="redeemCodexReset(' + fileArg + ', ' + labelArg + ', ' + accountArg + ', ' + escapeHtml(jsString(credit.id || '')) + ', ' + escapeHtml(jsString(title)) + ')">Reset limit</button>'
+            + '</div>';
+        }).join('');
+        if (count > credits.length) {
+          html += '<div class="quota-status reset-credit-empty">+' + (count - credits.length) + ' more available reset credits are not listed by the upstream response.</div>';
+        }
+        return html + '</div></details>';
+      }
       function escapeHtml(value) {
         return String(value).replace(/[&<>"']/g, function(ch) {
           return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch];
@@ -3554,6 +3657,7 @@ async fn dashboard() -> impl IntoResponse {
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
           + '</div>'
           + renderQuotaBars(quota, { provider: 'codex', key: key })
+          + renderCodexResetCredits(a, quota)
           + renderAccountModels(a, quota, 'codex', key)
           + renderMetaDetails(connectionRows('codex', a), 'Connection details', 'codex', a, key)
           + '</div>';
@@ -6223,6 +6327,40 @@ async fn dashboard() -> impl IntoResponse {
         notify(data.message || 'Credential updated', data.ok === false ? 'error' : '');
         refreshCredentialViews();
       }
+      function redeemCodexReset(fileName, label, accountId, creditId, creditTitle) {
+        var display = label || accountId || fileName || 'this Codex account';
+        var resetLabel = creditTitle || 'usage limit reset';
+        openCredentialActionConfirm({
+          title: 'Redeem usage reset?',
+          message: 'Use ' + resetLabel + ' for ' + display + '?',
+          approveLabel: 'Redeem reset',
+          run: function() {
+            return performCodexReset(fileName, label, accountId, creditId);
+          }
+        });
+      }
+      async function performCodexReset(fileName, label, accountId, creditId) {
+        var body = new URLSearchParams();
+        if (fileName) body.set('file_name', fileName);
+        if (label) body.set('label', label);
+        if (accountId) body.set('account_id', accountId);
+        if (creditId) body.set('credit_id', creditId);
+        if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+          body.set('idempotency_key', window.crypto.randomUUID());
+        }
+        const res = await adminFetch('/codex/rate-limit-reset-credit/consume', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          body: body
+        });
+        if (!res) return;
+        const data = await res.json();
+        var tone = data.ok === false || data.outcome === 'no_credit' ? 'error' : '';
+        notify(data.message || 'Reset request completed', tone);
+        refreshQuota();
+      }
       async function startDashboard() {
         refresh();
         refreshContextChart();
@@ -6479,6 +6617,31 @@ async fn quota_json_route(State(state): State<AppState>, headers: HeaderMap) -> 
     }
     let accounts = target::codex::quota::get_quota_summaries(&state).await;
     quota_accounts_json_response(&state, "codex", "Codex", accounts)
+}
+
+async fn codex_rate_limit_reset_consume_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<target::codex::quota::ConsumeRateLimitResetForm>,
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    let fallback_idempotency_key = Uuid::new_v4().to_string();
+    match target::codex::quota::consume_rate_limit_reset_credit(
+        &state,
+        form,
+        fallback_idempotency_key,
+    )
+    .await
+    {
+        Ok(value) => axum::Json(value).into_response(),
+        Err(err) => axum::Json(serde_json::json!({
+            "ok": false,
+            "message": err
+        }))
+        .into_response(),
+    }
 }
 
 fn quota_accounts_json_response(

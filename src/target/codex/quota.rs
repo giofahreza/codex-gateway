@@ -1,5 +1,8 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
+
+const CHATGPT_BACKEND_API_BASE: &str = "https://chatgpt.com/backend-api";
+const CODEX_USER_AGENT: &str = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal";
 
 #[derive(Clone)]
 pub struct QuotaCacheEntry {
@@ -16,6 +19,7 @@ pub struct QuotaSummary {
     pub code_generation: QuotaRateSummary,
     pub code_review: QuotaRateSummary,
     pub additional_rate_limits: Vec<AdditionalRateLimitSummary>,
+    pub rate_limit_reset_credits: Option<RateLimitResetCreditsSummary>,
     pub models: Vec<ModelSummary>,
 }
 
@@ -42,6 +46,57 @@ pub struct AdditionalRateLimitSummary {
 pub struct ModelSummary {
     pub model_id: String,
     pub display_name: String,
+}
+
+#[derive(Default, Clone, Serialize, Deserialize)]
+pub struct RateLimitResetCreditsSummary {
+    pub available_count: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<Vec<RateLimitResetCredit>>,
+}
+
+#[derive(Default, Clone, Serialize, Deserialize)]
+pub struct RateLimitResetCredit {
+    pub id: String,
+    pub reset_type: String,
+    pub status: String,
+    pub granted_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RateLimitResetCreditsDetails {
+    #[serde(default)]
+    credits: Vec<RateLimitResetCredit>,
+    available_count: i64,
+}
+
+#[derive(Deserialize)]
+struct ConsumeRateLimitResetCreditResponse {
+    code: String,
+    #[serde(default)]
+    windows_reset: i64,
+}
+
+#[derive(Serialize)]
+struct ConsumeRateLimitResetCreditRequest<'a> {
+    redeem_request_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credit_id: Option<&'a str>,
+}
+
+#[derive(Default, Deserialize)]
+pub struct ConsumeRateLimitResetForm {
+    pub file_name: Option<String>,
+    pub label: Option<String>,
+    pub account_id: Option<String>,
+    pub credit_id: Option<String>,
+    pub idempotency_key: Option<String>,
 }
 
 pub async fn get_quota_summaries(state: &crate::AppState) -> Vec<serde_json::Value> {
@@ -96,6 +151,7 @@ pub async fn get_quota_summaries(state: &crate::AppState) -> Vec<serde_json::Val
                 "code_generation": entry.summary.code_generation,
                 "code_review": entry.summary.code_review,
                 "additional_rate_limits": entry.summary.additional_rate_limits,
+                "rate_limit_reset_credits": entry.summary.rate_limit_reset_credits,
                 "models": entry.summary.models
             }));
         }
@@ -107,20 +163,12 @@ async fn fetch_codex_quota(
     state: &crate::AppState,
     token: &super::tokens::UpstreamToken,
 ) -> QuotaCacheEntry {
-    let mut req = state
-        .client
-        .get("https://chatgpt.com/backend-api/wham/usage")
-        .header("Authorization", format!("Bearer {}", token.token))
-        .header("Content-Type", "application/json")
-        .header(
-            "User-Agent",
-            "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
-        );
-    if let Some(account_id) = token.account_id.as_ref() {
-        if !account_id.trim().is_empty() {
-            req = req.header("Chatgpt-Account-Id", account_id);
-        }
-    }
+    let req = authenticated_codex_request(
+        state
+            .client
+            .get(wham_url(&state.cfg.upstream_base, "usage")),
+        token,
+    );
 
     let resp = match req.timeout(Duration::from_secs(30)).send().await {
         Ok(r) => r,
@@ -180,6 +228,11 @@ async fn fetch_codex_quota(
         code_review = fallback_review;
     }
 
+    let rate_limit_reset_credits = fetch_rate_limit_reset_credits(state, token)
+        .await
+        .ok()
+        .or_else(|| extract_rate_limit_reset_credits_summary(v.get("rate_limit_reset_credits")));
+
     let summary = QuotaSummary {
         label: token.label.clone(),
         account_id: token.account_id.clone().unwrap_or_default(),
@@ -187,6 +240,7 @@ async fn fetch_codex_quota(
         code_generation: code_gen,
         code_review,
         additional_rate_limits,
+        rate_limit_reset_credits,
         models: fetch_codex_models(state, token).await.unwrap_or_default(),
     };
     QuotaCacheEntry {
@@ -200,24 +254,14 @@ async fn fetch_codex_models(
     state: &crate::AppState,
     token: &super::tokens::UpstreamToken,
 ) -> Result<Vec<ModelSummary>, String> {
-    let mut req = state
-        .client
-        .get(super::gateway::build_upstream_url(
+    let req = authenticated_codex_request(
+        state.client.get(super::gateway::build_upstream_url(
             &state.cfg.upstream_base,
             "models",
             Some("client_version=1.0.0"),
-        ))
-        .header("Authorization", format!("Bearer {}", token.token))
-        .header("Content-Type", "application/json")
-        .header(
-            "User-Agent",
-            "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
-        );
-    if let Some(account_id) = token.account_id.as_ref() {
-        if !account_id.trim().is_empty() {
-            req = req.header("Chatgpt-Account-Id", account_id);
-        }
-    }
+        )),
+        token,
+    );
 
     let resp = req
         .timeout(Duration::from_secs(30))
@@ -232,6 +276,199 @@ async fn fetch_codex_models(
     let value: serde_json::Value =
         serde_json::from_str(&body).map_err(|_| "failed to parse models response".to_string())?;
     Ok(parse_models_response(&value))
+}
+
+pub async fn consume_rate_limit_reset_credit(
+    state: &crate::AppState,
+    form: ConsumeRateLimitResetForm,
+    fallback_idempotency_key: String,
+) -> Result<serde_json::Value, String> {
+    let token = select_token_for_reset(state, &form)?;
+    let idempotency_key = form
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or(fallback_idempotency_key);
+    let credit_id = form
+        .credit_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let url = wham_url(&state.cfg.upstream_base, "rate-limit-reset-credits/consume");
+    let req = authenticated_codex_request(state.client.post(&url), &token).json(
+        &ConsumeRateLimitResetCreditRequest {
+            redeem_request_id: &idempotency_key,
+            credit_id,
+        },
+    );
+    let response: ConsumeRateLimitResetCreditResponse = execute_json(req, "consume reset credit")
+        .await
+        .map_err(|err| format!("failed to consume rate limit reset: {}", err))?;
+
+    {
+        let mut cache = state.quota_cache.lock().unwrap();
+        for entry in cache.iter_mut() {
+            *entry = None;
+        }
+    }
+
+    let remaining = fetch_rate_limit_reset_credits(state, &token).await.ok();
+    let outcome = reset_outcome(&response.code);
+    let message = reset_outcome_message(&response.code, response.windows_reset);
+    Ok(serde_json::json!({
+        "ok": true,
+        "outcome": outcome,
+        "code": response.code,
+        "windows_reset": response.windows_reset,
+        "idempotency_key": idempotency_key,
+        "rate_limit_reset_credits": remaining,
+        "message": message
+    }))
+}
+
+async fn fetch_rate_limit_reset_credits(
+    state: &crate::AppState,
+    token: &super::tokens::UpstreamToken,
+) -> Result<RateLimitResetCreditsSummary, String> {
+    let url = wham_url(&state.cfg.upstream_base, "rate-limit-reset-credits");
+    let req = authenticated_codex_request(state.client.get(&url), token);
+    let details: RateLimitResetCreditsDetails = execute_json(req, "fetch reset credits").await?;
+    Ok(RateLimitResetCreditsSummary {
+        available_count: details.available_count,
+        credits: Some(details.credits),
+    })
+}
+
+async fn execute_json<T: for<'de> Deserialize<'de>>(
+    req: reqwest::RequestBuilder,
+    context: &str,
+) -> Result<T, String> {
+    let resp = req
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|err| format!("{} request failed: {}", context, err))?;
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|err| format!("{} body read failed: {}", context, err))?;
+    if !status.is_success() {
+        return Err(format!(
+            "{} returned {}: {}",
+            context,
+            status.as_u16(),
+            body
+        ));
+    }
+    serde_json::from_str(&body).map_err(|err| format!("{} JSON parse failed: {}", context, err))
+}
+
+fn select_token_for_reset(
+    state: &crate::AppState,
+    form: &ConsumeRateLimitResetForm,
+) -> Result<super::tokens::UpstreamToken, String> {
+    let tokens = state.tokens.lock().unwrap().clone();
+    let file_name = form
+        .file_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let account_id = form
+        .account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let label = form
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let mut matches = tokens.into_iter().filter(|token| {
+        if let Some(file_name) = file_name {
+            return token.file_name.as_deref() == Some(file_name);
+        }
+        if let Some(account_id) = account_id {
+            return token.account_id.as_deref() == Some(account_id);
+        }
+        if let Some(label) = label {
+            return token.label == label;
+        }
+        false
+    });
+
+    let token = matches
+        .next()
+        .ok_or_else(|| "matching Codex account was not found".to_string())?;
+    if matches.next().is_some() {
+        return Err("multiple Codex accounts matched; include file_name or account_id".to_string());
+    }
+    Ok(token)
+}
+
+fn authenticated_codex_request(
+    req: reqwest::RequestBuilder,
+    token: &super::tokens::UpstreamToken,
+) -> reqwest::RequestBuilder {
+    let mut req = req
+        .header("Authorization", format!("Bearer {}", token.token))
+        .header("Content-Type", "application/json")
+        .header("User-Agent", CODEX_USER_AGENT);
+    if let Some(account_id) = token.account_id.as_ref() {
+        if !account_id.trim().is_empty() {
+            req = req.header("Chatgpt-Account-Id", account_id);
+        }
+    }
+    req
+}
+
+fn wham_url(upstream_base: &str, path: &str) -> String {
+    let base = chatgpt_backend_base(upstream_base);
+    format!("{}/wham/{}", base, path.trim_start_matches('/'))
+}
+
+fn chatgpt_backend_base(upstream_base: &str) -> String {
+    let trimmed = upstream_base.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return CHATGPT_BACKEND_API_BASE.to_string();
+    }
+    if let Some(base) = trimmed.strip_suffix("/codex") {
+        return base.to_string();
+    }
+    if trimmed.ends_with("/backend-api") {
+        return trimmed.to_string();
+    }
+    CHATGPT_BACKEND_API_BASE.to_string()
+}
+
+fn reset_outcome(code: &str) -> &'static str {
+    match code {
+        "reset" => "reset",
+        "nothing_to_reset" => "nothing_to_reset",
+        "no_credit" => "no_credit",
+        "already_redeemed" => "already_redeemed",
+        _ => "unknown",
+    }
+}
+
+fn reset_outcome_message(code: &str, windows_reset: i64) -> String {
+    match code {
+        "reset" => {
+            if windows_reset > 0 {
+                format!("Usage reset; {} rate-limit window(s) reset.", windows_reset)
+            } else {
+                "Usage reset.".to_string()
+            }
+        }
+        "nothing_to_reset" => "Your usage does not need a reset right now.".to_string(),
+        "no_credit" => "No usage limit reset credits are available.".to_string(),
+        "already_redeemed" => "This reset request was already redeemed.".to_string(),
+        other => format!("Reset request finished with outcome: {}", other),
+    }
 }
 
 fn parse_models_response(value: &serde_json::Value) -> Vec<ModelSummary> {
@@ -262,6 +499,20 @@ fn parse_models_response(value: &serde_json::Value) -> Vec<ModelSummary> {
             })
         })
         .collect()
+}
+
+fn extract_rate_limit_reset_credits_summary(
+    value: Option<&serde_json::Value>,
+) -> Option<RateLimitResetCreditsSummary> {
+    let value = value?;
+    let available_count = value
+        .get("available_count")
+        .or_else(|| value.get("availableCount"))
+        .and_then(|value| value.as_i64())?;
+    Some(RateLimitResetCreditsSummary {
+        available_count,
+        credits: None,
+    })
 }
 
 fn extract_rate_summary(rate_limit: Option<&serde_json::Value>) -> QuotaRateSummary {
@@ -453,5 +704,34 @@ mod tests {
                 .and_then(|window| window.used_percent),
             Some(34.0)
         );
+    }
+
+    #[test]
+    fn builds_wham_reset_credit_urls_from_codex_upstream_base() {
+        assert_eq!(
+            wham_url(
+                "https://chatgpt.com/backend-api/codex",
+                "rate-limit-reset-credits/consume"
+            ),
+            "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
+        );
+        assert_eq!(
+            wham_url(
+                "https://chatgpt.com/backend-api",
+                "rate-limit-reset-credits"
+            ),
+            "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+        );
+    }
+
+    #[test]
+    fn extracts_reset_credit_summary_from_usage_payload() {
+        let summary = extract_rate_limit_reset_credits_summary(Some(&json!({
+            "available_count": 3
+        })))
+        .expect("reset summary");
+
+        assert_eq!(summary.available_count, 3);
+        assert!(summary.credits.is_none());
     }
 }

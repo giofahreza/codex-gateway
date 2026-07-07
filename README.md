@@ -211,6 +211,7 @@ All client requests use `Authorization: Bearer <CODEX_GATEWAY_KEY>`.
 | `GET /health` | Health check — returns `ok` |
 | `GET /dashboard.json` | Full dashboard data JSON |
 | `GET /quota.json` | Codex account quota data |
+| `POST /codex/rate-limit-reset-credit/consume` | Redeem an available Codex usage-limit reset credit |
 | `POST /credentials/delete` | Delete a credential file |
 | `POST /credentials/toggle` | Enable or disable a credential |
 | `GET/POST /notifications/settings` | Read or update notification settings |
@@ -402,6 +403,38 @@ curl http://127.0.0.1:8319/login/codex/submit \
   -H "Content-Type: application/x-www-form-urlencoded" \
   --data-urlencode "redirect_url=https://..."
 ```
+
+`GET /quota.json` includes Codex reset-credit availability when ChatGPT returns it:
+
+```json
+{
+  "rate_limit_reset_credits": {
+    "available_count": 1,
+    "credits": [
+      {
+        "id": "credit_...",
+        "reset_type": "codex_rate_limits",
+        "status": "available",
+        "granted_at": "2026-06-17T00:00:00Z",
+        "expires_at": "2026-07-17T00:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+Redeem one reset credit for a saved Codex credential:
+
+```bash
+curl -sS -X POST 'http://127.0.0.1:8319/codex/rate-limit-reset-credit/consume' \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "file_name=my-codex-account.json" \
+  -d "credit_id=credit_..." \
+  -d "idempotency_key=$(uuidgen)"
+```
+
+`credit_id` is optional; when omitted, ChatGPT selects the next available reset credit. A reset is only possible when the account has an available earned reset credit and a current Codex rate-limit window is eligible for reset.
 
 #### Codex CLI config
 
