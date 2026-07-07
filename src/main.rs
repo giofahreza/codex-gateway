@@ -1085,16 +1085,6 @@ async fn dashboard() -> impl IntoResponse {
         display: grid;
         gap: 6px;
       }
-      .custom-model-account-list {
-        display: grid;
-        gap: 8px;
-        max-height: 220px;
-        overflow: auto;
-        padding: 8px;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: var(--surface-alt);
-      }
       .custom-model-account-provider {
         display: grid;
         gap: 6px;
@@ -1104,11 +1094,6 @@ async fn dashboard() -> impl IntoResponse {
         grid-template-columns: minmax(0, 1fr) auto;
         gap: 8px;
         align-items: center;
-      }
-      .custom-model-account-actions {
-        display: flex;
-        gap: 6px;
-        justify-content: flex-end;
       }
       .custom-model-account-row code {
         overflow-wrap: anywhere;
@@ -1157,7 +1142,7 @@ async fn dashboard() -> impl IntoResponse {
       }
       .custom-model-target {
         display: grid;
-        grid-template-columns: minmax(110px, 0.75fr) minmax(150px, 1.25fr) minmax(120px, 0.85fr) minmax(150px, 1fr) 70px auto auto;
+        grid-template-columns: minmax(110px, 0.75fr) minmax(150px, 1.25fr) minmax(120px, 0.85fr) minmax(150px, 1fr) minmax(96px, auto) auto auto;
         gap: 8px;
         align-items: center;
         padding: 8px;
@@ -1173,8 +1158,29 @@ async fn dashboard() -> impl IntoResponse {
       .custom-model-target input {
         min-height: 32px;
       }
-      .custom-model-target-weight {
-        text-align: center;
+      .custom-model-target-share {
+        display: inline-grid;
+        grid-template-columns: auto minmax(54px, 1fr);
+        gap: 6px;
+        align-items: center;
+        min-height: 32px;
+        padding: 0 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .custom-model-target-share[hidden] {
+        display: none;
+      }
+      .custom-model-target-share span {
+        font-weight: 700;
+      }
+      .custom-model-target-share select {
+        min-height: 28px;
+        padding: 2px 6px;
       }
       .custom-model-target-toolbar {
         display: flex;
@@ -1920,9 +1926,6 @@ async fn dashboard() -> impl IntoResponse {
         .notification-account-row,
         .custom-model-account-row {
           grid-template-columns: 1fr;
-        }
-        .custom-model-account-actions {
-          justify-content: flex-start;
         }
         .notification-provider-actions {
           justify-content: flex-start;
@@ -4103,7 +4106,7 @@ async fn dashboard() -> impl IntoResponse {
         var body = enabledTargets.length
           ? '<span class="custom-model-targets">' + enabledTargets.map(function(target) {
               var weight = Number(target.weight || 1);
-              var suffix = weight > 1 ? ' x' + weight : '';
+              var suffix = enabledTargets.length > 1 && weight > 1 ? ' x' + weight : '';
               return '<span class="custom-model-chip"><code>' + escapeHtml(customTargetLabel(target) + suffix) + '</code></span>';
             }).join('') + '</span>'
           : '<span class="muted">' + escapeHtml(emptyText || 'None') + '</span>';
@@ -4170,7 +4173,6 @@ async fn dashboard() -> impl IntoResponse {
         dashboardState.customModelAccounts = data.accounts || [];
         dashboardState.customModelModelOptions = data.model_options || [];
         renderCustomModels(models);
-        renderCustomModelAccountKeys();
       }
       // ---------- Custom model route editor ----------
       const customModelProviderCatalog = [
@@ -4293,7 +4295,7 @@ async fn dashboard() -> impl IntoResponse {
               +     '</span>'
               +   '</div>'
               +   '<div class="custom-model-step-targets">'
-              +     step.targets.map(function (t) { return renderCustomModelTargetRow(step.id, t); }).join('')
+              +     step.targets.map(function (t) { return renderCustomModelTargetRow(step.id, t, step.targets.length > 1); }).join('')
               +   '</div>'
               +   '<div class="custom-model-step-footer">'
               +     '<button type="button" class="mini-btn" data-step-action="add-target" data-step-id="' + escapeHtml(step.id) + '">+ Add target to step</button>'
@@ -4304,7 +4306,7 @@ async fn dashboard() -> impl IntoResponse {
         }
         renderCustomModelPreview();
       }
-      function renderCustomModelTargetRow(stepId, target) {
+      function renderCustomModelTargetRow(stepId, target, showTrafficShare) {
         var providerOptions = customModelProviderCatalog.map(function (p) {
           return '<option value="' + escapeHtml(p.prefix) + '"' + (target.provider === p.prefix ? ' selected' : '') + '>' + escapeHtml(p.label) + '</option>';
         }).join('');
@@ -4320,6 +4322,9 @@ async fn dashboard() -> impl IntoResponse {
         var accountOptions = customModelAccountOptions(target.provider, target.account);
         var accountSelectAttrs = accountCondition === 'all' ? ' hidden disabled' : '';
         var weight = Math.max(1, Math.floor(Number(target.weight) || 1));
+        var shareOptions = customModelTrafficShareOptions(weight);
+        var shareAttrs = showTrafficShare ? '' : ' hidden';
+        var shareSelectAttrs = showTrafficShare ? '' : ' disabled';
         var enabled = target.enabled !== false;
         return ''
           + '<div class="custom-model-target' + (enabled ? '' : ' disabled') + '" data-step-id="' + escapeHtml(stepId) + '" data-target-id="' + escapeHtml(target.id) + '">'
@@ -4327,12 +4332,23 @@ async fn dashboard() -> impl IntoResponse {
           +   '<select class="custom-model-target-model" data-target-field="model" data-target-id="' + escapeHtml(target.id) + '" aria-label="Model">' + modelOptions + '</select>'
           +   '<select class="custom-model-target-account-condition" data-target-field="account_condition" data-target-id="' + escapeHtml(target.id) + '" aria-label="Account condition">' + accountConditionOptions + '</select>'
           +   '<select class="custom-model-target-account" data-target-field="account" data-target-id="' + escapeHtml(target.id) + '" aria-label="Account"' + accountSelectAttrs + '>' + accountOptions + '</select>'
-          +   '<input class="custom-model-target-weight" type="number" min="1" step="1" data-target-field="weight" data-target-id="' + escapeHtml(target.id) + '" value="' + weight + '" aria-label="Weight" title="Weight">'
+          +   '<label class="custom-model-target-share" title="Relative traffic share inside this fallback step"' + shareAttrs + '><span>Share</span><select data-target-field="weight" data-target-id="' + escapeHtml(target.id) + '" aria-label="Traffic share"' + shareSelectAttrs + '>' + shareOptions + '</select></label>'
           +   '<label class="check-row" title="Enabled"><input type="checkbox" data-target-field="enabled" data-target-id="' + escapeHtml(target.id) + '"' + (enabled ? ' checked' : '') + '> on</label>'
           +   '<span class="custom-model-target-toolbar">'
           +     '<button type="button" class="mini-btn danger" data-target-action="remove" data-target-id="' + escapeHtml(target.id) + '">Remove</button>'
           +   '</span>'
           + '</div>';
+      }
+      function customModelTrafficShareOptions(currentWeight) {
+        var current = Math.max(1, Math.floor(Number(currentWeight) || 1));
+        var values = [1, 2, 3, 5, 10];
+        if (values.indexOf(current) < 0) {
+          values.push(current);
+          values.sort(function (a, b) { return a - b; });
+        }
+        return values.map(function (value) {
+          return '<option value="' + value + '"' + (value === current ? ' selected' : '') + '>' + value + 'x</option>';
+        }).join('');
       }
       function customModelModelOptions(provider, currentModel) {
         var canonical = customModelCanonicalizePrefix(provider) || String(provider || '').toLowerCase();
@@ -4551,8 +4567,9 @@ async fn dashboard() -> impl IntoResponse {
           }
         });
         var text = routes.map(function (g) {
+          var showWeights = g.targets.length > 1;
           return g.targets.map(function (t) {
-            return customTargetLabel(t) + (Number(t.weight || 1) > 1 ? ' x' + t.weight : '');
+            return customTargetLabel(t) + (showWeights && Number(t.weight || 1) > 1 ? ' x' + t.weight : '');
           }).join(', ');
         }).join('\n');
         return { routes: routes, text: text };
@@ -4602,87 +4619,6 @@ async fn dashboard() -> impl IntoResponse {
           el.textContent = (errors.steps && errors.steps[sid]) || '';
         });
       }
-      // ---------- Account keys panel (click-to-assign into focused target) ----------
-      function renderCustomModelAccountKeys() {
-        var list = document.getElementById('customModelAccountKeys');
-        if (!list) return;
-        var accounts = dashboardState.customModelAccounts || [];
-        if (!accounts.length) {
-          list.innerHTML = '<div>No account keys available</div>';
-          return;
-        }
-        var grouped = {};
-        accounts.forEach(function (a) {
-          var p = a.provider || 'unknown';
-          if (!grouped[p]) grouped[p] = [];
-          grouped[p].push(a);
-        });
-        var providers = Object.keys(grouped).sort();
-        list.innerHTML = providers.map(function (provider) {
-          var items = grouped[provider];
-          var label = (items[0] && items[0].provider_label) || providerLabels[provider] || provider;
-          var rows = items.map(function (a) {
-            var key = a.key || '';
-            var keyArg = jsString(key);
-            var title = a.label || a.account_id || key;
-            return '<div class="custom-model-account-row">'
-              + '<div><strong>' + escapeHtml(title) + '</strong><br><code>' + escapeHtml(key) + '</code></div>'
-              + '<span class="custom-model-account-actions">'
-              + '<button type="button" class="mini-btn" onclick="useCustomModelAccountKey(' + keyArg + ')">Use</button>'
-              + '<button type="button" class="mini-btn secondary-button" onclick="copyCustomModelAccountKey(' + keyArg + ')">Copy</button>'
-              + '</span>'
-              + '</div>';
-          }).join('');
-          return '<div class="custom-model-account-provider"><strong>' + escapeHtml(label) + '</strong>' + rows + '</div>';
-        }).join('');
-      }
-      function useCustomModelAccountKey(key) {
-        key = String(key || '').trim();
-        if (!key) return;
-        var targetId = customModelEditorState.lastFocusedTargetId || customModelFindTargetForKey(key);
-        if (!targetId) {
-          setText('customModelStatus', 'Click a target row first, then click Use.');
-          return;
-        }
-        for (var i = 0; i < customModelEditorState.steps.length; i++) {
-          var step = customModelEditorState.steps[i];
-          var t = step.targets.find(function (x) { return x.id === targetId; });
-          if (t) {
-            t.account = key;
-            if (t.accountCondition === 'all') t.accountCondition = 'only';
-            closeCustomModelAccountPickers();
-            renderCustomModelEditor();
-            renderCustomModelFieldErrors();
-            setText('customModelStatus', 'Account selected for target.');
-            return;
-          }
-        }
-      }
-      function customModelFindTargetForKey(key) {
-        var accounts = dashboardState.customModelAccounts || [];
-        var acct = accounts.find(function (a) { return a.key === key; });
-        if (!acct) return null;
-        var want = customModelCanonicalizePrefix(acct.provider) || String(acct.provider || '').toLowerCase();
-        for (var i = 0; i < customModelEditorState.steps.length; i++) {
-          var t = customModelEditorState.steps[i].targets.find(function (x) {
-            return (customModelCanonicalizePrefix(x.provider) || String(x.provider || '').toLowerCase()) === want;
-          });
-          if (t) return t.id;
-        }
-        return null;
-      }
-      function copyCustomModelAccountKey(key) {
-        if (!key) return;
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(key).then(function () {
-            notify('Account key copied');
-          }).catch(function () {
-            notify(key);
-          });
-        } else {
-          notify(key);
-        }
-      }
       // ---------- Modal open/close + submit ----------
       function openCustomModelModal(alias) {
         var model = alias ? findCustomModel(alias) : null;
@@ -4698,7 +4634,6 @@ async fn dashboard() -> impl IntoResponse {
         customModelEditorState.lastFocusedTargetId = null;
         closeCustomModelAccountPickers();
         renderCustomModelEditor();
-        renderCustomModelAccountKeys();
         renderCustomModelFieldErrors();
         setText('customModelStatus', '');
         openModal('customModelModal');
@@ -4869,6 +4804,7 @@ async fn dashboard() -> impl IntoResponse {
             if (!Number.isFinite(w) || w < 1) w = 1;
             el.value = String(w);
             patchCustomModelTarget(tid, { weight: w });
+            renderCustomModelPreview();
             return;
           }
           if (field === 'enabled') {
@@ -5615,11 +5551,6 @@ async fn dashboard() -> impl IntoResponse {
             <div id="customModelSteps" class="custom-model-steps"></div>
             <div><button type="button" id="addCustomStepBtn" class="mini-btn">+ Add fallback step</button></div>
             <div id="customModelAliasError" class="custom-model-field-error"></div>
-          </div>
-          <div class="custom-model-form-row">
-            <label>Account keys</label>
-            <div class="muted">Quick "Use" selects the key on the most recently focused target.</div>
-            <div id="customModelAccountKeys" class="custom-model-account-list muted">Loading account keys...</div>
           </div>
           <div class="custom-model-form-row">
             <label>Preview</label>
