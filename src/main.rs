@@ -1365,6 +1365,42 @@ async fn dashboard() -> impl IntoResponse {
         border-radius: 50%;
         background: var(--warning);
       }
+      .account-attention-details {
+        clear: both;
+        margin-top: 8px;
+        line-height: 1.45;
+      }
+      .account-attention-details summary {
+        cursor: pointer;
+        color: var(--secondary-text);
+        font-weight: 700;
+      }
+      .attention-count {
+        color: var(--muted);
+      }
+      .attention-list {
+        display: grid;
+        gap: 8px;
+        margin-top: 6px;
+      }
+      .attention-item,
+      .attention-empty {
+        padding: 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-alt);
+      }
+      .attention-title {
+        color: var(--text);
+        font-weight: 700;
+        overflow-wrap: anywhere;
+      }
+      .attention-detail {
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
       .stat-pills {
         display: flex;
         gap: 6px;
@@ -2230,6 +2266,7 @@ async fn dashboard() -> impl IntoResponse {
       const openAccountDetails = {
         models: new Set(),
         connection: new Set(),
+        attention: new Set(),
         resetCredits: new Set()
       };
       let activeTipEl = null;
@@ -2780,14 +2817,46 @@ async fn dashboard() -> impl IntoResponse {
         const values = accountQuotaPercents(provider, quota);
         return values.length ? Math.max.apply(Math, values) : 0;
       }
-      function accountAttentionReasons(item) {
+      function accountAttentionItems(item) {
+        const provider = item.provider;
         const account = item.account || {};
-        const reasons = [];
-        if (account.enabled === false) reasons.push('disabled');
-        if (isExpired(account.expired_at)) reasons.push('expired tokens');
-        if (hasCurrentError(account)) reasons.push('errors');
-        if (maxAccountQuotaPercent(item.provider, account) >= 75) reasons.push('near quota');
-        return reasons;
+        const items = [];
+        if (account.enabled === false) {
+          items.push({
+            key: 'disabled',
+            title: 'Disabled account',
+            detail: 'This account is disabled and will not be selected until it is enabled.'
+          });
+        }
+        if (isExpired(account.expired_at)) {
+          items.push({
+            key: 'expired tokens',
+            title: 'Saved token expired',
+            detail: 'Saved token expired at ' + account.expired_at + '. Re-authenticate this account before using it.'
+          });
+        }
+        if (hasCurrentError(account)) {
+          var errorDetail = 'Total recorded errors: ' + formatNumber(account.errors || 0) + '.';
+          if (account.last_error_at) errorDetail += ' Last error: ' + account.last_error_at + '.';
+          if (account.last_success_at) errorDetail += ' Last success: ' + account.last_success_at + '.';
+          items.push({
+            key: 'errors',
+            title: 'Current errors',
+            detail: errorDetail
+          });
+        }
+        var maxQuota = maxAccountQuotaPercent(provider, account);
+        if (maxQuota >= 75) {
+          items.push({
+            key: 'near quota',
+            title: maxQuota >= 95 ? 'Quota almost exhausted' : 'Quota usage is high',
+            detail: 'Highest tracked quota usage is ' + maxQuota.toFixed(1) + '%. Requests may be throttled or fail until the quota resets.'
+          });
+        }
+        return items;
+      }
+      function accountAttentionReasons(item) {
+        return accountAttentionItems(item).map(function(reason) { return reason.key; });
       }
       function allAccountsWithProvider() {
         const out = [];
@@ -3488,6 +3557,22 @@ async fn dashboard() -> impl IntoResponse {
           + rows.join('')
           + '</div></details>';
       }
+      function renderAttentionDetails(provider, a, fallbackKey) {
+        var key = accountDetailStateKey(provider || 'account', a, fallbackKey);
+        var items = accountAttentionItems({ provider: provider, account: a });
+        var html = '<details class="account-attention-details muted"' + detailToggleAttrs('attention', key) + '><summary>Attention needed <span class="attention-count">(' + items.length + ')</span></summary>';
+        if (!items.length) {
+          return html + '<div class="attention-empty">No account attention needed from the available dashboard data.</div></details>';
+        }
+        html += '<div class="attention-list">';
+        html += items.map(function(item) {
+          return '<div class="attention-item">'
+            + '<div class="attention-title">' + escapeHtml(item.title) + '</div>'
+            + '<div class="attention-detail">' + escapeHtml(item.detail) + '</div>'
+            + '</div>';
+        }).join('');
+        return html + '</div></details>';
+      }
       function renderMetaLine(label, value, code) {
         if (value == null || value === '') return '';
         return '<div><span>' + escapeHtml(label) + ': </span>'
@@ -3651,6 +3736,7 @@ async fn dashboard() -> impl IntoResponse {
           + renderCodexResetCredits(a, quota)
           + renderAccountModels(a, quota, 'codex', key)
           + renderMetaDetails(connectionRows('codex', a), 'Connection details', 'codex', a, key)
+          + renderAttentionDetails('codex', a, key)
           + '</div>';
       }
       async function refresh() {
@@ -3694,6 +3780,7 @@ async fn dashboard() -> impl IntoResponse {
           + renderQuotaBars(quota, { provider: provider, key: key })
           + renderAccountModels(a, quota, provider, key)
           + renderMetaDetails(connectionRows(provider, a), 'Connection details', provider, a, key)
+          + renderAttentionDetails(provider, a, key)
           + '</div>';
       }
       function buildQwenCard(a, quota) {
@@ -3719,6 +3806,7 @@ async fn dashboard() -> impl IntoResponse {
           + renderQuotaBars(quota, { provider: 'qwen', key: a.file_name || a.label || a.email || a.account_id || '' })
           + renderAccountModels(a, quota, 'qwen', a.file_name || a.label || a.email || a.account_id || '')
           + renderMetaDetails(connectionRows('qwen', a), 'Connection details', 'qwen', a, a.file_name || a.label || a.email || a.account_id || '')
+          + renderAttentionDetails('qwen', a, a.file_name || a.label || a.email || a.account_id || '')
           + '</div>';
       }
       function buildGrokCard(a, quota) {
@@ -3778,6 +3866,7 @@ async fn dashboard() -> impl IntoResponse {
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quotaPayload, { provider: 'grok', key: a.file_name || a.label || a.email || a.account_id || '' })
           + renderMetaDetails(connectionRows('grok', a), 'Connection details', 'grok', a, a.file_name || a.label || a.email || a.account_id || '')
+          + renderAttentionDetails('grok', a, a.file_name || a.label || a.email || a.account_id || '')
           + renderAccountModels(a, null, 'grok', a.file_name || a.label || a.email || a.account_id || '')
           + '</div>';
       }
@@ -3883,6 +3972,7 @@ async fn dashboard() -> impl IntoResponse {
           + renderQuotaBars(quota, { provider: 'minimax', key: a.file_name || a.label || a.account_id || '' })
           + renderAccountModels(a, quota, 'minimax', a.file_name || a.label || a.account_id || '')
           + renderMetaDetails(connectionRows('minimax', a), 'Connection details', 'minimax', a, a.file_name || a.label || a.account_id || '')
+          + renderAttentionDetails('minimax', a, a.file_name || a.label || a.account_id || '')
           + '</div>';
       }
       let lastMiniMaxQuota = new Map();
@@ -3929,6 +4019,7 @@ async fn dashboard() -> impl IntoResponse {
           + renderQuotaBars(quota, { provider: 'copilot', key: a.file_name || a.label || a.login || a.account_id || '' })
           + renderAccountModels(a, quota, 'copilot', a.file_name || a.label || a.login || a.account_id || '')
           + renderMetaDetails(connectionRows('copilot', a), 'Connection details', 'copilot', a, a.file_name || a.label || a.login || a.account_id || '')
+          + renderAttentionDetails('copilot', a, a.file_name || a.label || a.login || a.account_id || '')
           + '</div>';
       }
       async function refreshCopilotAccounts() {
@@ -3982,6 +4073,7 @@ async fn dashboard() -> impl IntoResponse {
           + renderQuotaBars(quota, { provider: 'claude', key: a.file_name || a.label || a.organization_uuid || a.account_id || '' })
           + renderAccountModels(a, quota, 'claude', a.file_name || a.label || a.organization_uuid || a.account_id || '')
           + renderMetaDetails(connectionRows('claude', a), 'Connection details', 'claude', a, a.file_name || a.label || a.organization_uuid || a.account_id || '')
+          + renderAttentionDetails('claude', a, a.file_name || a.label || a.organization_uuid || a.account_id || '')
           + '</div>';
       }
       async function refreshClaudeAccounts() {
@@ -4031,6 +4123,7 @@ async fn dashboard() -> impl IntoResponse {
           + renderQuotaBars(quota, { provider: 'glm', key: a.file_name || a.label || a.account_id || '' })
           + renderAccountModels(a, quota, 'glm', a.file_name || a.label || a.account_id || '')
           + renderMetaDetails(connectionRows('glm', a), 'Connection details', 'glm', a, a.file_name || a.label || a.account_id || '')
+          + renderAttentionDetails('glm', a, a.file_name || a.label || a.account_id || '')
           + '</div>';
       }
       async function refreshGlmAccounts() {
