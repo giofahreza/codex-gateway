@@ -3535,14 +3535,21 @@ async fn dashboard() -> impl IntoResponse {
         const title = 'Attention: ' + label;
         return '<span class="attention-account-badge" title="' + escapeHtml(title) + '" aria-label="' + escapeHtml(title) + '">' + escapeHtml(label) + '</span>';
       }
-      function renderAccountHeader(title, provider, a) {
+      function renderCardHeader(title, badgesHtml, actionsHtml) {
         return '<div class="card-header">'
           + '<div class="card-identity">'
           + '<span class="card-email">' + escapeHtml(title) + '</span>'
-          + '<div class="card-badges">' + renderAccountState(a) + renderAttentionBadge(provider, a) + '</div>'
+          + '<div class="card-badges">' + badgesHtml + '</div>'
           + '</div>'
-          + '<span class="card-actions">' + renderAccountActions(a) + '</span>'
+          + '<span class="card-actions">' + (actionsHtml || '') + '</span>'
           + '</div>';
+      }
+      function renderAccountHeader(title, provider, a) {
+        return renderCardHeader(
+          title,
+          renderAccountState(a) + renderAttentionBadge(provider, a),
+          renderAccountActions(a)
+        );
       }
       function renderAccountActions(a) {
         if (!a || !a.file_name) {
@@ -3563,6 +3570,27 @@ async fn dashboard() -> impl IntoResponse {
           + '<button type="button" role="menuitem" aria-label="' + escapeHtml('Delete ' + label) + '" onclick="deleteCred(' + fileArg + ', ' + labelArg + ')" class="mini-btn action-btn danger">Delete</button>'
           + '</span>'
           + '</span>';
+      }
+      function renderCustomModelActions(alias, title) {
+        const normalizedAlias = normalizeCustomAlias(alias);
+        const label = title || ('ctm:' + normalizedAlias);
+        const menuId = accountActionMenuId('custom-model:' + normalizedAlias);
+        const menuArg = escapeHtml(jsString(menuId));
+        const aliasArg = escapeHtml(jsString(normalizedAlias));
+        return '<span class="account-menu-wrap">'
+          + '<button type="button" class="mini-btn account-menu-button" aria-label="' + escapeHtml('Open actions for ' + label) + '" aria-haspopup="menu" aria-expanded="false" aria-controls="' + escapeHtml(menuId) + '" onclick="toggleAccountActionMenu(event, ' + menuArg + ')">&#8942;</button>'
+          + '<span id="' + escapeHtml(menuId) + '" class="account-action-menu" role="menu" hidden onclick="event.stopPropagation()">'
+          + '<button type="button" role="menuitem" aria-label="' + escapeHtml('Edit ' + label) + '" onclick="openCustomModelModal(' + aliasArg + ')" class="mini-btn action-btn">Edit</button>'
+          + '<button type="button" role="menuitem" aria-label="' + escapeHtml('Delete ' + label) + '" onclick="deleteCustomModel(' + aliasArg + ')" class="mini-btn action-btn danger">Delete</button>'
+          + '</span>'
+          + '</span>';
+      }
+      function renderCustomModelHeader(title, model) {
+        return renderCardHeader(
+          title,
+          renderAccountState({ enabled: model && model.enabled }),
+          renderCustomModelActions(model && model.alias, title)
+        );
       }
       function accountDetailStateKey(provider, a, fallback) {
         return provider + ':' + (accountKey(a) || fallback || accountLabel(a));
@@ -4248,7 +4276,6 @@ async fn dashboard() -> impl IntoResponse {
         var alias = normalizeCustomAlias(model.alias);
         var publicId = customModelPublicId(model);
         var title = model.display_name || alias || publicId;
-        var state = renderAccountState({ enabled: model.enabled });
         var routes = customRoutes(model);
         var enabledGroups = routes.filter(function(group) {
           return enabledCustomTargets(group && group.targets).length > 0;
@@ -4264,12 +4291,8 @@ async fn dashboard() -> impl IntoResponse {
               return renderCustomTargetRow('Step ' + (index + 1), group.targets, 'No targets');
             }).join('')
           : '<div class="muted">No enabled route targets</div>';
-        var editArg = escapeHtml(jsString(alias));
         return '<div class="card custom-model-card">'
-          + '<div class="card-header"><span class="card-email">' + escapeHtml(title) + '</span>' + state + '<span class="card-actions">'
-          + '<button type="button" class="mini-btn" onclick="openCustomModelModal(' + editArg + ')">Edit</button>'
-          + '<button type="button" class="mini-btn danger" onclick="deleteCustomModel(' + editArg + ')">Delete</button>'
-          + '</span></div>'
+          + renderCustomModelHeader(title, model)
           + '<div class="stat-pills">'
           + '<span class="stat-pill"><span class="stat-pill-label">id</span><span class="stat-pill-value"><code>' + escapeHtml(publicId) + '</code></span></span>'
           + '<span class="stat-pill"><span class="stat-pill-label">steps</span><span class="stat-pill-value">' + routeGroupCount + '</span></span>'
