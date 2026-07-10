@@ -1368,33 +1368,6 @@ async fn dashboard() -> impl IntoResponse {
         border-radius: 50%;
         background: var(--warning);
       }
-      .account-latest-error {
-        margin: 0 0 10px;
-        padding: 10px 12px;
-        border: 1px solid rgba(239, 68, 68, 0.28);
-        border-radius: 8px;
-        background: rgba(239, 68, 68, 0.08);
-      }
-      .account-latest-error-title {
-        color: var(--text);
-        font-size: 12px;
-        font-weight: 800;
-        text-transform: uppercase;
-      }
-      .account-latest-error-meta {
-        margin-top: 2px;
-        color: var(--muted);
-        font-size: 12px;
-      }
-      .account-latest-error-message {
-        margin-top: 6px;
-        color: var(--text);
-        font-size: 12px;
-        line-height: 1.45;
-        white-space: pre-wrap;
-        overflow-wrap: anywhere;
-        word-break: break-word;
-      }
       .account-attention-details {
         clear: both;
         margin-top: 8px;
@@ -3545,19 +3518,6 @@ async fn dashboard() -> impl IntoResponse {
         const title = 'Attention: ' + label;
         return '<span class="attention-account-badge" title="' + escapeHtml(title) + '" aria-label="' + escapeHtml(title) + '">' + escapeHtml(label) + '</span>';
       }
-      function latestErrorMessage(account) {
-        return String(account && account.last_error_message || '').trim();
-      }
-      function renderLatestErrorBlock(account) {
-        var message = latestErrorMessage(account);
-        var recordedAt = account && account.last_error_at ? String(account.last_error_at) : '';
-        if (!message && !recordedAt) return '';
-        return '<div class="account-latest-error">'
-          + '<div class="account-latest-error-title">Latest error</div>'
-          + '<div class="account-latest-error-meta">' + escapeHtml(recordedAt ? 'Recorded at ' + recordedAt : 'Recorded time unavailable') + '</div>'
-          + '<div class="account-latest-error-message">' + escapeHtml(message || 'No stored error detail is available for this account yet.') + '</div>'
-          + '</div>';
-      }
       function renderAccountActions(a) {
         if (!a || !a.file_name) {
           return '';
@@ -3782,7 +3742,6 @@ async fn dashboard() -> impl IntoResponse {
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>'
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
           + '</div>'
-          + renderLatestErrorBlock(a)
           + renderQuotaBars(quota, { provider: 'codex', key: key })
           + renderCodexResetCredits(a, quota)
           + renderAccountModels(a, quota, 'codex', key)
@@ -3828,7 +3787,6 @@ async fn dashboard() -> impl IntoResponse {
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>'
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
           + extra + '</div>'
-          + renderLatestErrorBlock(a)
           + renderQuotaBars(quota, { provider: provider, key: key })
           + renderAccountModels(a, quota, provider, key)
           + renderMetaDetails(connectionRows(provider, a), 'Connection details', provider, a, key)
@@ -3855,7 +3813,6 @@ async fn dashboard() -> impl IntoResponse {
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.email || a.account_id || 'N/A') + '</span>' + renderAccountState(a) + renderAttentionBadge('qwen', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
-          + renderLatestErrorBlock(a)
           + renderQuotaBars(quota, { provider: 'qwen', key: a.file_name || a.label || a.email || a.account_id || '' })
           + renderAccountModels(a, quota, 'qwen', a.file_name || a.label || a.email || a.account_id || '')
           + renderMetaDetails(connectionRows('qwen', a), 'Connection details', 'qwen', a, a.file_name || a.label || a.email || a.account_id || '')
@@ -3917,7 +3874,6 @@ async fn dashboard() -> impl IntoResponse {
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + escapeHtml(a.name || a.label || a.email || a.account_id || 'N/A') + '</span>' + renderAccountState(a) + renderAttentionBadge('grok', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
-          + renderLatestErrorBlock(a)
           + renderQuotaBars(quotaPayload, { provider: 'grok', key: a.file_name || a.label || a.email || a.account_id || '' })
           + renderMetaDetails(connectionRows('grok', a), 'Connection details', 'grok', a, a.file_name || a.label || a.email || a.account_id || '')
           + renderAttentionDetails('grok', a, a.file_name || a.label || a.email || a.account_id || '')
@@ -4023,7 +3979,6 @@ async fn dashboard() -> impl IntoResponse {
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.account_id || 'MiniMax') + '</span>' + renderAccountState(a) + renderAttentionBadge('minimax', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
-          + renderLatestErrorBlock(a)
           + renderQuotaBars(quota, { provider: 'minimax', key: a.file_name || a.label || a.account_id || '' })
           + renderAccountModels(a, quota, 'minimax', a.file_name || a.label || a.account_id || '')
           + renderMetaDetails(connectionRows('minimax', a), 'Connection details', 'minimax', a, a.file_name || a.label || a.account_id || '')
@@ -4071,7 +4026,6 @@ async fn dashboard() -> impl IntoResponse {
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.login || a.account_id || 'GitHub Copilot') + '</span>' + renderAccountState(a) + renderAttentionBadge('copilot', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
-          + renderLatestErrorBlock(a)
           + renderQuotaBars(quota, { provider: 'copilot', key: a.file_name || a.label || a.login || a.account_id || '' })
           + renderAccountModels(a, quota, 'copilot', a.file_name || a.label || a.login || a.account_id || '')
           + renderMetaDetails(connectionRows('copilot', a), 'Connection details', 'copilot', a, a.file_name || a.label || a.login || a.account_id || '')
@@ -4126,7 +4080,6 @@ async fn dashboard() -> impl IntoResponse {
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.email || a.organization_uuid || a.account_id || 'Claude') + '</span>' + renderAccountState(a) + renderAttentionBadge('claude', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
-          + renderLatestErrorBlock(a)
           + renderQuotaBars(quota, { provider: 'claude', key: a.file_name || a.label || a.organization_uuid || a.account_id || '' })
           + renderAccountModels(a, quota, 'claude', a.file_name || a.label || a.organization_uuid || a.account_id || '')
           + renderMetaDetails(connectionRows('claude', a), 'Connection details', 'claude', a, a.file_name || a.label || a.organization_uuid || a.account_id || '')
@@ -4177,7 +4130,6 @@ async fn dashboard() -> impl IntoResponse {
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.account_id || 'GLM') + '</span>' + renderAccountState(a) + renderAttentionBadge('glm', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
-          + renderLatestErrorBlock(a)
           + renderQuotaBars(quota, { provider: 'glm', key: a.file_name || a.label || a.account_id || '' })
           + renderAccountModels(a, quota, 'glm', a.file_name || a.label || a.account_id || '')
           + renderMetaDetails(connectionRows('glm', a), 'Connection details', 'glm', a, a.file_name || a.label || a.account_id || '')
