@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::{BufRead, BufReader},
+    path::PathBuf,
+};
 
 #[derive(Clone, Copy)]
 pub enum Provider {
@@ -43,6 +48,14 @@ pub struct StoredAccountUsage {
     pub last_success_at: Option<String>,
     #[serde(default)]
     pub last_error_at: Option<String>,
+    #[serde(default)]
+    pub last_error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LatestErrorMessage {
+    pub recorded_at: String,
+    pub error_message: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -185,4 +198,66 @@ fn file_path(cfg: &crate::Config) -> PathBuf {
 
 fn default_store_type() -> String {
     "gateway_stats".to_string()
+}
+
+pub fn load_latest_error_messages(
+    cfg: &crate::Config,
+) -> Result<HashMap<(String, String), LatestErrorMessage>, String> {
+    let path = if let Some(dir) = cfg.auth_dir.as_ref() {
+        PathBuf::from(dir).join("gateway-usage-history.jsonl")
+    } else {
+        PathBuf::from("gateway-usage-history.jsonl")
+    };
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(err) => return Err(err.to_string()),
+    };
+
+    let reader = BufReader::new(file);
+    let mut latest: HashMap<(String, String), LatestErrorMessage> = HashMap::new();
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(_) => continue,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: crate::usage_store::UsageHistoryEntry = match serde_json::from_str(&line) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if !entry.error {
+            continue;
+        }
+        let Some(error_message) = entry
+            .error_message
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string())
+        else {
+            continue;
+        };
+        let key = (entry.provider.to_ascii_lowercase(), entry.account_key);
+        match latest.get(&key) {
+            Some(current) if current.recorded_at > entry.recorded_at => {}
+            Some(current)
+                if current.recorded_at == entry.recorded_at
+                    && !current.error_message.is_empty() => {}
+            _ => {
+                latest.insert(
+                    key,
+                    LatestErrorMessage {
+                        recorded_at: entry.recorded_at,
+                        error_message,
+                    },
+                );
+            }
+        }
+    }
+
+    Ok(latest)
 }

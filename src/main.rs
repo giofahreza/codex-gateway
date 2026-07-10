@@ -157,6 +157,7 @@ struct AccountUsage {
     last_seen_at: Option<String>,
     last_success_at: Option<String>,
     last_error_at: Option<String>,
+    last_error_message: Option<String>,
 }
 
 #[derive(Default, Clone)]
@@ -203,6 +204,7 @@ struct CounterDelta {
     observed_at: Option<String>,
     success_at: Option<String>,
     error_at: Option<String>,
+    error_message: Option<String>,
 }
 
 #[tokio::main]
@@ -303,6 +305,7 @@ async fn main() {
     };
     migrate_qwen_usage_keys(&state);
     migrate_grok_usage_keys(&state);
+    backfill_last_error_messages_from_history(&state);
     sync_usage_stats(&state);
 
     let app = Router::new()
@@ -1365,6 +1368,33 @@ async fn dashboard() -> impl IntoResponse {
         border-radius: 50%;
         background: var(--warning);
       }
+      .account-latest-error {
+        margin: 0 0 10px;
+        padding: 10px 12px;
+        border: 1px solid rgba(239, 68, 68, 0.28);
+        border-radius: 8px;
+        background: rgba(239, 68, 68, 0.08);
+      }
+      .account-latest-error-title {
+        color: var(--text);
+        font-size: 12px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+      .account-latest-error-meta {
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .account-latest-error-message {
+        margin-top: 6px;
+        color: var(--text);
+        font-size: 12px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
       .account-attention-details {
         clear: both;
         margin-top: 8px;
@@ -1708,6 +1738,11 @@ async fn dashboard() -> impl IntoResponse {
         display: grid;
         gap: 4px;
         margin-top: 6px;
+      }
+      .meta-list > div,
+      .meta-list code {
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }
       .provider-section {
         min-width: 0;
@@ -2838,6 +2873,7 @@ async fn dashboard() -> impl IntoResponse {
         if (hasCurrentError(account)) {
           var errorDetail = 'Total recorded errors: ' + formatNumber(account.errors || 0) + '.';
           if (account.last_error_at) errorDetail += ' Last error: ' + account.last_error_at + '.';
+          if (account.last_error_message) errorDetail += ' Detail: ' + account.last_error_message + '.';
           if (account.last_success_at) errorDetail += ' Last success: ' + account.last_success_at + '.';
           items.push({
             key: 'errors',
@@ -3509,6 +3545,19 @@ async fn dashboard() -> impl IntoResponse {
         const title = 'Attention: ' + label;
         return '<span class="attention-account-badge" title="' + escapeHtml(title) + '" aria-label="' + escapeHtml(title) + '">' + escapeHtml(label) + '</span>';
       }
+      function latestErrorMessage(account) {
+        return String(account && account.last_error_message || '').trim();
+      }
+      function renderLatestErrorBlock(account) {
+        var message = latestErrorMessage(account);
+        var recordedAt = account && account.last_error_at ? String(account.last_error_at) : '';
+        if (!message && !recordedAt) return '';
+        return '<div class="account-latest-error">'
+          + '<div class="account-latest-error-title">Latest error</div>'
+          + '<div class="account-latest-error-meta">' + escapeHtml(recordedAt ? 'Recorded at ' + recordedAt : 'Recorded time unavailable') + '</div>'
+          + '<div class="account-latest-error-message">' + escapeHtml(message || 'No stored error detail is available for this account yet.') + '</div>'
+          + '</div>';
+      }
       function renderAccountActions(a) {
         if (!a || !a.file_name) {
           return '';
@@ -3606,6 +3655,7 @@ async fn dashboard() -> impl IntoResponse {
         rows.push(renderMetaLine('copilot token expiry', firstPresent(a, ['copilot_expires_at']), false));
         rows.push(renderMetaLine('last success', firstPresent(a, ['last_success_at']), false));
         rows.push(renderMetaLine('last error', firstPresent(a, ['last_error_at']), false));
+        rows.push(renderMetaLine('last error detail', firstPresent(a, ['last_error_message']), false));
         rows.push(renderMetaLine('user id', firstPresent(a, ['user_id']), true));
         rows.push(renderMetaLine('team id', a && a.team_id ? a.team_id + (a.team_blocked ? ' (blocked)' : '') : '', true));
         rows.push(renderMetaLine('zdr', firstPresent(a, ['zdr_status']), true));
@@ -3732,6 +3782,7 @@ async fn dashboard() -> impl IntoResponse {
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>'
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
           + '</div>'
+          + renderLatestErrorBlock(a)
           + renderQuotaBars(quota, { provider: 'codex', key: key })
           + renderCodexResetCredits(a, quota)
           + renderAccountModels(a, quota, 'codex', key)
@@ -3777,6 +3828,7 @@ async fn dashboard() -> impl IntoResponse {
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>'
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
           + extra + '</div>'
+          + renderLatestErrorBlock(a)
           + renderQuotaBars(quota, { provider: provider, key: key })
           + renderAccountModels(a, quota, provider, key)
           + renderMetaDetails(connectionRows(provider, a), 'Connection details', provider, a, key)
@@ -3803,6 +3855,7 @@ async fn dashboard() -> impl IntoResponse {
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.email || a.account_id || 'N/A') + '</span>' + renderAccountState(a) + renderAttentionBadge('qwen', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
+          + renderLatestErrorBlock(a)
           + renderQuotaBars(quota, { provider: 'qwen', key: a.file_name || a.label || a.email || a.account_id || '' })
           + renderAccountModels(a, quota, 'qwen', a.file_name || a.label || a.email || a.account_id || '')
           + renderMetaDetails(connectionRows('qwen', a), 'Connection details', 'qwen', a, a.file_name || a.label || a.email || a.account_id || '')
@@ -3864,6 +3917,7 @@ async fn dashboard() -> impl IntoResponse {
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + escapeHtml(a.name || a.label || a.email || a.account_id || 'N/A') + '</span>' + renderAccountState(a) + renderAttentionBadge('grok', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
+          + renderLatestErrorBlock(a)
           + renderQuotaBars(quotaPayload, { provider: 'grok', key: a.file_name || a.label || a.email || a.account_id || '' })
           + renderMetaDetails(connectionRows('grok', a), 'Connection details', 'grok', a, a.file_name || a.label || a.email || a.account_id || '')
           + renderAttentionDetails('grok', a, a.file_name || a.label || a.email || a.account_id || '')
@@ -3969,6 +4023,7 @@ async fn dashboard() -> impl IntoResponse {
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.account_id || 'MiniMax') + '</span>' + renderAccountState(a) + renderAttentionBadge('minimax', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
+          + renderLatestErrorBlock(a)
           + renderQuotaBars(quota, { provider: 'minimax', key: a.file_name || a.label || a.account_id || '' })
           + renderAccountModels(a, quota, 'minimax', a.file_name || a.label || a.account_id || '')
           + renderMetaDetails(connectionRows('minimax', a), 'Connection details', 'minimax', a, a.file_name || a.label || a.account_id || '')
@@ -4016,6 +4071,7 @@ async fn dashboard() -> impl IntoResponse {
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.login || a.account_id || 'GitHub Copilot') + '</span>' + renderAccountState(a) + renderAttentionBadge('copilot', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
+          + renderLatestErrorBlock(a)
           + renderQuotaBars(quota, { provider: 'copilot', key: a.file_name || a.label || a.login || a.account_id || '' })
           + renderAccountModels(a, quota, 'copilot', a.file_name || a.label || a.login || a.account_id || '')
           + renderMetaDetails(connectionRows('copilot', a), 'Connection details', 'copilot', a, a.file_name || a.label || a.login || a.account_id || '')
@@ -4070,6 +4126,7 @@ async fn dashboard() -> impl IntoResponse {
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.email || a.organization_uuid || a.account_id || 'Claude') + '</span>' + renderAccountState(a) + renderAttentionBadge('claude', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
+          + renderLatestErrorBlock(a)
           + renderQuotaBars(quota, { provider: 'claude', key: a.file_name || a.label || a.organization_uuid || a.account_id || '' })
           + renderAccountModels(a, quota, 'claude', a.file_name || a.label || a.organization_uuid || a.account_id || '')
           + renderMetaDetails(connectionRows('claude', a), 'Connection details', 'claude', a, a.file_name || a.label || a.organization_uuid || a.account_id || '')
@@ -4120,6 +4177,7 @@ async fn dashboard() -> impl IntoResponse {
         return '<div class="card">'
           + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.account_id || 'GLM') + '</span>' + renderAccountState(a) + renderAttentionBadge('glm', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
           + '<div class="stat-pills">' + usage + '</div>'
+          + renderLatestErrorBlock(a)
           + renderQuotaBars(quota, { provider: 'glm', key: a.file_name || a.label || a.account_id || '' })
           + renderAccountModels(a, quota, 'glm', a.file_name || a.label || a.account_id || '')
           + renderMetaDetails(connectionRows('glm', a), 'Connection details', 'glm', a, a.file_name || a.label || a.account_id || '')
@@ -6695,7 +6753,8 @@ async fn dashboard_json(State(state): State<AppState>, headers: HeaderMap) -> Re
                 "enabled": enabled,
                 "expired_at": expired_at,
                 "last_success_at": a.last_success_at,
-                "last_error_at": a.last_error_at
+                "last_error_at": a.last_error_at,
+                "last_error_message": a.last_error_message
             })
         })
         .collect();
@@ -11334,6 +11393,7 @@ fn build_usage_stats(
                 last_seen_at: stored.last_seen_at,
                 last_success_at: stored.last_success_at,
                 last_error_at: stored.last_error_at,
+                last_error_message: stored.last_error_message,
             }
         })
         .collect();
@@ -11363,6 +11423,7 @@ fn build_usage_stats(
                 last_seen_at: stored.last_seen_at,
                 last_success_at: stored.last_success_at,
                 last_error_at: stored.last_error_at,
+                last_error_message: stored.last_error_message,
             }
         })
         .collect();
@@ -11392,6 +11453,7 @@ fn build_usage_stats(
                 last_seen_at: stored.last_seen_at,
                 last_success_at: stored.last_success_at,
                 last_error_at: stored.last_error_at,
+                last_error_message: stored.last_error_message,
             }
         })
         .collect();
@@ -11421,6 +11483,7 @@ fn build_usage_stats(
                 last_seen_at: stored.last_seen_at,
                 last_success_at: stored.last_success_at,
                 last_error_at: stored.last_error_at,
+                last_error_message: stored.last_error_message,
             }
         })
         .collect();
@@ -11450,6 +11513,7 @@ fn build_usage_stats(
                 last_seen_at: stored.last_seen_at,
                 last_success_at: stored.last_success_at,
                 last_error_at: stored.last_error_at,
+                last_error_message: stored.last_error_message,
             }
         })
         .collect();
@@ -11483,6 +11547,7 @@ fn build_usage_stats(
                 last_seen_at: stored.last_seen_at,
                 last_success_at: stored.last_success_at,
                 last_error_at: stored.last_error_at,
+                last_error_message: stored.last_error_message,
             }
         })
         .collect();
@@ -11512,6 +11577,7 @@ fn build_usage_stats(
                 last_seen_at: stored.last_seen_at,
                 last_success_at: stored.last_success_at,
                 last_error_at: stored.last_error_at,
+                last_error_message: stored.last_error_message,
             }
         })
         .collect();
@@ -11541,6 +11607,7 @@ fn build_usage_stats(
                 last_seen_at: stored.last_seen_at,
                 last_success_at: stored.last_success_at,
                 last_error_at: stored.last_error_at,
+                last_error_message: stored.last_error_message,
             }
         })
         .collect();
@@ -11570,6 +11637,7 @@ fn build_usage_stats(
                 last_seen_at: stored.last_seen_at,
                 last_success_at: stored.last_success_at,
                 last_error_at: stored.last_error_at,
+                last_error_message: stored.last_error_message,
             }
         })
         .collect();
@@ -11599,6 +11667,7 @@ fn build_usage_stats(
                 last_seen_at: stored.last_seen_at,
                 last_success_at: stored.last_success_at,
                 last_error_at: stored.last_error_at,
+                last_error_message: stored.last_error_message,
             }
         })
         .collect();
@@ -11854,7 +11923,14 @@ fn merge_usage(
     target.last_seen_at = latest_timestamp(target.last_seen_at.take(), source.last_seen_at);
     target.last_success_at =
         latest_timestamp(target.last_success_at.take(), source.last_success_at);
-    target.last_error_at = latest_timestamp(target.last_error_at.take(), source.last_error_at);
+    let (last_error_at, last_error_message) = merge_latest_error_details(
+        target.last_error_at.take(),
+        target.last_error_message.take(),
+        source.last_error_at,
+        source.last_error_message,
+    );
+    target.last_error_at = last_error_at;
+    target.last_error_message = last_error_message;
 }
 
 pub(crate) fn minimax_stats_key(account: &target::minimax::accounts::MiniMaxAccount) -> String {
@@ -12657,6 +12733,96 @@ fn latest_timestamp(current: Option<String>, incoming: Option<String>) -> Option
     }
 }
 
+fn merge_latest_error_details(
+    current_at: Option<String>,
+    current_message: Option<String>,
+    incoming_at: Option<String>,
+    incoming_message: Option<String>,
+) -> (Option<String>, Option<String>) {
+    match (current_at, incoming_at) {
+        (Some(current_at), Some(incoming_at)) if current_at > incoming_at => {
+            (Some(current_at), current_message)
+        }
+        (Some(current_at), Some(incoming_at)) if incoming_at > current_at => {
+            (Some(incoming_at), incoming_message)
+        }
+        (Some(current_at), Some(_)) => (Some(current_at), incoming_message.or(current_message)),
+        (Some(current_at), None) => (Some(current_at), current_message),
+        (None, Some(incoming_at)) => (Some(incoming_at), incoming_message),
+        (None, None) => (None, current_message.or(incoming_message)),
+    }
+}
+
+fn provider_from_history_name(name: &str) -> Option<Provider> {
+    if name.eq_ignore_ascii_case("codex") {
+        Some(Provider::Codex)
+    } else if name.eq_ignore_ascii_case("antigravity") {
+        Some(Provider::Antigravity)
+    } else if name.eq_ignore_ascii_case("gemini") {
+        Some(Provider::Gemini)
+    } else if name.eq_ignore_ascii_case("qwen") {
+        Some(Provider::Qwen)
+    } else if name.eq_ignore_ascii_case("deepseek") {
+        Some(Provider::DeepSeek)
+    } else if name.eq_ignore_ascii_case("grok") {
+        Some(Provider::Grok)
+    } else if name.eq_ignore_ascii_case("minimax") {
+        Some(Provider::MiniMax)
+    } else if name.eq_ignore_ascii_case("copilot") {
+        Some(Provider::Copilot)
+    } else if name.eq_ignore_ascii_case("claude") {
+        Some(Provider::Claude)
+    } else if name.eq_ignore_ascii_case("glm") {
+        Some(Provider::Glm)
+    } else {
+        None
+    }
+}
+
+fn backfill_last_error_messages_from_history(state: &AppState) {
+    let latest_messages = match stats_store::load_latest_error_messages(&state.cfg) {
+        Ok(messages) => messages,
+        Err(err) => {
+            error!(
+                "failed to load latest error messages from usage history: {}",
+                err
+            );
+            return;
+        }
+    };
+    if latest_messages.is_empty() {
+        return;
+    }
+
+    let mut changed = false;
+    {
+        let mut persisted = state.persisted_stats.lock().unwrap();
+        for ((provider_name, account_key), latest) in latest_messages {
+            let Some(provider) = provider_from_history_name(&provider_name) else {
+                continue;
+            };
+            let entry = persisted.account_usage_mut(provider, account_key);
+            if entry.last_error_at.as_deref() != Some(latest.recorded_at.as_str()) {
+                continue;
+            }
+            if entry
+                .last_error_message
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some()
+            {
+                continue;
+            }
+            entry.last_error_message = Some(latest.error_message);
+            changed = true;
+        }
+    }
+    if changed {
+        persist_stats_store(state);
+    }
+}
+
 fn persist_stats_store(state: &AppState) {
     let snapshot = state.persisted_stats.lock().unwrap().clone();
     if let Err(err) = stats_store::save(&state.cfg, &snapshot) {
@@ -12798,6 +12964,9 @@ fn update_account_counters(
         if let Some(error_at) = delta.error_at {
             entry.last_error_at = Some(error_at);
         }
+        if let Some(error_message) = delta.error_message {
+            entry.last_error_message = Some(error_message);
+        }
     }
     persist_stats_store(state);
     sync_usage_stats(state);
@@ -12833,6 +13002,7 @@ fn record_request_error(state: &AppState, context: &UsageContext, message: impl 
             prompt_error_total_delta: if context.prompt.is_prompt { 1 } else { 0 },
             observed_at: Some(observed_at.clone()),
             error_at: Some(observed_at.clone()),
+            error_message: Some(message.clone()),
             ..Default::default()
         },
     );

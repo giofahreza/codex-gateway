@@ -39,6 +39,7 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
                         u.reasoning_tokens,
                         u.last_success_at.clone(),
                         u.last_error_at.clone(),
+                        u.last_error_message.clone(),
                     ),
                 )
             })
@@ -63,10 +64,11 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
                 reasoning_tokens,
                 last_success_at,
                 last_error_at,
+                last_error_message,
             ) = usage_by_key
                 .get(&stats_key)
                 .cloned()
-                .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, None, None));
+                .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, None, None, None));
             serde_json::json!({
                 "account_id": a.user_id.as_ref().or(a.email.as_ref()).cloned().unwrap_or_else(|| a.label.clone()),
                 "label": a.label,
@@ -93,6 +95,7 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
                 "reasoning_tokens": reasoning_tokens,
                 "last_success_at": last_success_at,
                 "last_error_at": last_error_at,
+                "last_error_message": last_error_message,
                 "expired_at": a.expires_at
             })
         })

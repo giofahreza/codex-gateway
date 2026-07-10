@@ -69,7 +69,8 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
                 "cache_tokens": usage.cache_tokens,
                 "reasoning_tokens": usage.reasoning_tokens,
                 "last_success_at": usage.last_success_at,
-                "last_error_at": usage.last_error_at
+                "last_error_at": usage.last_error_at,
+                "last_error_message": usage.last_error_message
             })
         })
         .collect::<Vec<_>>();

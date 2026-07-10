@@ -146,6 +146,9 @@ pub(crate) struct DashboardAccount {
     file_name: Option<String>,
     enabled: bool,
     expired_at: Option<String>,
+    last_success_at: Option<String>,
+    last_error_at: Option<String>,
+    last_error_message: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
