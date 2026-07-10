@@ -1295,16 +1295,31 @@ async fn dashboard() -> impl IntoResponse {
       .card:hover { border-color: var(--muted); }
       .card-header {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         gap: 10px;
         margin-bottom: 10px;
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
+      }
+      .card-identity {
+        min-width: 0;
+        flex: 1 1 auto;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 4px;
       }
       .card-email {
         min-width: 0;
         overflow-wrap: anywhere;
         font-weight: 800;
         font-size: 14px;
+        line-height: 1.2;
+      }
+      .card-badges {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
       }
       .card-actions {
         margin-left: auto;
@@ -3512,11 +3527,22 @@ async fn dashboard() -> impl IntoResponse {
           + '</span>';
       }
       function renderAttentionBadge(provider, a) {
-        const reasons = accountAttentionReasons({ provider: provider, account: a });
+        const reasons = accountAttentionReasons({ provider: provider, account: a }).filter(function(reason) {
+          return reason !== 'disabled';
+        });
         if (!reasons.length) return '';
         const label = reasons.join(' / ');
         const title = 'Attention: ' + label;
         return '<span class="attention-account-badge" title="' + escapeHtml(title) + '" aria-label="' + escapeHtml(title) + '">' + escapeHtml(label) + '</span>';
+      }
+      function renderAccountHeader(title, provider, a) {
+        return '<div class="card-header">'
+          + '<div class="card-identity">'
+          + '<span class="card-email">' + escapeHtml(title) + '</span>'
+          + '<div class="card-badges">' + renderAccountState(a) + renderAttentionBadge(provider, a) + '</div>'
+          + '</div>'
+          + '<span class="card-actions">' + renderAccountActions(a) + '</span>'
+          + '</div>';
       }
       function renderAccountActions(a) {
         if (!a || !a.file_name) {
@@ -3737,7 +3763,7 @@ async fn dashboard() -> impl IntoResponse {
       function buildCard(a, quota) {
         var key = a.file_name || a.label;
         return '<div class="card">'
-          + '<div class="card-header"><span class="card-email">' + escapeHtml(accountLabel(a)) + '</span>' + renderAccountState(a) + renderAttentionBadge('codex', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
+          + renderAccountHeader(accountLabel(a), 'codex', a)
           + '<div class="stat-pills">'
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>'
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
@@ -3782,7 +3808,7 @@ async fn dashboard() -> impl IntoResponse {
         if (a.email) extra += '<span class="stat-pill"><span class="stat-pill-label">email</span><span class="stat-pill-value">' + escapeHtml(a.email) + '</span></span>';
         if (a.project_id) extra += '<span class="stat-pill"><span class="stat-pill-label">project</span><span class="stat-pill-value"><code>' + escapeHtml(a.project_id) + '</code></span></span>';
         return '<div class="card">'
-          + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.email || a.account_id || 'N/A') + '</span>' + renderAccountState(a) + renderAttentionBadge(provider, a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
+          + renderAccountHeader(a.label || a.email || a.account_id || 'N/A', provider, a)
           + '<div class="stat-pills">'
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.requests || 0) + '</span><span class="stat-pill-label">req</span></span>'
           + '<span class="stat-pill"><span class="stat-pill-value">' + (a.errors || 0) + '</span><span class="stat-pill-label">err</span></span>'
@@ -3811,7 +3837,7 @@ async fn dashboard() -> impl IntoResponse {
           usage += '<span class="stat-pill"><span class="stat-pill-label">email</span><span class="stat-pill-value">' + escapeHtml(a.email) + '</span></span>';
         }
         return '<div class="card">'
-          + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.email || a.account_id || 'N/A') + '</span>' + renderAccountState(a) + renderAttentionBadge('qwen', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
+          + renderAccountHeader(a.label || a.email || a.account_id || 'N/A', 'qwen', a)
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quota, { provider: 'qwen', key: a.file_name || a.label || a.email || a.account_id || '' })
           + renderAccountModels(a, quota, 'qwen', a.file_name || a.label || a.email || a.account_id || '')
@@ -3872,7 +3898,7 @@ async fn dashboard() -> impl IntoResponse {
           if (quota.note) quotaPayload.status_msg = quota.note;
         }
         return '<div class="card">'
-          + '<div class="card-header"><span class="card-email">' + escapeHtml(a.name || a.label || a.email || a.account_id || 'N/A') + '</span>' + renderAccountState(a) + renderAttentionBadge('grok', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
+          + renderAccountHeader(a.name || a.label || a.email || a.account_id || 'N/A', 'grok', a)
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quotaPayload, { provider: 'grok', key: a.file_name || a.label || a.email || a.account_id || '' })
           + renderMetaDetails(connectionRows('grok', a), 'Connection details', 'grok', a, a.file_name || a.label || a.email || a.account_id || '')
@@ -3977,7 +4003,7 @@ async fn dashboard() -> impl IntoResponse {
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.output_tokens || 0) + '</span><span class="stat-pill-label">out tok</span></span>';
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.total_tokens || 0) + '</span><span class="stat-pill-label">total tok</span></span>';
         return '<div class="card">'
-          + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.account_id || 'MiniMax') + '</span>' + renderAccountState(a) + renderAttentionBadge('minimax', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
+          + renderAccountHeader(a.label || a.account_id || 'MiniMax', 'minimax', a)
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quota, { provider: 'minimax', key: a.file_name || a.label || a.account_id || '' })
           + renderAccountModels(a, quota, 'minimax', a.file_name || a.label || a.account_id || '')
@@ -4024,7 +4050,7 @@ async fn dashboard() -> impl IntoResponse {
           usage += '<span class="stat-pill"><span class="stat-pill-label">type</span><span class="stat-pill-value">' + escapeHtml(a.account_type) + '</span></span>';
         }
         return '<div class="card">'
-          + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.login || a.account_id || 'GitHub Copilot') + '</span>' + renderAccountState(a) + renderAttentionBadge('copilot', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
+          + renderAccountHeader(a.label || a.login || a.account_id || 'GitHub Copilot', 'copilot', a)
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quota, { provider: 'copilot', key: a.file_name || a.label || a.login || a.account_id || '' })
           + renderAccountModels(a, quota, 'copilot', a.file_name || a.label || a.login || a.account_id || '')
@@ -4078,7 +4104,7 @@ async fn dashboard() -> impl IntoResponse {
           usage += '<span class="stat-pill"><span class="stat-pill-label">email</span><span class="stat-pill-value">' + escapeHtml(a.email) + '</span></span>';
         }
         return '<div class="card">'
-          + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.email || a.organization_uuid || a.account_id || 'Claude') + '</span>' + renderAccountState(a) + renderAttentionBadge('claude', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
+          + renderAccountHeader(a.label || a.email || a.organization_uuid || a.account_id || 'Claude', 'claude', a)
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quota, { provider: 'claude', key: a.file_name || a.label || a.organization_uuid || a.account_id || '' })
           + renderAccountModels(a, quota, 'claude', a.file_name || a.label || a.organization_uuid || a.account_id || '')
@@ -4128,7 +4154,7 @@ async fn dashboard() -> impl IntoResponse {
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.output_tokens || 0) + '</span><span class="stat-pill-label">out tok</span></span>';
         usage += '<span class="stat-pill"><span class="stat-pill-value">' + (a.total_tokens || 0) + '</span><span class="stat-pill-label">total tok</span></span>';
         return '<div class="card">'
-          + '<div class="card-header"><span class="card-email">' + escapeHtml(a.label || a.account_id || 'GLM') + '</span>' + renderAccountState(a) + renderAttentionBadge('glm', a) + '<span class="card-actions">' + renderAccountActions(a) + '</span></div>'
+          + renderAccountHeader(a.label || a.account_id || 'GLM', 'glm', a)
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quota, { provider: 'glm', key: a.file_name || a.label || a.account_id || '' })
           + renderAccountModels(a, quota, 'glm', a.file_name || a.label || a.account_id || '')
