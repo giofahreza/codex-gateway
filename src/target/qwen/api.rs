@@ -28,7 +28,7 @@ const QWEN_MODELS_API_URL: &str = "https://chat.qwen.ai/api/models";
 const QWEN_CHAT_COMPLETIONS_API_URL: &str = "https://qwen.aikit.club/v1/chat/completions";
 
 pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) -> impl IntoResponse {
-    if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
+    if !crate::check_api_key(&state, &headers) {
         return (
             StatusCode::UNAUTHORIZED,
             [("Content-Type", "application/json")],
@@ -107,7 +107,7 @@ pub async fn responses(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
+    if !crate::check_api_key(&state, &headers) {
         return (
             StatusCode::UNAUTHORIZED,
             [("Content-Type", "application/json")],

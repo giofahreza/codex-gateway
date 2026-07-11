@@ -19,7 +19,7 @@ const MODEL_FALLBACKS: &[(&str, &str)] = &[
 ];
 
 pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) -> impl IntoResponse {
-    if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
+    if !crate::check_api_key(&state, &headers) {
         return (
             StatusCode::UNAUTHORIZED,
             [("Content-Type", "application/json")],
@@ -71,7 +71,7 @@ pub async fn responses(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
+    if !crate::check_api_key(&state, &headers) {
         return (
             StatusCode::UNAUTHORIZED,
             [("Content-Type", "application/json")],
@@ -404,7 +404,7 @@ async fn proxy_simple(
     body: &Bytes,
     upstream_suffix: &str,
 ) -> axum::response::Response {
-    if !crate::check_api_key(headers, &state.cfg.proxy_api_key) {
+    if !crate::check_api_key(&state, headers) {
         return (
             StatusCode::UNAUTHORIZED,
             [("Content-Type", "application/json")],

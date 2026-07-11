@@ -312,6 +312,9 @@ mod tests {
                 copilot_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 claude_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 admin_sessions: Arc::new(Mutex::new(HashMap::new())),
+                admin_login_attempts: Arc::new(Mutex::new(HashMap::new())),
+                api_keys: Arc::new(Mutex::new(crate::api_keys::ApiKeyStore::default())),
+                internal_proxy_secret: Arc::new("test-internal-proxy-secret".to_string()),
                 notification_settings: Arc::new(Mutex::new(
                     crate::notifications::NotificationSettings::default(),
                 )),

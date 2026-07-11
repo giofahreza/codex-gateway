@@ -60,7 +60,7 @@ pub async fn responses(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
+    if !crate::check_api_key(&state, &headers) {
         return (
             StatusCode::UNAUTHORIZED,
             [("Content-Type", "application/json")],

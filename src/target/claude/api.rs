@@ -13,7 +13,7 @@ const REQUEST_TIMEOUT_SECS: u64 = 180;
 const DEFAULT_MAX_TOKENS: u64 = 4096;
 
 pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) -> impl IntoResponse {
-    if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
+    if !crate::check_api_key(&state, &headers) {
         return openai_error(
             StatusCode::UNAUTHORIZED,
             "invalid_request_error",
@@ -79,7 +79,7 @@ pub async fn messages(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
+    if !crate::check_api_key(&state, &headers) {
         return anthropic_error(
             StatusCode::UNAUTHORIZED,
             "authentication_error",
@@ -224,7 +224,7 @@ pub async fn responses(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
+    if !crate::check_api_key(&state, &headers) {
         return openai_error(
             StatusCode::UNAUTHORIZED,
             "invalid_request_error",

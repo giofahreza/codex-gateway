@@ -85,7 +85,7 @@ pub async fn messages(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    if !crate::check_api_key(&headers, &state.cfg.proxy_api_key) {
+    if !crate::check_api_key(&state, &headers) {
         return anthropic_error(
             StatusCode::UNAUTHORIZED,
             "authentication_error",

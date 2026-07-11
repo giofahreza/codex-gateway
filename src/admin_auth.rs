@@ -4,7 +4,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -17,6 +17,10 @@ const TOTP_DIGITS: u32 = 6;
 const DEFAULT_SESSION_TTL_SECONDS: u64 = 12 * 60 * 60;
 const MIN_SESSION_TTL_SECONDS: u64 = 300;
 const MAX_SESSION_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
+const LOGIN_FAILURE_WINDOW_SECONDS: u64 = 5 * 60;
+const LOGIN_FAILURE_THRESHOLD: usize = 3;
+const LOGIN_BASE_LOCKOUT_SECONDS: u64 = 5 * 60;
+const LOGIN_MAX_BACKOFF_SHIFT: u32 = 10;
 
 type HmacSha1 = Hmac<Sha1>;
 
@@ -37,9 +41,15 @@ pub(crate) struct AdminSession {
     pub expires_at_unix: u64,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LoginAttemptState {
+    recent_failures_unix: VecDeque<u64>,
+    lockout_level: u32,
+    locked_until_unix: Option<u64>,
+}
+
 #[derive(Deserialize)]
 pub(crate) struct LoginForm {
-    pub api_key: String,
     pub otp: String,
 }
 
@@ -70,14 +80,12 @@ pub(crate) fn is_enabled(cfg: &AdminAuthConfig) -> bool {
             .is_some()
 }
 
-pub(crate) fn is_configured(cfg: &AdminAuthConfig, fallback_api_key: &str) -> bool {
-    !resolved_api_key(cfg, fallback_api_key).trim().is_empty()
-        && cfg
-            .totp_secret
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_some()
+pub(crate) fn is_configured(cfg: &AdminAuthConfig) -> bool {
+    cfg.totp_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
 }
 
 pub(crate) fn session_ttl_seconds(cfg: &AdminAuthConfig) -> u64 {
@@ -88,25 +96,17 @@ pub(crate) fn session_ttl_seconds(cfg: &AdminAuthConfig) -> u64 {
 
 pub(crate) fn verify_login(
     cfg: &AdminAuthConfig,
-    fallback_api_key: &str,
-    api_key: &str,
     otp: &str,
     now: SystemTime,
 ) -> Result<(), String> {
     if !is_enabled(cfg) {
         return Err("admin login is not enabled".to_string());
     }
-    if !is_configured(cfg, fallback_api_key) {
+    if !is_configured(cfg) {
         return Err(
             "admin login is not configured: set admin_auth.totp_secret or ADMIN_AUTH_TOTP_SECRET"
                 .to_string(),
         );
-    }
-    if !timing_safe_eq(
-        resolved_api_key(cfg, fallback_api_key).trim(),
-        api_key.trim(),
-    ) {
-        return Err("invalid API key or OTP".to_string());
     }
     let secret = cfg
         .totp_secret
@@ -118,9 +118,94 @@ pub(crate) fn verify_login(
                 .to_string()
         })?;
     if !verify_totp(secret, otp, now) {
-        return Err("invalid API key or OTP".to_string());
+        return Err("invalid OTP".to_string());
     }
     Ok(())
+}
+
+pub(crate) fn login_client_key(headers: &HeaderMap) -> String {
+    let forwarded_ip = [
+        "cf-connecting-ip",
+        "true-client-ip",
+        "x-real-ip",
+        "x-forwarded-for",
+    ]
+    .iter()
+    .find_map(|header_name| {
+        headers.get(*header_name).and_then(|value| {
+            value.to_str().ok().and_then(|raw| {
+                raw.split(',')
+                    .next()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+            })
+        })
+    });
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+
+    match forwarded_ip {
+        Some(ip) => format!("ip:{}|ua:{}", ip, user_agent),
+        None => format!("ua:{}", user_agent),
+    }
+}
+
+pub(crate) fn current_lockout_message(
+    attempts: &mut HashMap<String, LoginAttemptState>,
+    client_key: &str,
+    now: SystemTime,
+) -> Option<String> {
+    let now_unix = unix_seconds(now);
+    let Some(state) = attempts.get_mut(client_key) else {
+        return None;
+    };
+    prune_attempt_state(state, now_unix);
+    let locked_until = state.locked_until_unix?;
+    if locked_until <= now_unix {
+        state.locked_until_unix = None;
+        prune_attempt_state(state, now_unix);
+        return None;
+    }
+    Some(lockout_message(locked_until.saturating_sub(now_unix)))
+}
+
+pub(crate) fn record_failed_login(
+    attempts: &mut HashMap<String, LoginAttemptState>,
+    client_key: &str,
+    now: SystemTime,
+) -> Option<String> {
+    let now_unix = unix_seconds(now);
+    let state = attempts.entry(client_key.to_string()).or_default();
+    prune_attempt_state(state, now_unix);
+    if let Some(locked_until) = state.locked_until_unix {
+        if locked_until > now_unix {
+            return Some(lockout_message(locked_until.saturating_sub(now_unix)));
+        }
+        state.locked_until_unix = None;
+    }
+    state.recent_failures_unix.push_back(now_unix);
+    prune_attempt_state(state, now_unix);
+    if state.recent_failures_unix.len() < LOGIN_FAILURE_THRESHOLD {
+        return None;
+    }
+    state.recent_failures_unix.clear();
+    let shift = state.lockout_level.min(LOGIN_MAX_BACKOFF_SHIFT);
+    let lockout_seconds = LOGIN_BASE_LOCKOUT_SECONDS.saturating_mul(1u64 << shift);
+    state.lockout_level = state.lockout_level.saturating_add(1);
+    state.locked_until_unix = Some(now_unix.saturating_add(lockout_seconds));
+    Some(lockout_message(lockout_seconds))
+}
+
+pub(crate) fn clear_login_attempts(
+    attempts: &mut HashMap<String, LoginAttemptState>,
+    client_key: &str,
+) {
+    attempts.remove(client_key);
 }
 
 pub(crate) fn create_session(
@@ -208,14 +293,6 @@ pub(crate) fn save_sessions(path: &Path, sessions: &HashMap<String, AdminSession
     }
 }
 
-fn resolved_api_key<'a>(cfg: &'a AdminAuthConfig, fallback_api_key: &'a str) -> &'a str {
-    cfg.api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(fallback_api_key)
-}
-
 fn verify_totp(secret: &str, otp: &str, now: SystemTime) -> bool {
     let otp = otp.trim();
     if otp.len() != TOTP_DIGITS as usize || !otp.chars().all(|c| c.is_ascii_digit()) {
@@ -281,9 +358,28 @@ fn prune_expired_sessions(sessions: &mut HashMap<String, AdminSession>) {
     sessions.retain(|_, session| session.expires_at_unix > now);
 }
 
+fn prune_attempt_state(state: &mut LoginAttemptState, now_unix: u64) {
+    while let Some(oldest) = state.recent_failures_unix.front().copied() {
+        if now_unix.saturating_sub(oldest) > LOGIN_FAILURE_WINDOW_SECONDS {
+            state.recent_failures_unix.pop_front();
+        } else {
+            break;
+        }
+    }
+    if state
+        .locked_until_unix
+        .is_some_and(|locked_until| locked_until <= now_unix)
+    {
+        state.locked_until_unix = None;
+    }
+}
+
 fn now_unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    unix_seconds(SystemTime::now())
+}
+
+fn unix_seconds(now: SystemTime) -> u64 {
+    now.duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
 }
@@ -320,6 +416,41 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
+fn lockout_message(remaining_seconds: u64) -> String {
+    format!(
+        "Too many failed login attempts. Try again in {}.",
+        human_duration(remaining_seconds)
+    )
+}
+
+fn human_duration(seconds: u64) -> String {
+    let rounded = seconds.max(1);
+    let hours = rounded / 3600;
+    let minutes = (rounded % 3600) / 60;
+    let secs = rounded % 60;
+    if hours > 0 {
+        if minutes > 0 {
+            format!("{}h {}m", hours, minutes)
+        } else {
+            format!("{}h", hours)
+        }
+    } else if minutes > 1 {
+        if secs > 0 {
+            format!("{}m {}s", minutes, secs)
+        } else {
+            format!("{} minutes", minutes)
+        }
+    } else if minutes == 1 {
+        if secs > 0 {
+            format!("1m {}s", secs)
+        } else {
+            "1 minute".to_string()
+        }
+    } else {
+        format!("{}s", secs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,7 +465,7 @@ mod tests {
         };
 
         let now = UNIX_EPOCH + std::time::Duration::from_secs(59);
-        assert!(verify_login(&cfg, "fallback", "admin-key", "287082", now).is_ok());
+        assert!(verify_login(&cfg, "287082", now).is_ok());
     }
 
     #[test]
@@ -347,7 +478,7 @@ mod tests {
         };
 
         let now = UNIX_EPOCH + std::time::Duration::from_secs(59);
-        assert!(verify_login(&cfg, "fallback", "admin-key", "000000", now).is_err());
+        assert!(verify_login(&cfg, "000000", now).is_err());
     }
 
     #[test]
@@ -363,5 +494,58 @@ mod tests {
         assert!(validate_session(&headers, &mut sessions));
         remove_session(&headers, &mut sessions);
         assert!(!validate_session(&headers, &mut sessions));
+    }
+
+    #[test]
+    fn failed_login_lockout_escalates() {
+        let mut attempts = HashMap::new();
+        let client_key = "ip:127.0.0.1|ua:test";
+
+        assert!(record_failed_login(&mut attempts, client_key, UNIX_EPOCH).is_none());
+        assert!(record_failed_login(
+            &mut attempts,
+            client_key,
+            UNIX_EPOCH + std::time::Duration::from_secs(60)
+        )
+        .is_none());
+        let first_lockout = record_failed_login(
+            &mut attempts,
+            client_key,
+            UNIX_EPOCH + std::time::Duration::from_secs(120),
+        )
+        .unwrap();
+        assert!(first_lockout.contains("5 minutes"));
+        assert!(current_lockout_message(
+            &mut attempts,
+            client_key,
+            UNIX_EPOCH + std::time::Duration::from_secs(121)
+        )
+        .is_some());
+        assert!(current_lockout_message(
+            &mut attempts,
+            client_key,
+            UNIX_EPOCH + std::time::Duration::from_secs(421)
+        )
+        .is_none());
+
+        assert!(record_failed_login(
+            &mut attempts,
+            client_key,
+            UNIX_EPOCH + std::time::Duration::from_secs(430)
+        )
+        .is_none());
+        assert!(record_failed_login(
+            &mut attempts,
+            client_key,
+            UNIX_EPOCH + std::time::Duration::from_secs(460)
+        )
+        .is_none());
+        let second_lockout = record_failed_login(
+            &mut attempts,
+            client_key,
+            UNIX_EPOCH + std::time::Duration::from_secs(490),
+        )
+        .unwrap();
+        assert!(second_lockout.contains("10 minutes"));
     }
 }

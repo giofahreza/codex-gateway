@@ -5,7 +5,7 @@ use axum::{
     http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::any,
-    Router,
+    Json, Router,
 };
 use bytes::{Bytes, BytesMut};
 use futures_util::{stream, StreamExt};
@@ -21,6 +21,7 @@ use std::{
 use tracing::{error, info};
 use uuid::Uuid;
 mod admin_auth;
+mod api_keys;
 mod custom_models;
 mod notifications;
 mod source;
@@ -81,6 +82,9 @@ struct AppState {
     copilot_oauth_pending: Arc<Mutex<HashMap<String, target::copilot::auth::PendingDevice>>>,
     claude_oauth_pending: Arc<Mutex<HashMap<String, target::claude::auth::PendingOAuth>>>,
     admin_sessions: Arc<Mutex<HashMap<String, admin_auth::AdminSession>>>,
+    admin_login_attempts: Arc<Mutex<HashMap<String, admin_auth::LoginAttemptState>>>,
+    api_keys: Arc<Mutex<api_keys::ApiKeyStore>>,
+    internal_proxy_secret: Arc<String>,
     notification_settings: Arc<Mutex<notifications::NotificationSettings>>,
     disabled: Arc<Mutex<HashSet<String>>>,
     usage_history_lock: Arc<Mutex<()>>,
@@ -111,6 +115,16 @@ struct Config {
     admin_auth: admin_auth::AdminAuthConfig,
     #[serde(default)]
     oauth: target::oauth::OAuthConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiKeyCreateRequest {
+    label: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiKeyRevokeRequest {
+    id: String,
 }
 
 #[derive(Default, Clone, Serialize)]
@@ -209,6 +223,8 @@ struct CounterDelta {
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt().with_env_filter("info").init();
+
     let cfg = load_config();
     let disabled = cfg
         .disabled_files
@@ -230,6 +246,18 @@ async fn main() {
     let persisted_stats = stats_store::load(&cfg);
     let admin_sessions = admin_auth::load_sessions(&admin_session_path(&cfg));
     let notification_settings = notifications::load(&cfg);
+    let mut api_key_store = api_keys::load(&cfg);
+    match api_keys::bootstrap_legacy_key(&mut api_key_store, &cfg.proxy_api_key, &now_rfc3339()) {
+        Ok(true) => {
+            if let Err(err) = api_keys::save(&cfg, &api_key_store) {
+                error!("failed to persist API key store: {}", err);
+            }
+        }
+        Ok(false) => {}
+        Err(err) => {
+            error!("failed to bootstrap legacy proxy API key: {}", err);
+        }
+    }
     let stats = build_usage_stats(
         &tokens,
         &agw_accounts,
@@ -244,7 +272,6 @@ async fn main() {
         &persisted_stats,
     );
     let quota_cache = vec![None; tokens.len()];
-    tracing_subscriber::fmt().with_env_filter("info").init();
 
     let client = reqwest::Client::builder()
         .http1_only()
@@ -299,6 +326,9 @@ async fn main() {
         copilot_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         claude_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         admin_sessions: Arc::new(Mutex::new(admin_sessions)),
+        admin_login_attempts: Arc::new(Mutex::new(HashMap::new())),
+        api_keys: Arc::new(Mutex::new(api_key_store)),
+        internal_proxy_secret: Arc::new(Uuid::new_v4().simple().to_string()),
         notification_settings: Arc::new(Mutex::new(notification_settings)),
         disabled: Arc::new(Mutex::new(disabled)),
         usage_history_lock: Arc::new(Mutex::new(())),
@@ -316,6 +346,9 @@ async fn main() {
         .route("/admin/session", any(admin_session_route))
         .route("/admin/login", any(admin_login_route))
         .route("/admin/logout", any(admin_logout_route))
+        .route("/admin/api-keys", any(admin_api_keys_route))
+        .route("/admin/api-keys/create", any(admin_api_keys_create_route))
+        .route("/admin/api-keys/revoke", any(admin_api_keys_revoke_route))
         .route("/dashboard.json", any(dashboard_json))
         .route("/quota.json", any(quota_json_route))
         .route(
@@ -673,6 +706,37 @@ async fn dashboard() -> impl IntoResponse {
         cursor: not-allowed;
         opacity: 0.45;
       }
+      .settings-segmented {
+        display: inline-flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        padding: 4px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-alt);
+      }
+      .settings-segmented button {
+        min-height: 36px;
+        padding: 8px 12px;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--muted);
+      }
+      .settings-segmented button:hover {
+        background: rgba(148, 163, 184, 0.12);
+        color: var(--text);
+      }
+      .settings-segmented button.is-active {
+        background: var(--surface);
+        color: var(--text);
+        box-shadow: var(--shadow);
+      }
+      .settings-help {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.4;
+      }
       .settings-block {
         margin-top: 18px;
         padding-top: 16px;
@@ -717,6 +781,80 @@ async fn dashboard() -> impl IntoResponse {
       }
       .settings-panel[hidden] {
         display: none;
+      }
+      .api-key-create-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+      }
+      .api-key-list {
+        display: grid;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      .api-key-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+        padding: 10px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-alt);
+      }
+      .api-key-row.is-revoked {
+        opacity: 0.72;
+      }
+      .api-key-main {
+        min-width: 0;
+        display: grid;
+        gap: 4px;
+      }
+      .api-key-title-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        min-width: 0;
+      }
+      .api-key-title-row code {
+        overflow-wrap: anywhere;
+      }
+      .api-key-meta {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.4;
+        overflow-wrap: anywhere;
+      }
+      .api-key-actions {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+      }
+      .api-key-reveal {
+        display: grid;
+        gap: 8px;
+        margin-top: 12px;
+        padding: 10px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-alt);
+      }
+      .api-key-reveal-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .api-key-reveal code {
+        display: block;
+        width: 100%;
+        padding: 10px;
+        border-radius: 8px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        overflow-wrap: anywhere;
       }
       .notification-channel-grid {
         display: grid;
@@ -1021,6 +1159,19 @@ async fn dashboard() -> impl IntoResponse {
         gap: 16px;
         align-items: start;
       }
+      .providers-grid.provider-layout-single {
+        grid-template-columns: 1fr;
+      }
+      .providers-grid.provider-layout-single .provider-cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(390px, 390px));
+        gap: 12px;
+        justify-content: flex-start;
+        align-items: start;
+      }
+      .providers-grid.provider-layout-single .provider-cards .card {
+        margin-bottom: 0;
+      }
       .custom-model-section {
         margin: 14px 0 18px 0;
       }
@@ -1083,10 +1234,12 @@ async fn dashboard() -> impl IntoResponse {
       .custom-model-form {
         display: grid;
         gap: 12px;
+        min-width: 0;
       }
       .custom-model-form-row {
         display: grid;
         gap: 6px;
+        min-width: 0;
       }
       .custom-model-account-provider {
         display: grid;
@@ -1104,10 +1257,12 @@ async fn dashboard() -> impl IntoResponse {
       .custom-model-editor {
         display: grid;
         gap: 12px;
+        min-width: 0;
       }
       .custom-model-steps {
         display: grid;
         gap: 12px;
+        min-width: 0;
       }
       .custom-model-step {
         border: 1px solid var(--border);
@@ -1116,6 +1271,7 @@ async fn dashboard() -> impl IntoResponse {
         padding: 12px;
         display: grid;
         gap: 10px;
+        min-width: 0;
       }
       .custom-model-step-header {
         display: flex;
@@ -1142,6 +1298,7 @@ async fn dashboard() -> impl IntoResponse {
       .custom-model-step-targets {
         display: grid;
         gap: 8px;
+        min-width: 0;
       }
       .custom-model-target {
         display: grid;
@@ -1153,13 +1310,18 @@ async fn dashboard() -> impl IntoResponse {
         border-radius: 8px;
         background: var(--surface-alt);
         position: relative;
+        min-width: 0;
       }
       .custom-model-target.disabled {
         opacity: 0.55;
       }
+      .custom-model-target > * {
+        min-width: 0;
+      }
       .custom-model-target select,
       .custom-model-target input {
         min-height: 32px;
+        width: 100%;
       }
       .custom-model-target-share {
         display: inline-grid;
@@ -1233,12 +1395,28 @@ async fn dashboard() -> impl IntoResponse {
         padding: 10px;
         background: var(--surface-alt);
         min-height: 80px;
+        min-width: 0;
       }
       .custom-model-preview-empty {
         color: var(--muted);
         font-size: 12px;
         text-align: center;
         padding: 16px;
+      }
+      .custom-model-modal-card {
+        max-width: min(1120px, calc(100vw - 32px));
+      }
+      @media (max-width: 1120px) {
+        .custom-model-target {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .custom-model-target-share,
+        .custom-model-target-toolbar {
+          justify-self: start;
+        }
+        .custom-model-target-toolbar {
+          grid-column: 1 / -1;
+        }
       }
       @media (max-width: 760px) {
         .custom-model-target {
@@ -1907,6 +2085,9 @@ async fn dashboard() -> impl IntoResponse {
         .providers-grid {
           grid-template-columns: 1fr;
         }
+        .providers-grid.provider-layout-single .provider-cards {
+          grid-template-columns: 1fr;
+        }
       }
       @media (max-width: 768px) {
         body { font-size: 15px; }
@@ -1974,7 +2155,13 @@ async fn dashboard() -> impl IntoResponse {
           grid-template-columns: 1fr;
           align-items: stretch;
         }
-        .provider-settings-actions {
+        .api-key-create-row,
+        .api-key-row {
+          grid-template-columns: 1fr;
+        }
+        .api-key-reveal-header,
+        .provider-settings-actions,
+        .api-key-actions {
           justify-content: flex-start;
         }
         .provider-settings-actions .mini-btn {
@@ -2069,13 +2256,9 @@ async fn dashboard() -> impl IntoResponse {
     <div id="adminLoginGate" class="modal" role="dialog" aria-modal="true" aria-labelledby="adminLoginTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card admin-login-card">
         <h2 id="adminLoginTitle" style="margin-top:0;">Admin Login</h2>
-        <p class="admin-login-copy">Enter the management API key and the 6-digit OTP from Google Authenticator to manage accounts.</p>
+        <p class="admin-login-copy">Enter the current 6-digit OTP from Google Authenticator to manage accounts.</p>
         <form id="adminLoginForm" class="admin-login-form">
           <input class="sr-only" type="text" name="username" autocomplete="username" value="admin" tabindex="-1" aria-hidden="true">
-          <div>
-            <label for="adminApiKeyInput">API Key</label>
-            <input id="adminApiKeyInput" name="api_key" type="password" autocomplete="current-password" placeholder="Enter management API key">
-          </div>
           <div>
             <label for="adminOtpInput">Google Authenticator OTP</label>
             <input id="adminOtpInput" name="otp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" placeholder="123456">
@@ -2193,70 +2376,70 @@ async fn dashboard() -> impl IntoResponse {
           <span id="codexProviderTitle">Codex</span>
           <span class="provider-badge-count" id="codexBadgeCount">0 accounts</span>
         </div>
-        <div id="codexCards"></div>
+        <div id="codexCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="agw" aria-labelledby="agwProviderTitle">
         <div class="provider-badge">
           <span id="agwProviderTitle">Antigravity</span>
           <span class="provider-badge-count" id="agwBadgeCount">0 accounts</span>
         </div>
-        <div id="agwCards"></div>
+        <div id="agwCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="gemini" aria-labelledby="geminiProviderTitle">
         <div class="provider-badge">
           <span id="geminiProviderTitle">Gemini</span>
           <span class="provider-badge-count" id="geminiBadgeCount">0 accounts</span>
         </div>
-        <div id="geminiCards"></div>
+        <div id="geminiCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="qwen" aria-labelledby="qwenProviderTitle">
         <div class="provider-badge">
           <span id="qwenProviderTitle">Qwen</span>
           <span class="provider-badge-count" id="qwenBadgeCount">0 accounts</span>
         </div>
-        <div id="qwenCards"></div>
+        <div id="qwenCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="deepseek" aria-labelledby="deepseekProviderTitle">
         <div class="provider-badge">
           <span id="deepseekProviderTitle">DeepSeek</span>
           <span class="provider-badge-count" id="deepseekBadgeCount">0 accounts</span>
         </div>
-        <div id="deepseekCards"></div>
+        <div id="deepseekCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="minimax" aria-labelledby="minimaxProviderTitle">
         <div class="provider-badge">
           <span id="minimaxProviderTitle">MiniMax</span>
           <span class="provider-badge-count" id="minimaxBadgeCount">0 accounts</span>
         </div>
-        <div id="minimaxCards"></div>
+        <div id="minimaxCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="grok" aria-labelledby="grokProviderTitle">
         <div class="provider-badge">
           <span id="grokProviderTitle">Grok (xAI)</span>
           <span class="provider-badge-count" id="grokBadgeCount">— accounts</span>
         </div>
-        <div id="grokCards"></div>
+        <div id="grokCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="copilot" aria-labelledby="copilotProviderTitle">
         <div class="provider-badge">
           <span id="copilotProviderTitle">GitHub Copilot</span>
           <span class="provider-badge-count" id="copilotBadgeCount">0 accounts</span>
         </div>
-        <div id="copilotCards"></div>
+        <div id="copilotCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="claude" aria-labelledby="claudeProviderTitle">
         <div class="provider-badge">
           <span id="claudeProviderTitle">Claude</span>
           <span class="provider-badge-count" id="claudeBadgeCount">0 accounts</span>
         </div>
-        <div id="claudeCards"></div>
+        <div id="claudeCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="glm" aria-labelledby="glmProviderTitle">
         <div class="provider-badge">
           <span id="glmProviderTitle">GLM (Z.AI)</span>
           <span class="provider-badge-count" id="glmBadgeCount">0 accounts</span>
         </div>
-        <div id="glmCards"></div>
+        <div id="glmCards" class="provider-cards"></div>
       </section>
       </div>
     </main>
@@ -2348,6 +2531,7 @@ async fn dashboard() -> impl IntoResponse {
         customModelModelOptions: [],
         providerSettings: readProviderDashboardSettings(),
         notificationSettings: null,
+        apiKeys: [],
         quotas: {
           codex: new Map(),
           agw: new Map(),
@@ -2391,7 +2575,8 @@ async fn dashboard() -> impl IntoResponse {
         dashboardProviderKeys.forEach(function(provider) {
           if (rawHidden[provider] === true) hidden[provider] = true;
         });
-        return { order: order, hidden: hidden };
+        var viewMode = value && value.viewMode === 'single' ? 'single' : 'grid';
+        return { order: order, hidden: hidden, viewMode: viewMode };
       }
       function readProviderDashboardSettings() {
         try {
@@ -2409,6 +2594,10 @@ async fn dashboard() -> impl IntoResponse {
       function applyProviderDashboardSettings() {
         var settings = normalizeProviderDashboardSettings(dashboardState.providerSettings);
         dashboardState.providerSettings = settings;
+        var grid = document.querySelector('.providers-grid');
+        if (grid) {
+          grid.classList.toggle('provider-layout-single', settings.viewMode === 'single');
+        }
         var orderByProvider = {};
         settings.order.forEach(function(provider, index) {
           orderByProvider[provider] = index;
@@ -2426,8 +2615,23 @@ async fn dashboard() -> impl IntoResponse {
           return settings.hidden[provider] !== true;
         }).length;
       }
+      function providerDashboardViewModeLabel(mode) {
+        return mode === 'single' ? 'single provider rows' : 'current grid';
+      }
+      function updateProviderLayoutModeControl() {
+        var settings = normalizeProviderDashboardSettings(dashboardState.providerSettings);
+        document.querySelectorAll('[data-provider-layout-mode]').forEach(function(button) {
+          var active = button.getAttribute('data-provider-layout-mode') === settings.viewMode;
+          button.classList.toggle('is-active', active);
+          button.setAttribute('aria-pressed', active ? 'true' : 'false');
+        });
+      }
       function updateAppSettingsStatus() {
-        setText('appSettingsStatus', providerDashboardVisibleCount() + ' providers visible');
+        var settings = normalizeProviderDashboardSettings(dashboardState.providerSettings);
+        setText(
+          'appSettingsStatus',
+          providerDashboardVisibleCount() + ' providers visible · ' + providerDashboardViewModeLabel(settings.viewMode)
+        );
       }
       function renderProviderSettingsList() {
         var list = document.getElementById('providerSettingsList');
@@ -2452,6 +2656,7 @@ async fn dashboard() -> impl IntoResponse {
             + '</span>'
             + '</div>';
         }).join('');
+        updateProviderLayoutModeControl();
         updateAppSettingsStatus();
       }
       function saveAndRenderProviderDashboardSettings(settings) {
@@ -2478,11 +2683,20 @@ async fn dashboard() -> impl IntoResponse {
         settings.order.splice(nextIndex, 0, moved);
         saveAndRenderProviderDashboardSettings(settings);
       }
+      function setProviderDashboardViewMode(mode) {
+        var settings = normalizeProviderDashboardSettings(dashboardState.providerSettings);
+        settings.viewMode = mode === 'single' ? 'single' : 'grid';
+        saveAndRenderProviderDashboardSettings(settings);
+      }
       function resetProviderDashboardSettings() {
         saveAndRenderProviderDashboardSettings(normalizeProviderDashboardSettings(null));
       }
       function setAppSettingsTab(tab) {
-        var target = tab === 'notifications' ? 'notifications' : 'dashboard';
+        var target = tab === 'notifications'
+          ? 'notifications'
+          : tab === 'api-keys'
+            ? 'api-keys'
+            : 'dashboard';
         document.querySelectorAll('[data-settings-tab]').forEach(function(button) {
           var active = button.getAttribute('data-settings-tab') === target;
           button.classList.toggle('is-active', active);
@@ -2672,10 +2886,124 @@ async fn dashboard() -> impl IntoResponse {
         const data = await res.json();
         updateNotificationStatusText(data.message || (data.ok ? 'Test notification sent' : 'Test notification failed'));
       }
+      function formatSettingsDateTime(value, fallback) {
+        if (!value) return fallback || 'Never';
+        var date = new Date(value);
+        return isNaN(date.getTime()) ? value : date.toLocaleString();
+      }
+      function apiKeySourceLabel(source) {
+        return source === 'legacy_config' ? 'Legacy config' : 'Managed';
+      }
+      function updateApiKeyStatusText(message) {
+        if (message) {
+          setText('apiKeyStatus', message);
+          return;
+        }
+        var keys = Array.isArray(dashboardState.apiKeys) ? dashboardState.apiKeys : [];
+        var active = keys.filter(function(key) { return !key.revoked_at; }).length;
+        setText('apiKeyStatus', active + ' active API key' + (active === 1 ? '' : 's'));
+      }
+      function setApiKeyReveal(value) {
+        var panel = document.getElementById('apiKeyRevealPanel');
+        var code = document.getElementById('apiKeyRevealValue');
+        if (panel) panel.hidden = !value;
+        if (code) code.textContent = value || '';
+      }
+      function renderApiKeys() {
+        var list = document.getElementById('apiKeysList');
+        if (!list) return;
+        var keys = Array.isArray(dashboardState.apiKeys) ? dashboardState.apiKeys : [];
+        if (!keys.length) {
+          list.innerHTML = '<div class="empty-state">No API keys available</div>';
+          updateApiKeyStatusText();
+          return;
+        }
+        list.innerHTML = keys.map(function(key) {
+          var revoked = !!key.revoked_at;
+          var revokeButton = revoked
+            ? '<span class="account-state disabled">Revoked</span>'
+            : '<button type="button" class="mini-btn secondary-button" onclick="revokeApiKey(' + escapeHtml(jsString(key.id || '')) + ')">Revoke</button>';
+          return '<div class="api-key-row' + (revoked ? ' is-revoked' : '') + '">'
+            + '<div class="api-key-main">'
+            + '<div class="api-key-title-row">'
+            + '<strong>' + escapeHtml(key.label || 'API key') + '</strong>'
+            + '<code>' + escapeHtml(key.key_prefix || '') + '</code>'
+            + '</div>'
+            + '<div class="api-key-meta">'
+            + escapeHtml(apiKeySourceLabel(key.source))
+            + ' · Created ' + escapeHtml(formatSettingsDateTime(key.created_at, 'Unknown'))
+            + ' · Last used ' + escapeHtml(formatSettingsDateTime(key.last_used_at, 'Never'))
+            + (revoked ? ' · Revoked ' + escapeHtml(formatSettingsDateTime(key.revoked_at, 'Unknown')) : '')
+            + '</div>'
+            + '</div>'
+            + '<div class="api-key-actions">' + revokeButton + '</div>'
+            + '</div>';
+        }).join('');
+        updateApiKeyStatusText();
+      }
+      async function loadApiKeys() {
+        setText('apiKeyStatus', 'Loading API keys...');
+        const res = await adminFetch('/admin/api-keys');
+        if (!res) return;
+        const data = await res.json();
+        dashboardState.apiKeys = Array.isArray(data.keys) ? data.keys : [];
+        renderApiKeys();
+      }
+      async function createApiKey() {
+        var labelInput = document.getElementById('apiKeyLabelInput');
+        var label = labelInput ? labelInput.value.trim() : '';
+        setText('apiKeyStatus', 'Creating API key...');
+        const res = await adminFetch('/admin/api-keys/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ label: label || undefined })
+        });
+        if (!res) return;
+        const data = await res.json();
+        if (!data.ok) {
+          updateApiKeyStatusText(data.message || 'Failed to create API key');
+          return;
+        }
+        dashboardState.apiKeys = Array.isArray(data.keys) ? data.keys : dashboardState.apiKeys;
+        if (labelInput) labelInput.value = '';
+        setApiKeyReveal(data.plain_text_key || '');
+        renderApiKeys();
+        updateApiKeyStatusText('New API key created. Copy it now; it will not be shown again.');
+      }
+      async function revokeApiKey(id) {
+        if (!id) return;
+        setText('apiKeyStatus', 'Revoking API key...');
+        const res = await adminFetch('/admin/api-keys/revoke', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: id })
+        });
+        if (!res) return;
+        const data = await res.json();
+        if (!data.ok) {
+          updateApiKeyStatusText(data.message || 'Failed to revoke API key');
+          return;
+        }
+        dashboardState.apiKeys = Array.isArray(data.keys) ? data.keys : dashboardState.apiKeys;
+        renderApiKeys();
+        updateApiKeyStatusText('API key revoked');
+      }
+      async function copyApiKeyReveal() {
+        var value = document.getElementById('apiKeyRevealValue')?.textContent || '';
+        if (!value) return;
+        try {
+          await navigator.clipboard.writeText(value);
+          updateApiKeyStatusText('API key copied');
+        } catch (_) {
+          updateApiKeyStatusText('Copy failed. Use manual copy.');
+        }
+      }
       function openAppSettingsModal() {
         setAppSettingsTab('dashboard');
+        setApiKeyReveal('');
         renderProviderSettingsList();
         loadNotificationSettings();
+        loadApiKeys();
         setMobileNavOpen(false);
         openModal('appSettingsModal');
       }
@@ -3152,7 +3480,7 @@ async fn dashboard() -> impl IntoResponse {
           startDashboard();
           return;
         }
-        showAdminLogin('Enter the management API key and your current Google Authenticator code.');
+        showAdminLogin('Enter your current Google Authenticator code.');
       }
       function setThemeToggleLabel(theme) {
         const btn = document.getElementById('themeToggleBtn');
@@ -5618,9 +5946,18 @@ async fn dashboard() -> impl IntoResponse {
         <h2 id="appSettingsTitle" style="margin-top:0;">Settings</h2>
         <div class="settings-tabs" role="tablist" aria-label="Settings sections">
           <button type="button" class="settings-tab is-active" role="tab" aria-selected="true" aria-controls="settingsDashboardPanel" data-settings-tab="dashboard">Dashboard</button>
+          <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settingsApiKeysPanel" data-settings-tab="api-keys">API Keys</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settingsNotificationsPanel" data-settings-tab="notifications">Notifications</button>
         </div>
         <div id="settingsDashboardPanel" class="settings-panel" role="tabpanel" data-settings-panel="dashboard">
+          <div class="settings-block custom-model-form-row">
+            <label>Provider layout</label>
+            <div class="settings-segmented" role="group" aria-label="Provider layout">
+              <button type="button" data-provider-layout-mode="grid" aria-pressed="false" onclick="setProviderDashboardViewMode('grid')">Current grid</button>
+              <button type="button" data-provider-layout-mode="single" aria-pressed="false" onclick="setProviderDashboardViewMode('single')">Single provider rows</button>
+            </div>
+            <div class="settings-help">Applies only to provider sections. Custom models keep their current layout.</div>
+          </div>
           <div class="settings-block custom-model-form-row">
             <label>Dashboard providers</label>
             <div id="providerSettingsList" class="provider-settings-list"></div>
@@ -5628,6 +5965,28 @@ async fn dashboard() -> impl IntoResponse {
           <div id="appSettingsStatus" class="muted" style="margin-top:10px;"></div>
           <div class="modal-actions" style="margin-top:12px;">
             <button type="button" id="resetProviderSettingsBtn" class="secondary-button">Reset default</button>
+          </div>
+        </div>
+        <div id="settingsApiKeysPanel" class="settings-panel" role="tabpanel" data-settings-panel="api-keys" hidden>
+          <div class="settings-block">
+            <div class="custom-model-form-row">
+              <label for="apiKeyLabelInput">Create API key</label>
+              <div class="api-key-create-row">
+                <input id="apiKeyLabelInput" autocomplete="off" placeholder="optional label">
+                <button type="button" id="createApiKeyBtn">Create API Key</button>
+              </div>
+              <div class="settings-help">API keys are for proxy API access only. Dashboard access uses OTP login.</div>
+            </div>
+            <div id="apiKeyRevealPanel" class="api-key-reveal" hidden>
+              <div class="api-key-reveal-header">
+                <strong>New API key</strong>
+                <button type="button" id="copyApiKeyRevealBtn" class="mini-btn secondary-button">Copy</button>
+              </div>
+              <code id="apiKeyRevealValue"></code>
+              <div class="settings-help">This value is shown once. Store it before closing the modal.</div>
+            </div>
+            <div id="apiKeysList" class="api-key-list"></div>
+            <div id="apiKeyStatus" class="muted" style="margin-top:10px;"></div>
           </div>
         </div>
         <div id="settingsNotificationsPanel" class="settings-panel" role="tabpanel" data-settings-panel="notifications" hidden>
@@ -5676,7 +6035,7 @@ async fn dashboard() -> impl IntoResponse {
       </div>
     </div>
     <div id="customModelModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="customModelTitle" aria-hidden="true" style="display:none;">
-      <div class="modal-card">
+      <div class="modal-card custom-model-modal-card">
         <h2 id="customModelTitle" style="margin-top:0;">Add Custom Model</h2>
         <form id="customModelForm" class="custom-model-form">
           <input type="hidden" name="original_alias" value="">
@@ -5793,6 +6152,8 @@ async fn dashboard() -> impl IntoResponse {
           setAppSettingsTab(button.getAttribute('data-settings-tab'));
         });
       });
+      document.getElementById('createApiKeyBtn').addEventListener('click', createApiKey);
+      document.getElementById('copyApiKeyRevealBtn').addEventListener('click', copyApiKeyReveal);
       document.getElementById('notificationChannelInput').addEventListener('change', updateNotificationChannelUi);
       document.getElementById('saveNotificationSettingsBtn').addEventListener('click', saveNotificationSettings);
       document.getElementById('testNotificationBtn').addEventListener('click', sendTestNotification);
@@ -6579,17 +6940,16 @@ async fn dashboard() -> impl IntoResponse {
       }
       document.getElementById('adminLoginForm').addEventListener('submit', async (e) => {
         e.preventDefault();
-        const apiKey = document.getElementById('adminApiKeyInput').value.trim();
         const otp = document.getElementById('adminOtpInput').value.trim();
-        if (!apiKey || !otp) {
-          document.getElementById('adminLoginStatus').textContent = 'API key and OTP are required.';
+        if (!otp) {
+          document.getElementById('adminLoginStatus').textContent = 'OTP is required.';
           return;
         }
         const res = await fetch('/admin/login', {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({ api_key: apiKey, otp: otp })
+          body: new URLSearchParams({ otp: otp })
         });
         const data = await res.json();
         if (!res.ok || !data.ok) {
@@ -6636,7 +6996,7 @@ async fn admin_session_route(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let enabled = admin_auth::is_enabled(&state.cfg.admin_auth);
-    let configured = admin_auth::is_configured(&state.cfg.admin_auth, &state.cfg.proxy_api_key);
+    let configured = admin_auth::is_configured(&state.cfg.admin_auth);
     let authenticated = if enabled {
         let mut sessions = state.admin_sessions.lock().unwrap();
         admin_auth::validate_session(&headers, &mut sessions)
@@ -6653,17 +7013,32 @@ async fn admin_session_route(
 
 async fn admin_login_route(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Form(form): Form<admin_auth::LoginForm>,
 ) -> impl IntoResponse {
-    match admin_auth::verify_login(
-        &state.cfg.admin_auth,
-        &state.cfg.proxy_api_key,
-        &form.api_key,
-        &form.otp,
-        std::time::SystemTime::now(),
-    ) {
+    let now = std::time::SystemTime::now();
+    let client_key = admin_auth::login_client_key(&headers);
+    if let Some(message) = {
+        let mut attempts = state.admin_login_attempts.lock().unwrap();
+        admin_auth::current_lockout_message(&mut attempts, &client_key, now)
+    } {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "message": message
+            })),
+        )
+            .into_response();
+    }
+
+    match admin_auth::verify_login(&state.cfg.admin_auth, &form.otp, now) {
         Ok(()) => {
             let ttl_seconds = admin_auth::session_ttl_seconds(&state.cfg.admin_auth);
+            {
+                let mut attempts = state.admin_login_attempts.lock().unwrap();
+                admin_auth::clear_login_attempts(&mut attempts, &client_key);
+            }
             let session_id = {
                 let mut sessions = state.admin_sessions.lock().unwrap();
                 let session_id = admin_auth::create_session(&mut sessions, ttl_seconds);
@@ -6681,14 +7056,25 @@ async fn admin_login_route(
             );
             response
         }
-        Err(err) => (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({
-                "ok": false,
-                "message": err
-            })),
-        )
-            .into_response(),
+        Err(err) => {
+            let lockout_message = {
+                let mut attempts = state.admin_login_attempts.lock().unwrap();
+                admin_auth::record_failed_login(&mut attempts, &client_key, now)
+            };
+            let status = if lockout_message.is_some() {
+                StatusCode::TOO_MANY_REQUESTS
+            } else {
+                StatusCode::UNAUTHORIZED
+            };
+            (
+                status,
+                axum::Json(serde_json::json!({
+                    "ok": false,
+                    "message": lockout_message.unwrap_or(err)
+                })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -6708,6 +7094,113 @@ async fn admin_logout_route(
     .into_response();
     admin_auth::append_set_cookie(response.headers_mut(), &admin_auth::clear_session_cookie());
     response
+}
+
+async fn admin_api_keys_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    let keys = {
+        let store = state.api_keys.lock().unwrap();
+        api_keys::public_records(&store)
+    };
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "keys": keys
+    }))
+    .into_response()
+}
+
+async fn admin_api_keys_create_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ApiKeyCreateRequest>,
+) -> impl IntoResponse {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    let label = payload.label.as_deref().unwrap_or("");
+    let now = now_rfc3339();
+    let (created, snapshot) = {
+        let mut store = state.api_keys.lock().unwrap();
+        match api_keys::create_key(&mut store, label, &now) {
+            Ok(created) => (created, store.clone()),
+            Err(err) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({
+                        "ok": false,
+                        "message": err
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    };
+    if let Err(err) = api_keys::save(state.cfg.as_ref(), &snapshot) {
+        error!("failed to save API key store: {}", err);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "message": "failed to save API key"
+            })),
+        )
+            .into_response();
+    }
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "key": created.key,
+        "plain_text_key": created.plain_text_key,
+        "keys": api_keys::public_records(&snapshot)
+    }))
+    .into_response()
+}
+
+async fn admin_api_keys_revoke_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ApiKeyRevokeRequest>,
+) -> impl IntoResponse {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    let now = now_rfc3339();
+    let snapshot = {
+        let mut store = state.api_keys.lock().unwrap();
+        match api_keys::revoke_key(&mut store, payload.id.trim(), &now) {
+            Ok(_) => store.clone(),
+            Err(err) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    axum::Json(serde_json::json!({
+                        "ok": false,
+                        "message": err
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    };
+    if let Err(err) = api_keys::save(state.cfg.as_ref(), &snapshot) {
+        error!("failed to save API key store: {}", err);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "message": "failed to save API key changes"
+            })),
+        )
+            .into_response();
+    }
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "keys": api_keys::public_records(&snapshot)
+    }))
+    .into_response()
 }
 
 /// Returns the dashboard counters and per-account request totals.
@@ -6869,8 +7362,8 @@ async fn custom_models_json_route(State(state): State<AppState>, headers: Header
 
 fn internal_proxy_api_headers(state: &AppState) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    if let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", state.cfg.proxy_api_key)) {
-        headers.insert(axum::http::header::AUTHORIZATION, value);
+    if let Ok(value) = HeaderValue::from_str(state.internal_proxy_secret.as_str()) {
+        headers.insert("x-internal-proxy-key", value);
     }
     headers
 }
@@ -8637,8 +9130,7 @@ async fn proxy(
     let raw_path = uri.path().to_string();
     let source_api = detect_source_api(&raw_path);
 
-    // Simple API key guard
-    if !check_api_key(&headers, &state.cfg.proxy_api_key) {
+    if !check_api_key(&state, &headers) {
         return if matches!(source_api, SourceApi::V1) {
             (
                 StatusCode::UNAUTHORIZED,
@@ -12831,19 +13323,50 @@ fn persist_stats_store(state: &AppState) {
     }
 }
 
-fn check_api_key(headers: &HeaderMap, expected: &str) -> bool {
+fn check_api_key(state: &AppState, headers: &HeaderMap) -> bool {
+    if headers
+        .get("x-internal-proxy-key")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim() == state.internal_proxy_secret.as_str())
+    {
+        return true;
+    }
+    let Some(token) = extract_api_key(headers) else {
+        return false;
+    };
+    let now = now_rfc3339();
+    let snapshot = {
+        let mut store = state.api_keys.lock().unwrap();
+        let Some(key_id) = api_keys::verify_token(&store, token) else {
+            return false;
+        };
+        if api_keys::touch_last_used(&mut store, &key_id, &now) {
+            Some(store.clone())
+        } else {
+            None
+        }
+    };
+    if let Some(snapshot) = snapshot {
+        if let Err(err) = api_keys::save(state.cfg.as_ref(), &snapshot) {
+            error!("failed to update API key last_used_at: {}", err);
+        }
+    }
+    true
+}
+
+fn extract_api_key(headers: &HeaderMap) -> Option<&str> {
     let auth = headers
         .get("authorization")
-        .and_then(|h| h.to_str().ok())
+        .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     if let Some(token) = auth.strip_prefix("Bearer ") {
-        return token == expected;
+        return Some(token.trim());
     }
     headers
         .get("x-api-key")
-        .and_then(|h| h.to_str().ok())
+        .and_then(|value| value.to_str().ok())
         .map(str::trim)
-        .is_some_and(|token| token == expected)
+        .filter(|value| !value.is_empty())
 }
 
 fn require_admin_session_json(state: &AppState, headers: &HeaderMap) -> Option<Response> {
@@ -13794,6 +14317,7 @@ pub(crate) fn should_drop_incoming_header(name: &str) -> bool {
     if is_hop_header(&lower)
         || lower == "authorization"
         || lower == "x-api-key"
+        || lower == "x-internal-proxy-key"
         || lower == "accept-encoding"
         || lower == "host"
         || lower == "content-length"
