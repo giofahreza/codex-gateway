@@ -519,26 +519,13 @@ fn extract_rate_summary(rate_limit: Option<&serde_json::Value>) -> QuotaRateSumm
     let Some(serde_json::Value::Object(obj)) = rate_limit else {
         return QuotaRateSummary::default();
     };
-    let primary_window = obj.get("primary_window");
-    let secondary_window = obj.get("secondary_window");
-    let primary_seconds = primary_window.and_then(window_limit_seconds);
-    let secondary_seconds = secondary_window.and_then(window_limit_seconds);
-
-    let primary_bucket = infer_window_bucket("primary", primary_seconds, secondary_seconds);
-    let secondary_bucket = infer_window_bucket("secondary", secondary_seconds, primary_seconds);
-
-    let mut summary = QuotaRateSummary::default();
-    assign_window_summary(
-        &mut summary,
-        primary_bucket,
-        primary_window.and_then(|window| extract_window_summary(window, primary_bucket)),
-    );
-    assign_window_summary(
-        &mut summary,
-        secondary_bucket,
-        secondary_window.and_then(|window| extract_window_summary(window, secondary_bucket)),
-    );
-    summary
+    let five_hour = obj
+        .get("primary_window")
+        .and_then(|window| extract_window_summary(window, Some("5h")));
+    let weekly = obj
+        .get("secondary_window")
+        .and_then(|window| extract_window_summary(window, Some("weekly")));
+    QuotaRateSummary { five_hour, weekly }
 }
 
 fn extract_additional_rate_limits(
@@ -615,45 +602,6 @@ fn extract_window_summary(
     })
 }
 
-fn assign_window_summary(
-    summary: &mut QuotaRateSummary,
-    bucket: Option<&'static str>,
-    window: Option<QuotaWindowSummary>,
-) {
-    let Some(window) = window else {
-        return;
-    };
-    match bucket {
-        Some("weekly") => summary.weekly = Some(window),
-        _ => summary.five_hour = Some(window),
-    }
-}
-
-fn window_limit_seconds(window: &serde_json::Value) -> Option<i64> {
-    window
-        .get("limit_window_seconds")
-        .or_else(|| window.get("limitWindowSeconds"))
-        .and_then(|value| value.as_i64())
-        .filter(|value| *value > 0)
-}
-
-fn infer_window_bucket(
-    slot: &str,
-    seconds: Option<i64>,
-    other_seconds: Option<i64>,
-) -> Option<&'static str> {
-    match seconds {
-        Some(seconds) if seconds >= 86_400 => Some("weekly"),
-        Some(_) => Some("5h"),
-        None => match (slot, other_seconds) {
-            ("primary", Some(other)) if other >= 86_400 => Some("5h"),
-            ("secondary", Some(other)) if other > 0 && other < 86_400 => Some("weekly"),
-            ("secondary", None) => Some("weekly"),
-            _ => Some("5h"),
-        },
-    }
-}
-
 fn format_reset_after(seconds: i64, bucket: Option<&str>) -> String {
     if seconds <= 0 {
         return "reset now".to_string();
@@ -673,7 +621,9 @@ fn format_reset_after(seconds: i64, bucket: Option<&str>) -> String {
             }
         }
         _ => {
-            if hours > 0 {
+            if days > 0 {
+                format!("resets in {}d {}h", days, hours)
+            } else if hours > 0 {
                 format!("resets in {}h {}m", hours, mins)
             } else {
                 format!("resets in {}m", mins)
@@ -763,7 +713,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_primary_weekly_window_when_secondary_is_missing() {
+    fn primary_window_stays_in_five_hour_when_reset_exceeds_five_hours() {
         let summary = extract_rate_summary(Some(&json!({
             "primary_window": {
                 "used_percent": 46.0,
@@ -773,25 +723,25 @@ mod tests {
             "secondary_window": null
         })));
 
-        assert!(summary.five_hour.is_none());
         assert_eq!(
             summary
-                .weekly
+                .five_hour
                 .as_ref()
                 .and_then(|window| window.used_percent),
             Some(46.0)
         );
         assert_eq!(
             summary
-                .weekly
+                .five_hour
                 .as_ref()
                 .map(|window| window.reset_label.as_str()),
             Some("resets in 6d 16h")
         );
+        assert!(summary.weekly.is_none());
     }
 
     #[test]
-    fn classifies_dual_windows_by_duration_instead_of_slot_name() {
+    fn keeps_primary_and_secondary_slot_mapping() {
         let summary = extract_rate_summary(Some(&json!({
             "primary_window": {
                 "used_percent": 20.0,
@@ -810,14 +760,14 @@ mod tests {
                 .five_hour
                 .as_ref()
                 .and_then(|window| window.used_percent),
-            Some(70.0)
+            Some(20.0)
         );
         assert_eq!(
             summary
                 .weekly
                 .as_ref()
                 .and_then(|window| window.used_percent),
-            Some(20.0)
+            Some(70.0)
         );
     }
 
