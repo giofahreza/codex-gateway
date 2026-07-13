@@ -3978,7 +3978,7 @@ async fn dashboard() -> impl IntoResponse {
         }
         return '';
       }
-      function connectionRows(provider, a) {
+      function connectionRows(provider, a, quota) {
         var rows = [];
         var label = providerLabels[provider] || provider || 'Provider';
         rows.push(renderMetaLine('provider', label, false));
@@ -3988,6 +3988,7 @@ async fn dashboard() -> impl IntoResponse {
         rows.push(renderMetaLine('email', firstPresent(a, ['email']), false));
         rows.push(renderMetaLine('account id', firstPresent(a, ['account_id', 'subject']), true));
         rows.push(renderMetaLine('organization uuid', firstPresent(a, ['organization_uuid']), true));
+        rows.push(renderMetaLine('package', firstPresent(quota, ['plan_type']), false));
         rows.push(renderMetaLine('account type', firstPresent(a, ['account_type']), false));
         rows.push(renderMetaLine('project id', firstPresent(a, ['project_id']), true));
         rows.push(renderMetaLine('resource URL', firstPresent(a, ['resource_url', 'base_url', 'api_base_url']), true));
@@ -4127,7 +4128,7 @@ async fn dashboard() -> impl IntoResponse {
           + renderQuotaBars(quota, { provider: 'codex', key: key })
           + renderCodexResetCredits(a, quota)
           + renderAccountModels(a, quota, 'codex', key)
-          + renderMetaDetails(connectionRows('codex', a), 'Connection details', 'codex', a, key)
+          + renderMetaDetails(connectionRows('codex', a, quota), 'Connection details', 'codex', a, key)
           + renderAttentionDetails('codex', a, key)
           + '</div>';
       }
@@ -4171,7 +4172,7 @@ async fn dashboard() -> impl IntoResponse {
           + extra + '</div>'
           + renderQuotaBars(quota, { provider: provider, key: key })
           + renderAccountModels(a, quota, provider, key)
-          + renderMetaDetails(connectionRows(provider, a), 'Connection details', provider, a, key)
+          + renderMetaDetails(connectionRows(provider, a, quota), 'Connection details', provider, a, key)
           + renderAttentionDetails(provider, a, key)
           + '</div>';
       }
@@ -4197,7 +4198,7 @@ async fn dashboard() -> impl IntoResponse {
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quota, { provider: 'qwen', key: a.file_name || a.label || a.email || a.account_id || '' })
           + renderAccountModels(a, quota, 'qwen', a.file_name || a.label || a.email || a.account_id || '')
-          + renderMetaDetails(connectionRows('qwen', a), 'Connection details', 'qwen', a, a.file_name || a.label || a.email || a.account_id || '')
+          + renderMetaDetails(connectionRows('qwen', a, quota), 'Connection details', 'qwen', a, a.file_name || a.label || a.email || a.account_id || '')
           + renderAttentionDetails('qwen', a, a.file_name || a.label || a.email || a.account_id || '')
           + '</div>';
       }
@@ -4257,7 +4258,7 @@ async fn dashboard() -> impl IntoResponse {
           + renderAccountHeader(a.name || a.label || a.email || a.account_id || 'N/A', 'grok', a)
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quotaPayload, { provider: 'grok', key: a.file_name || a.label || a.email || a.account_id || '' })
-          + renderMetaDetails(connectionRows('grok', a), 'Connection details', 'grok', a, a.file_name || a.label || a.email || a.account_id || '')
+          + renderMetaDetails(connectionRows('grok', a, quota), 'Connection details', 'grok', a, a.file_name || a.label || a.email || a.account_id || '')
           + renderAttentionDetails('grok', a, a.file_name || a.label || a.email || a.account_id || '')
           + renderAccountModels(a, null, 'grok', a.file_name || a.label || a.email || a.account_id || '')
           + '</div>';
@@ -4363,7 +4364,7 @@ async fn dashboard() -> impl IntoResponse {
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quota, { provider: 'minimax', key: a.file_name || a.label || a.account_id || '' })
           + renderAccountModels(a, quota, 'minimax', a.file_name || a.label || a.account_id || '')
-          + renderMetaDetails(connectionRows('minimax', a), 'Connection details', 'minimax', a, a.file_name || a.label || a.account_id || '')
+          + renderMetaDetails(connectionRows('minimax', a, quota), 'Connection details', 'minimax', a, a.file_name || a.label || a.account_id || '')
           + renderAttentionDetails('minimax', a, a.file_name || a.label || a.account_id || '')
           + '</div>';
       }
@@ -4410,7 +4411,7 @@ async fn dashboard() -> impl IntoResponse {
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quota, { provider: 'copilot', key: a.file_name || a.label || a.login || a.account_id || '' })
           + renderAccountModels(a, quota, 'copilot', a.file_name || a.label || a.login || a.account_id || '')
-          + renderMetaDetails(connectionRows('copilot', a), 'Connection details', 'copilot', a, a.file_name || a.label || a.login || a.account_id || '')
+          + renderMetaDetails(connectionRows('copilot', a, quota), 'Connection details', 'copilot', a, a.file_name || a.label || a.login || a.account_id || '')
           + renderAttentionDetails('copilot', a, a.file_name || a.label || a.login || a.account_id || '')
           + '</div>';
       }
@@ -4464,7 +4465,7 @@ async fn dashboard() -> impl IntoResponse {
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quota, { provider: 'claude', key: a.file_name || a.label || a.organization_uuid || a.account_id || '' })
           + renderAccountModels(a, quota, 'claude', a.file_name || a.label || a.organization_uuid || a.account_id || '')
-          + renderMetaDetails(connectionRows('claude', a), 'Connection details', 'claude', a, a.file_name || a.label || a.organization_uuid || a.account_id || '')
+          + renderMetaDetails(connectionRows('claude', a, quota), 'Connection details', 'claude', a, a.file_name || a.label || a.organization_uuid || a.account_id || '')
           + renderAttentionDetails('claude', a, a.file_name || a.label || a.organization_uuid || a.account_id || '')
           + '</div>';
       }
@@ -4514,7 +4515,7 @@ async fn dashboard() -> impl IntoResponse {
           + '<div class="stat-pills">' + usage + '</div>'
           + renderQuotaBars(quota, { provider: 'glm', key: a.file_name || a.label || a.account_id || '' })
           + renderAccountModels(a, quota, 'glm', a.file_name || a.label || a.account_id || '')
-          + renderMetaDetails(connectionRows('glm', a), 'Connection details', 'glm', a, a.file_name || a.label || a.account_id || '')
+          + renderMetaDetails(connectionRows('glm', a, quota), 'Connection details', 'glm', a, a.file_name || a.label || a.account_id || '')
           + renderAttentionDetails('glm', a, a.file_name || a.label || a.account_id || '')
           + '</div>';
       }
