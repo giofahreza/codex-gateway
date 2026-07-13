@@ -287,7 +287,7 @@ fn default_provider_config(provider: OAuthProvider) -> OAuthProviderConfig {
             client_id: Some(super::claude::auth::DEFAULT_CLIENT_ID.to_string()),
             client_secret: None,
             redirect_uri: Some("https://platform.claude.com/oauth/code/callback".to_string()),
-            authorize_url: Some("https://claude.com/cai/oauth/authorize".to_string()),
+            authorize_url: Some("https://claude.ai/oauth/authorize".to_string()),
             token_url: Some("https://platform.claude.com/v1/oauth/token".to_string()),
             device_code_url: None,
             validate_url: None,

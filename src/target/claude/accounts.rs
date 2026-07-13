@@ -18,6 +18,7 @@ pub struct ClaudeAccount {
     pub account_id: String,
     pub label: String,
     pub email: Option<String>,
+    pub scopes: Vec<String>,
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub token_type: String,
@@ -128,6 +129,19 @@ pub fn load_accounts(cfg: &crate::Config, disabled: &HashSet<String>) -> Vec<Cla
             account_id,
             label,
             email,
+            scopes: value
+                .get("scopes")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
             access_token,
             refresh_token: value
                 .get("refresh_token")

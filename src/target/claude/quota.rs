@@ -943,6 +943,7 @@ mod tests {
         let account = super::super::accounts::ClaudeAccount {
             label: "claude".to_string(),
             email: None,
+            scopes: Vec::new(),
             organization_uuid: String::new(),
             account_id: String::new(),
             file_name: None,

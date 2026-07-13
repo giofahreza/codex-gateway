@@ -123,16 +123,18 @@ async fn start_browser_oauth(
     query: LoginStartQuery,
 ) -> axum::response::Response {
     let pending = super::auth::PendingOAuth::new();
-    let url = match super::auth::build_auth_url(&pending) {
-        Ok(url) => url,
-        Err(err) => {
-            return axum::Json(serde_json::json!({
-                "ok": false,
-                "message": format!("failed to create Claude OAuth URL: {}", err)
-            }))
-            .into_response()
-        }
-    };
+    let url =
+        match super::auth::build_auth_url(&pending, query.organization_uuid.as_deref(), None, None)
+        {
+            Ok(url) => url,
+            Err(err) => {
+                return axum::Json(serde_json::json!({
+                    "ok": false,
+                    "message": format!("failed to create Claude OAuth URL: {}", err)
+                }))
+                .into_response()
+            }
+        };
     let state_token = pending.state_token.clone();
     {
         let mut pending_map = state.claude_oauth_pending.lock().unwrap();
@@ -258,6 +260,9 @@ async fn save_or_oauth_account(state: &crate::AppState, body: &Bytes) -> axum::r
                 .map(|value| value.to_string()),
             token_type: Some("Bearer".to_string()),
             expires_in: payload.expires_in,
+            scope: None,
+            account: None,
+            organization: None,
         };
         return save_token_response(
             state,
@@ -359,15 +364,23 @@ async fn save_token_response(
     base_url: Option<&str>,
 ) -> axum::response::Response {
     let api_base = super::auth::api_base_url(base_url);
-    let models = super::auth::fetch_models(&state.client, &token.access_token, &api_base)
-        .await
-        .unwrap_or_default();
+    let (models_result, profile_result, roles_result) = tokio::join!(
+        super::auth::fetch_models(&state.client, &token.access_token, &api_base),
+        super::auth::fetch_profile_info(&state.client, &token.access_token, &api_base),
+        super::auth::fetch_user_roles(&state.client, &token.access_token, &api_base)
+    );
+    let models = models_result.unwrap_or_default();
+    let profile = profile_result.ok();
+    let roles = roles_result.ok();
+    let identity = super::auth::build_oauth_identity(&token, profile.as_ref(), roles.as_ref());
+
     match super::auth::save_auth(
         &state.cfg,
         organization_uuid,
         label,
         email,
         &token,
+        Some(&identity),
         &models,
         Some(&api_base),
     ) {
