@@ -519,13 +519,26 @@ fn extract_rate_summary(rate_limit: Option<&serde_json::Value>) -> QuotaRateSumm
     let Some(serde_json::Value::Object(obj)) = rate_limit else {
         return QuotaRateSummary::default();
     };
-    let five_hour = obj
-        .get("primary_window")
-        .and_then(|w| extract_window_summary(w, Some("5h")));
-    let weekly = obj
-        .get("secondary_window")
-        .and_then(|w| extract_window_summary(w, Some("weekly")));
-    QuotaRateSummary { five_hour, weekly }
+    let primary_window = obj.get("primary_window");
+    let secondary_window = obj.get("secondary_window");
+    let primary_seconds = primary_window.and_then(window_limit_seconds);
+    let secondary_seconds = secondary_window.and_then(window_limit_seconds);
+
+    let primary_bucket = infer_window_bucket("primary", primary_seconds, secondary_seconds);
+    let secondary_bucket = infer_window_bucket("secondary", secondary_seconds, primary_seconds);
+
+    let mut summary = QuotaRateSummary::default();
+    assign_window_summary(
+        &mut summary,
+        primary_bucket,
+        primary_window.and_then(|window| extract_window_summary(window, primary_bucket)),
+    );
+    assign_window_summary(
+        &mut summary,
+        secondary_bucket,
+        secondary_window.and_then(|window| extract_window_summary(window, secondary_bucket)),
+    );
+    summary
 }
 
 fn extract_additional_rate_limits(
@@ -563,6 +576,10 @@ fn extract_window_summary(
     window: &serde_json::Value,
     default_bucket: Option<&str>,
 ) -> Option<QuotaWindowSummary> {
+    if !window.is_object() {
+        return None;
+    }
+
     let used_percent = window
         .get("used_percent")
         .or_else(|| window.get("usedPercent"))
@@ -596,6 +613,45 @@ fn extract_window_summary(
         used_percent,
         reset_label,
     })
+}
+
+fn assign_window_summary(
+    summary: &mut QuotaRateSummary,
+    bucket: Option<&'static str>,
+    window: Option<QuotaWindowSummary>,
+) {
+    let Some(window) = window else {
+        return;
+    };
+    match bucket {
+        Some("weekly") => summary.weekly = Some(window),
+        _ => summary.five_hour = Some(window),
+    }
+}
+
+fn window_limit_seconds(window: &serde_json::Value) -> Option<i64> {
+    window
+        .get("limit_window_seconds")
+        .or_else(|| window.get("limitWindowSeconds"))
+        .and_then(|value| value.as_i64())
+        .filter(|value| *value > 0)
+}
+
+fn infer_window_bucket(
+    slot: &str,
+    seconds: Option<i64>,
+    other_seconds: Option<i64>,
+) -> Option<&'static str> {
+    match seconds {
+        Some(seconds) if seconds >= 86_400 => Some("weekly"),
+        Some(_) => Some("5h"),
+        None => match (slot, other_seconds) {
+            ("primary", Some(other)) if other >= 86_400 => Some("5h"),
+            ("secondary", Some(other)) if other > 0 && other < 86_400 => Some("weekly"),
+            ("secondary", None) => Some("weekly"),
+            _ => Some("5h"),
+        },
+    }
 }
 
 fn format_reset_after(seconds: i64, bucket: Option<&str>) -> String {
@@ -703,6 +759,65 @@ mod tests {
                 .as_ref()
                 .and_then(|window| window.used_percent),
             Some(34.0)
+        );
+    }
+
+    #[test]
+    fn classifies_primary_weekly_window_when_secondary_is_missing() {
+        let summary = extract_rate_summary(Some(&json!({
+            "primary_window": {
+                "used_percent": 46.0,
+                "limit_window_seconds": 604800,
+                "reset_after_seconds": 579081
+            },
+            "secondary_window": null
+        })));
+
+        assert!(summary.five_hour.is_none());
+        assert_eq!(
+            summary
+                .weekly
+                .as_ref()
+                .and_then(|window| window.used_percent),
+            Some(46.0)
+        );
+        assert_eq!(
+            summary
+                .weekly
+                .as_ref()
+                .map(|window| window.reset_label.as_str()),
+            Some("resets in 6d 16h")
+        );
+    }
+
+    #[test]
+    fn classifies_dual_windows_by_duration_instead_of_slot_name() {
+        let summary = extract_rate_summary(Some(&json!({
+            "primary_window": {
+                "used_percent": 20.0,
+                "limit_window_seconds": 604800,
+                "reset_after_seconds": 500000
+            },
+            "secondary_window": {
+                "used_percent": 70.0,
+                "limit_window_seconds": 18000,
+                "reset_after_seconds": 7200
+            }
+        })));
+
+        assert_eq!(
+            summary
+                .five_hour
+                .as_ref()
+                .and_then(|window| window.used_percent),
+            Some(70.0)
+        );
+        assert_eq!(
+            summary
+                .weekly
+                .as_ref()
+                .and_then(|window| window.used_percent),
+            Some(20.0)
         );
     }
 
