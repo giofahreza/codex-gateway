@@ -1159,7 +1159,9 @@ async fn dashboard() -> impl IntoResponse {
         gap: 16px;
         align-items: start;
       }
-      .providers-grid.provider-layout-row,
+      .providers-grid.provider-layout-row {
+        grid-template-columns: repeat(var(--provider-row-capacity, 1), minmax(0, 1fr));
+      }
       .providers-grid.provider-layout-single {
         grid-template-columns: 1fr;
       }
@@ -2088,6 +2090,9 @@ async fn dashboard() -> impl IntoResponse {
         .providers-grid {
           grid-template-columns: 1fr;
         }
+        .providers-grid.provider-layout-row {
+          grid-template-columns: 1fr;
+        }
         .providers-grid.provider-layout-row .provider-cards,
         .providers-grid.provider-layout-single .provider-cards {
           grid-template-columns: 1fr;
@@ -2484,6 +2489,7 @@ async fn dashboard() -> impl IntoResponse {
       let copilotDevicePollTimer = null;
       let copilotDevicePollInFlight = false;
       let copilotDeviceExpiresAt = 0;
+      let providerRowArrangeTimer = null;
       const THEME_KEY = 'gpt-gateway-theme';
       const CONTEXT_RANGE_KEY = 'gpt-gateway-context-range';
       const PROVIDER_DASHBOARD_SETTINGS_KEY = 'gpt-gateway-provider-dashboard-settings';
@@ -2499,6 +2505,7 @@ async fn dashboard() -> impl IntoResponse {
         'claude',
         'glm'
       ];
+      const PROVIDER_ROW_CARD_WIDTH = 390;
       let pendingCredentialAction = null;
       const modalIds = [
         'addModal',
@@ -2598,6 +2605,56 @@ async fn dashboard() -> impl IntoResponse {
           localStorage.setItem(PROVIDER_DASHBOARD_SETTINGS_KEY, JSON.stringify(dashboardState.providerSettings));
         } catch (_) {}
       }
+      function providerRowCapacity(grid) {
+        if (!grid) return 1;
+        if (window.matchMedia && window.matchMedia('(max-width: 900px)').matches) return 1;
+        var styles = window.getComputedStyle ? window.getComputedStyle(grid) : null;
+        var gap = styles ? parseFloat(styles.columnGap || styles.gap || '16') : 16;
+        if (!Number.isFinite(gap)) gap = 16;
+        var width = grid.getBoundingClientRect().width;
+        if (!Number.isFinite(width) || width <= 0) return 1;
+        return Math.max(1, Math.floor((width + gap) / (PROVIDER_ROW_CARD_WIDTH + gap)));
+      }
+      function providerAccountCardCount(section) {
+        if (!section) return 0;
+        return section.querySelectorAll('.provider-cards > .card').length;
+      }
+      function clearProviderRowArrangement(grid) {
+        if (grid) grid.style.removeProperty('--provider-row-capacity');
+        dashboardProviderKeys.forEach(function(provider) {
+          var section = document.querySelector('[data-provider-section="' + provider + '"]');
+          if (section) section.style.gridColumn = '';
+        });
+      }
+      function applyProviderRowArrangement() {
+        var grid = document.querySelector('.providers-grid');
+        if (!grid) return;
+        var settings = normalizeProviderDashboardSettings(dashboardState.providerSettings);
+        if (settings.viewMode !== 'row') {
+          clearProviderRowArrangement(grid);
+          return;
+        }
+        var capacity = providerRowCapacity(grid);
+        grid.style.setProperty('--provider-row-capacity', String(capacity));
+        dashboardProviderKeys.forEach(function(provider) {
+          var section = document.querySelector('[data-provider-section="' + provider + '"]');
+          if (!section) return;
+          if (settings.hidden[provider] === true) {
+            section.style.gridColumn = '';
+            return;
+          }
+          var count = providerAccountCardCount(section);
+          if (count > capacity) {
+            section.style.gridColumn = '1 / -1';
+          } else {
+            section.style.gridColumn = 'span ' + Math.max(1, count);
+          }
+        });
+      }
+      function scheduleProviderRowArrangement() {
+        clearTimeout(providerRowArrangeTimer);
+        providerRowArrangeTimer = setTimeout(applyProviderRowArrangement, 80);
+      }
       function applyProviderDashboardSettings() {
         var settings = normalizeProviderDashboardSettings(dashboardState.providerSettings);
         dashboardState.providerSettings = settings;
@@ -2616,6 +2673,7 @@ async fn dashboard() -> impl IntoResponse {
           section.style.order = String(orderByProvider[provider] != null ? orderByProvider[provider] : fallbackIndex);
           section.hidden = settings.hidden[provider] === true;
         });
+        applyProviderRowArrangement();
       }
       function providerDashboardVisibleCount() {
         var settings = normalizeProviderDashboardSettings(dashboardState.providerSettings);
@@ -3247,6 +3305,7 @@ async fn dashboard() -> impl IntoResponse {
         setText('pageSubtitle', totalAccounts
           ? totalAccounts + ' accounts across ' + providersWithAccounts + ' providers'
           : 'No accounts loaded yet');
+        applyProviderRowArrangement();
       }
       function notify(message, tone) {
         const toast = document.getElementById('toast');
@@ -6981,6 +7040,7 @@ async fn dashboard() -> impl IntoResponse {
       configureMobileNav();
       configureContextRangeControls();
       configureChartDisclosure();
+      window.addEventListener('resize', scheduleProviderRowArrangement);
       applyProviderDashboardSettings();
       updateOverview();
       bootstrapAdmin();
