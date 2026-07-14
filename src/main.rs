@@ -1159,9 +1159,11 @@ async fn dashboard() -> impl IntoResponse {
         gap: 16px;
         align-items: start;
       }
+      .providers-grid.provider-layout-row,
       .providers-grid.provider-layout-single {
         grid-template-columns: 1fr;
       }
+      .providers-grid.provider-layout-row .provider-cards,
       .providers-grid.provider-layout-single .provider-cards {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(390px, 390px));
@@ -1169,6 +1171,7 @@ async fn dashboard() -> impl IntoResponse {
         justify-content: flex-start;
         align-items: start;
       }
+      .providers-grid.provider-layout-row .provider-cards .card,
       .providers-grid.provider-layout-single .provider-cards .card {
         margin-bottom: 0;
       }
@@ -2085,6 +2088,7 @@ async fn dashboard() -> impl IntoResponse {
         .providers-grid {
           grid-template-columns: 1fr;
         }
+        .providers-grid.provider-layout-row .provider-cards,
         .providers-grid.provider-layout-single .provider-cards {
           grid-template-columns: 1fr;
         }
@@ -2557,6 +2561,9 @@ async fn dashboard() -> impl IntoResponse {
         claude: 'Claude',
         glm: 'GLM (Z.AI)'
       };
+      function normalizeProviderDashboardViewMode(mode) {
+        return mode === 'row' || mode === 'single' ? 'row' : 'column';
+      }
       function normalizeProviderDashboardSettings(value) {
         var known = new Set(dashboardProviderKeys);
         var order = [];
@@ -2575,7 +2582,7 @@ async fn dashboard() -> impl IntoResponse {
         dashboardProviderKeys.forEach(function(provider) {
           if (rawHidden[provider] === true) hidden[provider] = true;
         });
-        var viewMode = value && value.viewMode === 'single' ? 'single' : 'grid';
+        var viewMode = normalizeProviderDashboardViewMode(value && value.viewMode);
         return { order: order, hidden: hidden, viewMode: viewMode };
       }
       function readProviderDashboardSettings() {
@@ -2596,7 +2603,8 @@ async fn dashboard() -> impl IntoResponse {
         dashboardState.providerSettings = settings;
         var grid = document.querySelector('.providers-grid');
         if (grid) {
-          grid.classList.toggle('provider-layout-single', settings.viewMode === 'single');
+          grid.classList.toggle('provider-layout-row', settings.viewMode === 'row');
+          grid.classList.remove('provider-layout-single');
         }
         var orderByProvider = {};
         settings.order.forEach(function(provider, index) {
@@ -2616,12 +2624,12 @@ async fn dashboard() -> impl IntoResponse {
         }).length;
       }
       function providerDashboardViewModeLabel(mode) {
-        return mode === 'single' ? 'single provider rows' : 'current grid';
+        return normalizeProviderDashboardViewMode(mode) === 'row' ? 'row layout' : 'column layout';
       }
       function updateProviderLayoutModeControl() {
         var settings = normalizeProviderDashboardSettings(dashboardState.providerSettings);
         document.querySelectorAll('[data-provider-layout-mode]').forEach(function(button) {
-          var active = button.getAttribute('data-provider-layout-mode') === settings.viewMode;
+          var active = normalizeProviderDashboardViewMode(button.getAttribute('data-provider-layout-mode')) === settings.viewMode;
           button.classList.toggle('is-active', active);
           button.setAttribute('aria-pressed', active ? 'true' : 'false');
         });
@@ -2685,7 +2693,7 @@ async fn dashboard() -> impl IntoResponse {
       }
       function setProviderDashboardViewMode(mode) {
         var settings = normalizeProviderDashboardSettings(dashboardState.providerSettings);
-        settings.viewMode = mode === 'single' ? 'single' : 'grid';
+        settings.viewMode = normalizeProviderDashboardViewMode(mode);
         saveAndRenderProviderDashboardSettings(settings);
       }
       function resetProviderDashboardSettings() {
@@ -5954,8 +5962,8 @@ async fn dashboard() -> impl IntoResponse {
           <div class="settings-block custom-model-form-row">
             <label>Provider layout</label>
             <div class="settings-segmented" role="group" aria-label="Provider layout">
-              <button type="button" data-provider-layout-mode="grid" aria-pressed="false" onclick="setProviderDashboardViewMode('grid')">Current grid</button>
-              <button type="button" data-provider-layout-mode="single" aria-pressed="false" onclick="setProviderDashboardViewMode('single')">Single provider rows</button>
+              <button type="button" data-provider-layout-mode="column" aria-pressed="false" onclick="setProviderDashboardViewMode('column')">Column</button>
+              <button type="button" data-provider-layout-mode="row" aria-pressed="false" onclick="setProviderDashboardViewMode('row')">Row</button>
             </div>
             <div class="settings-help">Applies only to provider sections. Custom models keep their current layout.</div>
           </div>
