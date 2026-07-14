@@ -13,6 +13,10 @@ use uuid::Uuid;
 
 const REQUEST_TIMEOUT_SECS: u64 = 180;
 const DEFAULT_MAX_TOKENS: u64 = 4096;
+const CLAUDE_CODE_ATTRIBUTION_MARKER: &str =
+    "x-anthropic-billing-header: cc_version=2.1.207.3a5; cc_entrypoint=sdk-cli; cch=00000;";
+const CLAUDE_CODE_AGENT_PROMPT: &str =
+    "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
 pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) -> impl IntoResponse {
     if !crate::check_api_key(&state, &headers) {
@@ -388,13 +392,14 @@ async fn post_anthropic_messages(
     stream: bool,
 ) -> Result<reqwest::Response, String> {
     let base_url = super::auth::api_base_url(account.api_base_url.as_deref());
-    let (body, body_beta) = strip_betas_from_body(body);
-    let beta = merge_beta_headers(
+    let (body, body_beta) = prepare_anthropic_body(body);
+    let merged_beta = merge_beta_headers(
         incoming_headers
             .get("anthropic-beta")
             .and_then(|value| value.to_str().ok()),
         body_beta.as_deref(),
     );
+    let beta = super::auth::merged_beta_header(merged_beta.as_deref());
     let anthropic_version = incoming_headers
         .get("anthropic-version")
         .and_then(|value| value.to_str().ok())
@@ -419,9 +424,7 @@ async fn post_anthropic_messages(
         .header("Accept-Encoding", "identity")
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .body(body);
-    if let Some(beta) = beta.as_deref() {
-        request = request.header("anthropic-beta", beta);
-    }
+    request = request.header("anthropic-beta", beta);
     for (key, value) in incoming_headers.iter() {
         let lower = key.as_str().to_ascii_lowercase();
         if should_drop_anthropic_incoming_header(&lower) {
@@ -452,7 +455,7 @@ fn anthropic_messages_url(base_url: &str) -> String {
     format!("{}/v1/messages?beta=true", base)
 }
 
-fn strip_betas_from_body(body: Bytes) -> (Bytes, Option<String>) {
+fn prepare_anthropic_body(body: Bytes) -> (Bytes, Option<String>) {
     let Ok(mut value) = serde_json::from_slice::<Value>(&body) else {
         return (body, None);
     };
@@ -463,8 +466,73 @@ fn strip_betas_from_body(body: Bytes) -> (Bytes, Option<String>) {
         .remove("betas")
         .and_then(normalize_beta_value)
         .filter(|value| !value.is_empty());
+    inject_claude_code_system(object);
     let rebuilt = serde_json::to_vec(&value).unwrap_or_else(|_| body.to_vec());
     (Bytes::from(rebuilt), beta)
+}
+
+fn inject_claude_code_system(object: &mut Map<String, Value>) {
+    let missing_parts = missing_claude_code_system_parts(object.get("system"));
+    if missing_parts.is_empty() {
+        return;
+    }
+
+    let mut blocks = missing_parts
+        .into_iter()
+        .map(|text| json!({ "type": "text", "text": text }))
+        .collect::<Vec<_>>();
+    match object.remove("system") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(mut items)) => blocks.append(&mut items),
+        Some(Value::String(text)) => {
+            let text = text.trim();
+            if !text.is_empty() {
+                blocks.push(json!({ "type": "text", "text": text }));
+            }
+        }
+        Some(Value::Object(item)) => {
+            if is_text_block(&item) {
+                blocks.push(Value::Object(item));
+            } else {
+                let existing = Value::Object(item);
+                if let Some(text) = extract_text_value(Some(&existing)) {
+                    blocks.push(json!({ "type": "text", "text": text }));
+                }
+            }
+        }
+        Some(existing) => {
+            if let Some(text) = extract_text_value(Some(&existing)) {
+                blocks.push(json!({ "type": "text", "text": text }));
+            }
+        }
+    }
+
+    object.insert("system".to_string(), Value::Array(blocks));
+}
+
+fn missing_claude_code_system_parts(system: Option<&Value>) -> Vec<&'static str> {
+    let existing = extract_text_value(system);
+    let existing = existing.as_deref().unwrap_or_default();
+    let mut missing = Vec::new();
+    if !existing.contains(CLAUDE_CODE_ATTRIBUTION_MARKER) {
+        missing.push(CLAUDE_CODE_ATTRIBUTION_MARKER);
+    }
+    if !existing.contains(CLAUDE_CODE_AGENT_PROMPT) {
+        missing.push(CLAUDE_CODE_AGENT_PROMPT);
+    }
+    missing
+}
+
+fn is_text_block(value: &serde_json::Map<String, Value>) -> bool {
+    matches!(
+        value.get("type").and_then(|value| value.as_str()),
+        Some("text")
+    ) && value
+        .get("text")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
 }
 
 fn normalize_beta_value(value: Value) -> Option<String> {
@@ -1744,5 +1812,46 @@ mod tests {
         assert_eq!(out["output"][0]["type"], "function_call");
         assert_eq!(out["output"][0]["arguments"], "{\"ok\":true}");
         assert_eq!(out["usage"]["total_tokens"], 7);
+    }
+
+    #[test]
+    fn prepare_anthropic_body_injects_claude_code_system_markers() {
+        let body = Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": "claude-fable-5",
+                "messages": [{"role": "user", "content": "Reply with OK only."}]
+            }))
+            .unwrap(),
+        );
+        let (prepared, beta) = prepare_anthropic_body(body);
+        let out: Value = serde_json::from_slice(&prepared).unwrap();
+
+        assert_eq!(beta, None);
+        assert_eq!(out["system"][0]["text"], CLAUDE_CODE_ATTRIBUTION_MARKER);
+        assert_eq!(out["system"][1]["text"], CLAUDE_CODE_AGENT_PROMPT);
+    }
+
+    #[test]
+    fn prepare_anthropic_body_preserves_existing_system_content() {
+        let body = Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": "claude-fable-5",
+                "messages": [{"role": "user", "content": "Reply with OK only."}],
+                "system": [{"type": "text", "text": "Keep answers concise."}],
+                "betas": ["fine-grained-tool-streaming-2025-05-14"]
+            }))
+            .unwrap(),
+        );
+        let (prepared, beta) = prepare_anthropic_body(body);
+        let out: Value = serde_json::from_slice(&prepared).unwrap();
+
+        assert_eq!(
+            beta.as_deref(),
+            Some("fine-grained-tool-streaming-2025-05-14")
+        );
+        assert_eq!(out["system"][0]["text"], CLAUDE_CODE_ATTRIBUTION_MARKER);
+        assert_eq!(out["system"][1]["text"], CLAUDE_CODE_AGENT_PROMPT);
+        assert_eq!(out["system"][2]["text"], "Keep answers concise.");
+        assert!(out.get("betas").is_none());
     }
 }
