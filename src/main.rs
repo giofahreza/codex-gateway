@@ -51,7 +51,7 @@ struct UnifiedModelCatalog {
 static UNIFIED_MODEL_CACHE: OnceLock<tokio::sync::Mutex<UnifiedModelCatalog>> = OnceLock::new();
 type CodexModelCache = Option<(std::time::Instant, Bytes)>;
 static CODEX_MODEL_CACHE: OnceLock<tokio::sync::Mutex<CodexModelCache>> = OnceLock::new();
-const MODEL_CACHE_TTL_SECONDS: u64 = 6 * 60 * 60;
+const MODEL_CACHE_TTL_SECONDS: u64 = 10 * 60;
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(3);
 const MODEL_PROVIDER_PREFIXES: [&str; 10] = [
     "cod", "agw", "gem", "qwn", "dsk", "grk", "min", "cop", "cld", "glm",
@@ -199,6 +199,12 @@ struct ApiKeyCreateRequest {
 #[derive(Debug, Deserialize)]
 struct ApiKeyRevokeRequest {
     id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelCatalogRefreshForm {
+    provider: Option<String>,
+    file_name: Option<String>,
 }
 
 #[derive(Default, Clone, Serialize)]
@@ -499,6 +505,7 @@ async fn main() {
         .route("/dashboard.json", any(dashboard_json))
         .route("/dashboard/snapshot.json", any(dashboard_snapshot_route))
         .route("/quota.json", any(quota_json_route))
+        .route("/models/refresh", any(model_catalog_refresh_route))
         .route(
             "/codex/rate-limit-reset-credit/consume",
             any(codex_rate_limit_reset_consume_route),
@@ -2326,12 +2333,31 @@ async fn dashboard() -> impl IntoResponse {
         font-weight: 700;
         font-size: 14px;
       }
+      .provider-badge-main {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
       .provider-badge-count {
         background: var(--surface-alt);
         border-radius: 20px;
         padding: 2px 10px;
         font-size: 12px;
         color: var(--muted);
+      }
+      .provider-refresh-button {
+        margin-left: auto;
+        width: 30px;
+        min-width: 30px;
+        height: 30px;
+        min-height: 30px;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 7px;
+        line-height: 1;
       }
       .empty-state {
         text-align: center;
@@ -2777,71 +2803,101 @@ async fn dashboard() -> impl IntoResponse {
       <div class="providers-grid">
       <section class="provider-section" data-provider-section="codex" aria-labelledby="codexProviderTitle">
         <div class="provider-badge">
-          <span id="codexProviderTitle">Codex</span>
-          <span class="provider-badge-count" id="codexBadgeCount">0 accounts</span>
+          <span class="provider-badge-main">
+            <span id="codexProviderTitle">Codex</span>
+            <span class="provider-badge-count" id="codexBadgeCount">0 accounts</span>
+          </span>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Codex models" aria-label="Refresh Codex models" onclick="refreshModelCatalog('codex')">&#8635;</button>
         </div>
         <div id="codexCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="agw" aria-labelledby="agwProviderTitle">
         <div class="provider-badge">
-          <span id="agwProviderTitle">Antigravity</span>
-          <span class="provider-badge-count" id="agwBadgeCount">0 accounts</span>
+          <span class="provider-badge-main">
+            <span id="agwProviderTitle">Antigravity</span>
+            <span class="provider-badge-count" id="agwBadgeCount">0 accounts</span>
+          </span>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Antigravity models" aria-label="Refresh Antigravity models" onclick="refreshModelCatalog('agw')">&#8635;</button>
         </div>
         <div id="agwCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="gemini" aria-labelledby="geminiProviderTitle">
         <div class="provider-badge">
-          <span id="geminiProviderTitle">Gemini</span>
-          <span class="provider-badge-count" id="geminiBadgeCount">0 accounts</span>
+          <span class="provider-badge-main">
+            <span id="geminiProviderTitle">Gemini</span>
+            <span class="provider-badge-count" id="geminiBadgeCount">0 accounts</span>
+          </span>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Gemini models" aria-label="Refresh Gemini models" onclick="refreshModelCatalog('gemini')">&#8635;</button>
         </div>
         <div id="geminiCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="qwen" aria-labelledby="qwenProviderTitle">
         <div class="provider-badge">
-          <span id="qwenProviderTitle">Qwen</span>
-          <span class="provider-badge-count" id="qwenBadgeCount">0 accounts</span>
+          <span class="provider-badge-main">
+            <span id="qwenProviderTitle">Qwen</span>
+            <span class="provider-badge-count" id="qwenBadgeCount">0 accounts</span>
+          </span>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Qwen models" aria-label="Refresh Qwen models" onclick="refreshModelCatalog('qwen')">&#8635;</button>
         </div>
         <div id="qwenCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="deepseek" aria-labelledby="deepseekProviderTitle">
         <div class="provider-badge">
-          <span id="deepseekProviderTitle">DeepSeek</span>
-          <span class="provider-badge-count" id="deepseekBadgeCount">0 accounts</span>
+          <span class="provider-badge-main">
+            <span id="deepseekProviderTitle">DeepSeek</span>
+            <span class="provider-badge-count" id="deepseekBadgeCount">0 accounts</span>
+          </span>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh DeepSeek models" aria-label="Refresh DeepSeek models" onclick="refreshModelCatalog('deepseek')">&#8635;</button>
         </div>
         <div id="deepseekCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="minimax" aria-labelledby="minimaxProviderTitle">
         <div class="provider-badge">
-          <span id="minimaxProviderTitle">MiniMax</span>
-          <span class="provider-badge-count" id="minimaxBadgeCount">0 accounts</span>
+          <span class="provider-badge-main">
+            <span id="minimaxProviderTitle">MiniMax</span>
+            <span class="provider-badge-count" id="minimaxBadgeCount">0 accounts</span>
+          </span>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh MiniMax models" aria-label="Refresh MiniMax models" onclick="refreshModelCatalog('minimax')">&#8635;</button>
         </div>
         <div id="minimaxCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="grok" aria-labelledby="grokProviderTitle">
         <div class="provider-badge">
-          <span id="grokProviderTitle">Grok (xAI)</span>
-          <span class="provider-badge-count" id="grokBadgeCount">— accounts</span>
+          <span class="provider-badge-main">
+            <span id="grokProviderTitle">Grok (xAI)</span>
+            <span class="provider-badge-count" id="grokBadgeCount">— accounts</span>
+          </span>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Grok models" aria-label="Refresh Grok models" onclick="refreshModelCatalog('grok')">&#8635;</button>
         </div>
         <div id="grokCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="copilot" aria-labelledby="copilotProviderTitle">
         <div class="provider-badge">
-          <span id="copilotProviderTitle">GitHub Copilot</span>
-          <span class="provider-badge-count" id="copilotBadgeCount">0 accounts</span>
+          <span class="provider-badge-main">
+            <span id="copilotProviderTitle">GitHub Copilot</span>
+            <span class="provider-badge-count" id="copilotBadgeCount">0 accounts</span>
+          </span>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh GitHub Copilot models" aria-label="Refresh GitHub Copilot models" onclick="refreshModelCatalog('copilot')">&#8635;</button>
         </div>
         <div id="copilotCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="claude" aria-labelledby="claudeProviderTitle">
         <div class="provider-badge">
-          <span id="claudeProviderTitle">Claude</span>
-          <span class="provider-badge-count" id="claudeBadgeCount">0 accounts</span>
+          <span class="provider-badge-main">
+            <span id="claudeProviderTitle">Claude</span>
+            <span class="provider-badge-count" id="claudeBadgeCount">0 accounts</span>
+          </span>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Claude models" aria-label="Refresh Claude models" onclick="refreshModelCatalog('claude')">&#8635;</button>
         </div>
         <div id="claudeCards" class="provider-cards"></div>
       </section>
       <section class="provider-section" data-provider-section="glm" aria-labelledby="glmProviderTitle">
         <div class="provider-badge">
-          <span id="glmProviderTitle">GLM (Z.AI)</span>
-          <span class="provider-badge-count" id="glmBadgeCount">0 accounts</span>
+          <span class="provider-badge-main">
+            <span id="glmProviderTitle">GLM (Z.AI)</span>
+            <span class="provider-badge-count" id="glmBadgeCount">0 accounts</span>
+          </span>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh GLM models" aria-label="Refresh GLM models" onclick="refreshModelCatalog('glm')">&#8635;</button>
         </div>
         <div id="glmCards" class="provider-cards"></div>
       </section>
@@ -4406,10 +4462,10 @@ async fn dashboard() -> impl IntoResponse {
         return renderCardHeader(
           title,
           renderAccountState(a) + renderAttentionBadge(provider, a),
-          renderAccountActions(a)
+          renderAccountActions(provider, a)
         );
       }
-      function renderAccountActions(a) {
+      function renderAccountActions(provider, a) {
         if (!a || !a.file_name) {
           return '';
         }
@@ -4422,12 +4478,14 @@ async fn dashboard() -> impl IntoResponse {
         const menuArg = escapeHtml(jsString(menuId));
         const fileArg = escapeHtml(jsString(a.file_name));
         const labelArg = escapeHtml(jsString(label));
+        const providerArg = escapeHtml(jsString(provider || ''));
         const forceEnableAction = isCooldown
           ? '<button type="button" role="menuitem" aria-label="' + escapeHtml('Force enable ' + label) + '" onclick="toggleCred(' + fileArg + ', true, ' + labelArg + ')" class="mini-btn action-btn is-enabled">Force enable</button>'
           : '';
         return '<span class="account-menu-wrap">'
           + '<button type="button" class="mini-btn account-menu-button" aria-label="' + escapeHtml('Open actions for ' + label) + '" aria-haspopup="menu" aria-expanded="false" aria-controls="' + escapeHtml(menuId) + '" onclick="toggleAccountActionMenu(event, ' + menuArg + ')">&#8942;</button>'
           + '<span id="' + escapeHtml(menuId) + '" class="account-action-menu" role="menu" hidden onclick="event.stopPropagation()">'
+          + '<button type="button" role="menuitem" aria-label="' + escapeHtml('Refresh models for ' + label) + '" onclick="refreshModelCatalog(' + providerArg + ', ' + fileArg + ')" class="mini-btn action-btn">Refresh models</button>'
           + forceEnableAction
           + '<button type="button" role="menuitem" aria-label="' + escapeHtml(toggleLabel + ' ' + label) + '" onclick="toggleCred(' + fileArg + ', ' + (isEnabled ? 'false' : 'true') + ', ' + labelArg + ')" class="mini-btn action-btn ' + toggleClass + '">' + toggleLabel + '</button>'
           + '<button type="button" role="menuitem" aria-label="' + escapeHtml('Delete ' + label) + '" onclick="deleteCred(' + fileArg + ', ' + labelArg + ')" class="mini-btn action-btn danger">Delete</button>'
@@ -7398,6 +7456,24 @@ async fn dashboard() -> impl IntoResponse {
         notify(data.message || 'Credential updated', data.ok === false ? 'error' : '');
         refreshCredentialViews();
       }
+      async function refreshModelCatalog(provider, fileName) {
+        closeAccountActionMenus();
+        var body = new URLSearchParams();
+        if (provider) body.set('provider', provider);
+        if (fileName) body.set('file_name', fileName);
+        notify('Refreshing model catalog...');
+        const res = await adminFetch('/models/refresh', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          body: body
+        });
+        if (!res) return;
+        const data = await res.json();
+        notify(data.message || 'Model catalog refreshed', data.ok === false ? 'error' : '');
+        refreshCustomModels();
+      }
       function redeemCodexReset(fileName, label, accountId, creditId, creditTitle) {
         var display = label || accountId || fileName || 'this Codex account';
         var resetLabel = creditTitle || 'usage limit reset';
@@ -8056,6 +8132,70 @@ async fn custom_models_json_route(State(state): State<AppState>, headers: Header
         "model_options": model_options,
         "accounts": notification_account_options(&state),
         "path": custom_models::custom_models_path(&state.cfg)
+    }))
+    .into_response()
+}
+
+async fn model_catalog_refresh_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ModelCatalogRefreshForm>,
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+
+    let provider = match form
+        .provider
+        .as_deref()
+        .map(normalize_model_catalog_provider)
+    {
+        Some(Some(provider)) => Some(provider),
+        Some(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("Content-Type", "application/json")],
+                openai_error_body("Unknown model provider", "invalid_request_error", None),
+            )
+                .into_response()
+        }
+        None => None,
+    };
+
+    if form
+        .file_name
+        .as_deref()
+        .is_some_and(|value| !is_safe_credential_file_name(value))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            [("Content-Type", "application/json")],
+            openai_error_body(
+                "Invalid credential file name",
+                "invalid_request_error",
+                None,
+            ),
+        )
+            .into_response();
+    }
+
+    let model_headers = internal_proxy_api_headers(&state);
+    let outcome = refresh_unified_model_cache_now(&state, &model_headers, provider).await;
+    let provider_label = provider.unwrap_or("all");
+    let message = if outcome.started {
+        format!("Model catalog refreshed for {}", provider_label)
+    } else {
+        format!(
+            "Model catalog refresh already running; returned current catalog for {}",
+            provider_label
+        )
+    };
+
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "provider": provider_label,
+        "model_count": outcome.models.len(),
+        "message": message
     }))
     .into_response()
 }
@@ -12207,193 +12347,372 @@ fn preferred_model_provider_prefix(model_id: &str) -> &'static str {
     }
 }
 
+fn normalize_model_catalog_provider(provider: &str) -> Option<&'static str> {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "cod" | "codex" => Some("cod"),
+        "agw" | "antigravity" | "anti-gravity" => Some("agw"),
+        "gem" | "gemini" => Some("gem"),
+        "qwn" | "qwen" => Some("qwn"),
+        "dsk" | "deepseek" | "deep-seek" => Some("dsk"),
+        "grk" | "grok" | "xai" | "x-ai" => Some("grk"),
+        "min" | "minimax" | "mini-max" => Some("min"),
+        "cop" | "copilot" | "github-copilot" => Some("cop"),
+        "cld" | "claude" | "anthropic" => Some("cld"),
+        "glm" | "zai" | "z-ai" => Some("glm"),
+        _ => None,
+    }
+}
+
+fn is_safe_credential_file_name(file_name: &str) -> bool {
+    let path = std::path::Path::new(file_name);
+    !file_name.is_empty()
+        && path.components().count() == 1
+        && matches!(
+            path.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+}
+
 async fn collect_unified_v1_models(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Vec<serde_json::Value> {
-    let cache =
-        UNIFIED_MODEL_CACHE.get_or_init(|| tokio::sync::Mutex::new(UnifiedModelCatalog::default()));
-    let stale_provider_models = {
-        let mut cache = cache.lock().await;
-        if cache.fetched_at.is_some_and(model_cache_is_fresh) {
-            return cache.models.clone();
-        }
-        if cache.refresh_in_flight && !cache.models.is_empty() {
-            return cache.models.clone();
-        }
-        cache.refresh_in_flight = true;
-        cache.provider_models.clone()
+    let (fetched_at, models, refresh_in_flight) = {
+        let cache = unified_model_cache().lock().await;
+        (
+            cache.fetched_at,
+            cache.models.clone(),
+            cache.refresh_in_flight,
+        )
     };
 
-    let codex = async {
-        fetch_provider_models_with_timeout("cod", &stale_provider_models, async {
-            provider_prefixed_models(fetch_codex_v1_models(state, headers).await, "cod")
-        })
-        .await
-    };
-    let gemini = async {
-        fetch_provider_models_with_timeout("gem", &stale_provider_models, async {
-            provider_prefixed_models(
-                fetch_openai_models_from_response(
-                    target::gemini::api::models(State(state.clone()), headers.clone())
-                        .await
-                        .into_response(),
-                )
-                .await,
-                "gem",
-            )
-        })
-        .await
-    };
-    let antigravity = async {
-        fetch_provider_models_with_timeout("agw", &stale_provider_models, async {
-            provider_prefixed_models(
-                fetch_openai_models_from_response(
-                    target::antigravity::api::models(State(state.clone()), headers.clone())
-                        .await
-                        .into_response(),
-                )
-                .await,
-                "agw",
-            )
-        })
-        .await
-    };
-    let qwen = async {
-        fetch_provider_models_with_timeout("qwn", &stale_provider_models, async {
-            provider_prefixed_models(
-                fetch_openai_models_from_response(
-                    target::qwen::api::models(State(state.clone()), headers.clone())
-                        .await
-                        .into_response(),
-                )
-                .await,
-                "qwn",
-            )
-        })
-        .await
-    };
-    let deepseek = async {
-        fetch_provider_models_with_timeout("dsk", &stale_provider_models, async {
-            provider_prefixed_models(
-                fetch_openai_models_from_response(
-                    target::deepseek::api::models(State(state.clone()), headers.clone())
-                        .await
-                        .into_response(),
-                )
-                .await,
-                "dsk",
-            )
-        })
-        .await
-    };
-    let grok = async {
-        fetch_provider_models_with_timeout("grk", &stale_provider_models, async {
-            provider_prefixed_models(
-                fetch_openai_models_from_response(if has_enabled_grok_account(state) {
-                    target::grok::api::models(State(state.clone()), headers.clone())
-                        .await
-                        .into_response()
-                } else {
-                    (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
-                })
-                .await,
-                "grk",
-            )
-        })
-        .await
-    };
-    let minimax = async {
-        fetch_provider_models_with_timeout("min", &stale_provider_models, async {
-            provider_prefixed_models(
-                fetch_openai_models_from_response(if has_enabled_minimax_account(state) {
-                    target::minimax::api::models(State(state.clone()), headers.clone())
-                        .await
-                        .into_response()
-                } else {
-                    (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
-                })
-                .await,
-                "min",
-            )
-        })
-        .await
-    };
-    let copilot = async {
-        fetch_provider_models_with_timeout("cop", &stale_provider_models, async {
-            provider_prefixed_models(
-                fetch_openai_models_from_response(if has_enabled_copilot_account(state) {
-                    target::copilot::api::models(State(state.clone()), headers.clone())
-                        .await
-                        .into_response()
-                } else {
-                    (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
-                })
-                .await,
-                "cop",
-            )
-        })
-        .await
-    };
-    let claude = async {
-        fetch_provider_models_with_timeout("cld", &stale_provider_models, async {
-            provider_prefixed_models(
-                fetch_openai_models_from_response(if has_enabled_claude_account(state) {
-                    target::claude::api::models(State(state.clone()), headers.clone())
-                        .await
-                        .into_response()
-                } else {
-                    (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
-                })
-                .await,
-                "cld",
-            )
-        })
-        .await
-    };
-    let glm = async {
-        fetch_provider_models_with_timeout("glm", &stale_provider_models, async {
-            provider_prefixed_models(
-                fetch_openai_models_from_response(if has_enabled_glm_account(state) {
-                    target::glm::api::models(State(state.clone()), headers.clone())
-                        .await
-                        .into_response()
-                } else {
-                    (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
-                })
-                .await,
-                "glm",
-            )
-        })
-        .await
-    };
-    let (codex, gemini, antigravity, qwen, deepseek, grok, minimax, copilot, claude, glm) = tokio::join!(
-        codex,
-        gemini,
-        antigravity,
-        qwen,
-        deepseek,
-        grok,
-        minimax,
-        copilot,
-        claude,
-        glm
-    );
+    if let Some(fetched_at) = fetched_at {
+        if model_cache_is_fresh(fetched_at) {
+            return models;
+        }
+        if !refresh_in_flight {
+            start_unified_model_cache_refresh(state, headers, None).await;
+        }
+        return models;
+    }
 
+    let outcome = refresh_unified_model_cache_now(state, headers, None).await;
+    if outcome.started || !outcome.models.is_empty() {
+        return outcome.models;
+    }
+
+    wait_for_unified_model_cache(MODEL_LIST_TIMEOUT + Duration::from_millis(750)).await
+}
+
+struct UnifiedModelRefreshOutcome {
+    models: Vec<serde_json::Value>,
+    started: bool,
+}
+
+enum UnifiedModelRefreshStart {
+    Started(HashMap<String, Vec<serde_json::Value>>),
+    Busy(Vec<serde_json::Value>),
+}
+
+fn unified_model_cache() -> &'static tokio::sync::Mutex<UnifiedModelCatalog> {
+    UNIFIED_MODEL_CACHE.get_or_init(|| tokio::sync::Mutex::new(UnifiedModelCatalog::default()))
+}
+
+async fn begin_unified_model_cache_refresh() -> UnifiedModelRefreshStart {
+    let mut cache = unified_model_cache().lock().await;
+    if cache.refresh_in_flight {
+        return UnifiedModelRefreshStart::Busy(cache.models.clone());
+    }
+    cache.refresh_in_flight = true;
+    UnifiedModelRefreshStart::Started(cache.provider_models.clone())
+}
+
+async fn start_unified_model_cache_refresh(
+    state: &AppState,
+    headers: &HeaderMap,
+    provider: Option<&'static str>,
+) -> bool {
+    let UnifiedModelRefreshStart::Started(stale_provider_models) =
+        begin_unified_model_cache_refresh().await
+    else {
+        return false;
+    };
+
+    let state = state.clone();
+    let headers = headers.clone();
+    tokio::spawn(async move {
+        run_unified_model_cache_refresh(&state, &headers, provider, stale_provider_models).await;
+    });
+    true
+}
+
+async fn refresh_unified_model_cache_now(
+    state: &AppState,
+    headers: &HeaderMap,
+    provider: Option<&'static str>,
+) -> UnifiedModelRefreshOutcome {
+    match begin_unified_model_cache_refresh().await {
+        UnifiedModelRefreshStart::Started(stale_provider_models) => UnifiedModelRefreshOutcome {
+            models: run_unified_model_cache_refresh(
+                state,
+                headers,
+                provider,
+                stale_provider_models,
+            )
+            .await,
+            started: true,
+        },
+        UnifiedModelRefreshStart::Busy(models) => UnifiedModelRefreshOutcome {
+            models,
+            started: false,
+        },
+    }
+}
+
+async fn run_unified_model_cache_refresh(
+    state: &AppState,
+    headers: &HeaderMap,
+    provider: Option<&'static str>,
+    stale_provider_models: HashMap<String, Vec<serde_json::Value>>,
+) -> Vec<serde_json::Value> {
+    let updates =
+        fetch_unified_model_provider_updates(state, headers, &stale_provider_models, provider)
+            .await;
+    let mut provider_models = stale_provider_models;
+    for (prefix, models) in updates {
+        provider_models.insert(prefix, models);
+    }
+
+    let models = merge_unified_model_catalog(state, &provider_models);
+    let mut cache = unified_model_cache().lock().await;
+    cache.fetched_at = Some(std::time::Instant::now());
+    cache.models = models.clone();
+    cache.provider_models = provider_models;
+    cache.refresh_in_flight = false;
+    models
+}
+
+async fn fetch_unified_model_provider_updates(
+    state: &AppState,
+    headers: &HeaderMap,
+    stale_provider_models: &HashMap<String, Vec<serde_json::Value>>,
+    provider: Option<&'static str>,
+) -> Vec<(String, Vec<serde_json::Value>)> {
+    let prefixes = provider
+        .map(|prefix| vec![prefix])
+        .unwrap_or_else(|| MODEL_PROVIDER_PREFIXES.to_vec());
+    futures_util::future::join_all(prefixes.into_iter().map(|prefix| {
+        refresh_provider_models_by_prefix(state, headers, stale_provider_models, prefix)
+    }))
+    .await
+}
+
+async fn refresh_provider_models_by_prefix(
+    state: &AppState,
+    headers: &HeaderMap,
+    stale_provider_models: &HashMap<String, Vec<serde_json::Value>>,
+    prefix: &'static str,
+) -> (String, Vec<serde_json::Value>) {
+    let models = match prefix {
+        "cod" => {
+            fetch_provider_models_with_timeout(
+                prefix,
+                stale_provider_models,
+                has_enabled_codex_account(state),
+                async {
+                    fetch_codex_v1_models_result(state, headers)
+                        .await
+                        .map(|models| provider_prefixed_models(models, "cod"))
+                },
+            )
+            .await
+        }
+        "agw" => {
+            fetch_provider_models_with_timeout(
+                prefix,
+                stale_provider_models,
+                has_enabled_antigravity_account(state),
+                async {
+                    fetch_openai_models_from_response_result(
+                        target::antigravity::api::models(State(state.clone()), headers.clone())
+                            .await
+                            .into_response(),
+                    )
+                    .await
+                    .map(|models| provider_prefixed_models(models, "agw"))
+                },
+            )
+            .await
+        }
+        "gem" => {
+            fetch_provider_models_with_timeout(
+                prefix,
+                stale_provider_models,
+                has_enabled_gemini_account(state),
+                async {
+                    fetch_openai_models_from_response_result(
+                        target::gemini::api::models(State(state.clone()), headers.clone())
+                            .await
+                            .into_response(),
+                    )
+                    .await
+                    .map(|models| provider_prefixed_models(models, "gem"))
+                },
+            )
+            .await
+        }
+        "qwn" => {
+            fetch_provider_models_with_timeout(
+                prefix,
+                stale_provider_models,
+                has_enabled_qwen_account(state),
+                async {
+                    fetch_openai_models_from_response_result(
+                        target::qwen::api::models(State(state.clone()), headers.clone())
+                            .await
+                            .into_response(),
+                    )
+                    .await
+                    .map(|models| provider_prefixed_models(models, "qwn"))
+                },
+            )
+            .await
+        }
+        "dsk" => {
+            fetch_provider_models_with_timeout(
+                prefix,
+                stale_provider_models,
+                has_enabled_deepseek_account(state),
+                async {
+                    fetch_openai_models_from_response_result(
+                        target::deepseek::api::models(State(state.clone()), headers.clone())
+                            .await
+                            .into_response(),
+                    )
+                    .await
+                    .map(|models| provider_prefixed_models(models, "dsk"))
+                },
+            )
+            .await
+        }
+        "grk" => {
+            fetch_provider_models_with_timeout(
+                prefix,
+                stale_provider_models,
+                has_enabled_grok_account(state),
+                async {
+                    fetch_openai_models_from_response_result(
+                        target::grok::api::models(State(state.clone()), headers.clone())
+                            .await
+                            .into_response(),
+                    )
+                    .await
+                    .map(|models| provider_prefixed_models(models, "grk"))
+                },
+            )
+            .await
+        }
+        "min" => {
+            fetch_provider_models_with_timeout(
+                prefix,
+                stale_provider_models,
+                has_enabled_minimax_account(state),
+                async {
+                    fetch_openai_models_from_response_result(
+                        target::minimax::api::models(State(state.clone()), headers.clone())
+                            .await
+                            .into_response(),
+                    )
+                    .await
+                    .map(|models| provider_prefixed_models(models, "min"))
+                },
+            )
+            .await
+        }
+        "cop" => {
+            fetch_provider_models_with_timeout(
+                prefix,
+                stale_provider_models,
+                has_enabled_copilot_account(state),
+                async {
+                    fetch_openai_models_from_response_result(
+                        target::copilot::api::models(State(state.clone()), headers.clone())
+                            .await
+                            .into_response(),
+                    )
+                    .await
+                    .map(|models| provider_prefixed_models(models, "cop"))
+                },
+            )
+            .await
+        }
+        "cld" => {
+            fetch_provider_models_with_timeout(
+                prefix,
+                stale_provider_models,
+                has_enabled_claude_account(state),
+                async {
+                    fetch_openai_models_from_response_result(
+                        target::claude::api::models(State(state.clone()), headers.clone())
+                            .await
+                            .into_response(),
+                    )
+                    .await
+                    .map(|models| provider_prefixed_models(models, "cld"))
+                },
+            )
+            .await
+        }
+        "glm" => {
+            fetch_provider_models_with_timeout(
+                prefix,
+                stale_provider_models,
+                has_enabled_glm_account(state),
+                async {
+                    fetch_openai_models_from_response_result(
+                        target::glm::api::models(State(state.clone()), headers.clone())
+                            .await
+                            .into_response(),
+                    )
+                    .await
+                    .map(|models| provider_prefixed_models(models, "glm"))
+                },
+            )
+            .await
+        }
+        _ => Vec::new(),
+    };
+    (prefix.to_string(), models)
+}
+
+async fn fetch_provider_models_with_timeout<F>(
+    prefix: &str,
+    stale_provider_models: &HashMap<String, Vec<serde_json::Value>>,
+    enabled: bool,
+    future: F,
+) -> Vec<serde_json::Value>
+where
+    F: Future<Output = Option<Vec<serde_json::Value>>>,
+{
+    if !enabled {
+        return Vec::new();
+    }
+
+    match tokio::time::timeout(MODEL_LIST_TIMEOUT, future).await {
+        Ok(Some(models)) => models,
+        Ok(None) | Err(_) => stale_provider_models
+            .get(prefix)
+            .cloned()
+            .unwrap_or_default(),
+    }
+}
+
+fn merge_unified_model_catalog(
+    state: &AppState,
+    provider_models: &HashMap<String, Vec<serde_json::Value>>,
+) -> Vec<serde_json::Value> {
     let mut models = Vec::new();
     let mut seen = HashSet::new();
-    let provider_models = HashMap::from([
-        ("cod".to_string(), codex),
-        ("gem".to_string(), gemini),
-        ("agw".to_string(), antigravity),
-        ("qwn".to_string(), qwen),
-        ("dsk".to_string(), deepseek),
-        ("grk".to_string(), grok),
-        ("min".to_string(), minimax),
-        ("cop".to_string(), copilot),
-        ("cld".to_string(), claude),
-        ("glm".to_string(), glm),
-    ]);
     for prefix in MODEL_PROVIDER_PREFIXES {
         append_unique_models(
             &mut models,
@@ -12402,30 +12721,22 @@ async fn collect_unified_v1_models(
         );
     }
     append_unique_models(&mut models, &mut seen, custom_model_openai_entries(state));
-
-    let mut cache = cache.lock().await;
-    cache.fetched_at = Some(std::time::Instant::now());
-    cache.models = models.clone();
-    cache.provider_models = provider_models;
-    cache.refresh_in_flight = false;
-
     models
 }
 
-async fn fetch_provider_models_with_timeout<F>(
-    prefix: &str,
-    stale_provider_models: &HashMap<String, Vec<serde_json::Value>>,
-    future: F,
-) -> Vec<serde_json::Value>
-where
-    F: Future<Output = Vec<serde_json::Value>>,
-{
-    match tokio::time::timeout(MODEL_LIST_TIMEOUT, future).await {
-        Ok(models) => models,
-        Err(_) => stale_provider_models
-            .get(prefix)
-            .cloned()
-            .unwrap_or_default(),
+async fn wait_for_unified_model_cache(timeout: Duration) -> Vec<serde_json::Value> {
+    let started_at = std::time::Instant::now();
+    loop {
+        {
+            let cache = unified_model_cache().lock().await;
+            if !cache.models.is_empty() || !cache.refresh_in_flight {
+                return cache.models.clone();
+            }
+        }
+        if started_at.elapsed() >= timeout {
+            return Vec::new();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -12545,10 +12856,38 @@ fn is_supported_provider_prefix(prefix: &str) -> bool {
 #[cfg(test)]
 mod unified_model_catalog_tests {
     use super::{
-        model_entry_matches_id, provider_prefixed_model, read_sse_prelude,
-        split_provider_prefixed_model_id, sse_error_message, ReqwestByteStream,
+        is_safe_credential_file_name, model_entry_matches_id, normalize_model_catalog_provider,
+        provider_prefixed_model, read_sse_prelude, split_provider_prefixed_model_id,
+        sse_error_message, ReqwestByteStream, MODEL_CACHE_TTL_SECONDS,
     };
     use std::time::Duration;
+
+    #[test]
+    fn unified_model_cache_ttl_is_ten_minutes() {
+        assert_eq!(MODEL_CACHE_TTL_SECONDS, 10 * 60);
+    }
+
+    #[test]
+    fn normalizes_dashboard_and_public_provider_names() {
+        assert_eq!(normalize_model_catalog_provider("codex"), Some("cod"));
+        assert_eq!(normalize_model_catalog_provider("gemini"), Some("gem"));
+        assert_eq!(normalize_model_catalog_provider("qwen"), Some("qwn"));
+        assert_eq!(normalize_model_catalog_provider("deepseek"), Some("dsk"));
+        assert_eq!(normalize_model_catalog_provider("grok"), Some("grk"));
+        assert_eq!(normalize_model_catalog_provider("minimax"), Some("min"));
+        assert_eq!(normalize_model_catalog_provider("copilot"), Some("cop"));
+        assert_eq!(normalize_model_catalog_provider("claude"), Some("cld"));
+        assert_eq!(normalize_model_catalog_provider("glm"), Some("glm"));
+        assert_eq!(normalize_model_catalog_provider("unknown"), None);
+    }
+
+    #[test]
+    fn model_refresh_accepts_only_credential_basenames() {
+        assert!(is_safe_credential_file_name("codex-account.json"));
+        assert!(!is_safe_credential_file_name(""));
+        assert!(!is_safe_credential_file_name("../codex-account.json"));
+        assert!(!is_safe_credential_file_name("nested/codex-account.json"));
+    }
 
     #[test]
     fn provider_prefixed_model_adds_public_prefix_and_keeps_upstream_model() {
@@ -12679,6 +13018,51 @@ data: [DONE]
     }
 }
 
+fn has_enabled_codex_account(state: &AppState) -> bool {
+    state
+        .tokens
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|account| account.enabled)
+}
+
+fn has_enabled_antigravity_account(state: &AppState) -> bool {
+    state
+        .agw_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|account| account.enabled)
+}
+
+fn has_enabled_gemini_account(state: &AppState) -> bool {
+    state
+        .gemini_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|account| account.enabled)
+}
+
+fn has_enabled_qwen_account(state: &AppState) -> bool {
+    state
+        .qwen_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|account| account.enabled)
+}
+
+fn has_enabled_deepseek_account(state: &AppState) -> bool {
+    state
+        .deepseek_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|account| account.enabled)
+}
+
 fn has_enabled_grok_account(state: &AppState) -> bool {
     state
         .grok_accounts
@@ -12743,42 +13127,51 @@ fn append_unique_models(
     }
 }
 
-async fn fetch_codex_v1_models(state: &AppState, headers: &HeaderMap) -> Vec<serde_json::Value> {
+async fn fetch_codex_v1_models_result(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Option<Vec<serde_json::Value>> {
     let Some(body) = cached_raw_codex_models_body(state, headers).await else {
-        return Vec::new();
+        return None;
     };
     let converted = match models_list_to_openai_json(&body) {
         Ok(body) => body,
-        Err(_) => return Vec::new(),
+        Err(_) => return None,
     };
 
-    model_entries_from_openai_list_bytes(&converted)
+    Some(model_entries_from_openai_list_bytes(&converted))
 }
 
-async fn fetch_openai_models_from_response(
+async fn fetch_openai_models_from_response_result(
     response: axum::response::Response,
-) -> Vec<serde_json::Value> {
+) -> Option<Vec<serde_json::Value>> {
     if !response.status().is_success() {
-        return Vec::new();
+        return None;
     }
     let body = match axum::body::to_bytes(response.into_body(), usize::MAX).await {
         Ok(body) => body,
-        Err(_) => return Vec::new(),
+        Err(_) => return None,
     };
-    model_entries_from_openai_list_bytes(&body)
+    try_model_entries_from_openai_list_bytes(&body)
 }
 
 fn model_entries_from_openai_list_bytes(body: &[u8]) -> Vec<serde_json::Value> {
+    try_model_entries_from_openai_list_bytes(body).unwrap_or_default()
+}
+
+fn try_model_entries_from_openai_list_bytes(body: &[u8]) -> Option<Vec<serde_json::Value>> {
     let value: serde_json::Value = match serde_json::from_slice(body) {
         Ok(value) => value,
-        Err(_) => return Vec::new(),
+        Err(_) => return None,
     };
-    value
-        .get("data")
-        .and_then(|value| value.as_array())
-        .or_else(|| value.get("models").and_then(|value| value.as_array()))
-        .cloned()
-        .unwrap_or_default()
+    Some(
+        value
+            .get("data")
+            .and_then(|value| value.as_array())
+            .or_else(|| value.get("models").and_then(|value| value.as_array()))
+            .cloned()
+            .unwrap_or_default(),
+    )
 }
 
 struct CompatSseState<S> {
@@ -16231,13 +16624,13 @@ mod account_selection_tests {
     }
 
     #[test]
-    fn model_cache_ttl_is_six_hours() {
+    fn model_cache_ttl_is_ten_minutes() {
         let now = Instant::now();
         assert!(super::model_cache_is_fresh(
-            now - Duration::from_secs(6 * 60 * 60 - 1)
+            now - Duration::from_secs(10 * 60 - 1)
         ));
         assert!(!super::model_cache_is_fresh(
-            now - Duration::from_secs(6 * 60 * 60 + 1)
+            now - Duration::from_secs(10 * 60 + 1)
         ));
     }
 
