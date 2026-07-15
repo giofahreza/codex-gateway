@@ -310,16 +310,8 @@ struct CounterDelta {
     error_message: Option<String>,
 }
 
-struct StatsDelta {
-    provider: Provider,
-    key: String,
-    label: String,
-    account_id: String,
-    delta: CounterDelta,
-}
-
 enum PersistenceEvent {
-    Stats(StatsDelta),
+    StatsDirty,
     History(usage_store::UsageHistoryEntry),
     ApiKeys(api_keys::ApiKeyStore),
     Shutdown(mpsc::SyncSender<()>),
@@ -2860,7 +2852,6 @@ async fn dashboard() -> impl IntoResponse {
       let dashboardSnapshot = null;
       let dashboardSnapshotAt = 0;
       let dashboardSnapshotRequest = null;
-      let dashboardBulkRender = false;
       let openAgwRows = new Set();
       let openGeminiRows = new Set();
       let openQwenRows = new Set();
@@ -4660,7 +4651,6 @@ async fn dashboard() -> impl IntoResponse {
         });
         lastQuota = quotaMap;
         dashboardState.quotas.codex = quotaMap;
-        if (dashboardBulkRender) return;
         updateOverview();
         refresh();
       }
@@ -4786,7 +4776,6 @@ async fn dashboard() -> impl IntoResponse {
         (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
         lastAgwQuota = quotaMap;
         dashboardState.quotas.agw = quotaMap;
-        if (dashboardBulkRender) return;
         updateOverview();
         refreshAgwAccounts();
       }
@@ -4808,7 +4797,6 @@ async fn dashboard() -> impl IntoResponse {
         (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
         lastGeminiQuota = quotaMap;
         dashboardState.quotas.gemini = quotaMap;
-        if (dashboardBulkRender) return;
         updateOverview();
         refreshGeminiAccounts();
       }
@@ -4830,7 +4818,6 @@ async fn dashboard() -> impl IntoResponse {
         (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
         lastQwenQuota = quotaMap;
         dashboardState.quotas.qwen = quotaMap;
-        if (dashboardBulkRender) return;
         updateOverview();
         refreshQwenAccounts();
       }
@@ -4852,7 +4839,6 @@ async fn dashboard() -> impl IntoResponse {
         (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
         lastDeepSeekQuota = quotaMap;
         dashboardState.quotas.deepseek = quotaMap;
-        if (dashboardBulkRender) return;
         updateOverview();
         refreshDeepSeekAccounts();
       }
@@ -4893,7 +4879,6 @@ async fn dashboard() -> impl IntoResponse {
         (quota.accounts || []).forEach(q => { quotaMap.set(q.file_name || q.label, q); });
         lastMiniMaxQuota = quotaMap;
         dashboardState.quotas.minimax = quotaMap;
-        if (dashboardBulkRender) return;
         updateOverview();
         refreshMiniMaxAccounts();
       }
@@ -4944,7 +4929,6 @@ async fn dashboard() -> impl IntoResponse {
         });
         lastCopilotQuota = quotaMap;
         dashboardState.quotas.copilot = quotaMap;
-        if (dashboardBulkRender) return;
         updateOverview();
         refreshCopilotAccounts();
       }
@@ -5000,7 +4984,6 @@ async fn dashboard() -> impl IntoResponse {
         });
         lastClaudeQuota = quotaMap;
         dashboardState.quotas.claude = quotaMap;
-        if (dashboardBulkRender) return;
         updateOverview();
         refreshClaudeAccounts();
       }
@@ -5048,7 +5031,6 @@ async fn dashboard() -> impl IntoResponse {
         });
         lastGlmQuota = quotaMap;
         dashboardState.quotas.glm = quotaMap;
-        if (dashboardBulkRender) return;
         updateOverview();
         refreshGlmAccounts();
       }
@@ -5919,7 +5901,6 @@ async fn dashboard() -> impl IntoResponse {
         const key = data.account.email || data.account.label || data.account.file_name || '__grok__';
         lastGrokQuota = new Map([[key, data]]);
         dashboardState.quotas.grok = lastGrokQuota;
-        if (dashboardBulkRender) return;
         updateOverview();
         // Re-render the cards so the live overlay shows up immediately.
         // (refreshGrokAccounts is also chained via .then() in startDashboard;
@@ -7413,41 +7394,21 @@ async fn dashboard() -> impl IntoResponse {
         invalidateDashboardSnapshot();
         refreshQuota();
       }
-      async function renderDashboardSnapshot() {
-        dashboardBulkRender = true;
-        try {
-          await Promise.all([
-            refreshQuota(),
-            refreshAgwQuota(),
-            refreshGeminiQuota(),
-            refreshQwenQuota(),
-            refreshDeepSeekQuota(),
-            refreshGrokQuota(),
-            refreshMiniMaxQuota(),
-            refreshCopilotQuota(),
-            refreshClaudeQuota(),
-            refreshGlmQuota()
-          ]);
-        } finally {
-          dashboardBulkRender = false;
-        }
-        await Promise.all([
-          refresh(),
-          refreshAgwAccounts(),
-          refreshGeminiAccounts(),
-          refreshQwenAccounts(),
-          refreshDeepSeekAccounts(),
-          refreshGrokAccounts(),
-          refreshMiniMaxAccounts(),
-          refreshCopilotAccounts(),
-          refreshClaudeAccounts(),
-          refreshGlmAccounts()
-        ]);
-        updateOverview();
+      function renderDashboardSnapshot() {
+        refreshQuota();
+        refreshAgwQuota();
+        refreshGeminiQuota();
+        refreshQwenQuota();
+        refreshDeepSeekQuota();
+        refreshGrokQuota();
+        refreshMiniMaxQuota();
+        refreshCopilotQuota();
+        refreshClaudeQuota();
+        refreshGlmQuota();
       }
       async function startDashboard() {
         await refreshDashboardSnapshot(true);
-        await renderDashboardSnapshot();
+        renderDashboardSnapshot();
         refreshContextChart();
         refreshCustomModels();
         if (dashboardIntervalsStarted) {
@@ -14491,20 +14452,7 @@ fn start_persistence_worker(
             loop {
                 let wait = next_flush.saturating_duration_since(std::time::Instant::now());
                 match receiver.recv_timeout(wait) {
-                    Ok(PersistenceEvent::Stats(update)) => {
-                        {
-                            let mut persisted = persisted_stats.lock().unwrap();
-                            apply_counter_delta_to_store(
-                                &mut persisted,
-                                update.provider,
-                                &update.key,
-                                &update.label,
-                                &update.account_id,
-                                &update.delta,
-                            );
-                        }
-                        stats_dirty = true;
-                    }
+                    Ok(PersistenceEvent::StatsDirty) => stats_dirty = true,
                     Ok(PersistenceEvent::History(entry)) => pending_history.push(entry),
                     Ok(PersistenceEvent::ApiKeys(snapshot)) => pending_api_keys = Some(snapshot),
                     Ok(PersistenceEvent::Shutdown(flushed)) => {
@@ -14977,63 +14925,6 @@ fn apply_counter_delta_to_stats(
     }
 }
 
-fn apply_counter_delta_to_store(
-    store: &mut StatsStore,
-    provider: Provider,
-    key: &str,
-    label: &str,
-    account_id: &str,
-    delta: &CounterDelta,
-) {
-    if delta.request_delta > 0 {
-        store.total_requests += delta.request_delta;
-    }
-    if delta.error_delta > 0 {
-        store.total_errors += delta.error_delta;
-    }
-    store.total_prompt_total += delta.prompt_total_delta;
-    store.total_prompt_error_total += delta.prompt_error_total_delta;
-    store.total_input_tokens += delta.input_tokens_delta;
-    store.total_output_tokens += delta.output_tokens_delta;
-    store.total_tokens_used += delta.total_tokens_delta;
-    store.total_cache_tokens += delta.cache_tokens_delta;
-    store.total_reasoning_tokens += delta.reasoning_tokens_delta;
-    if let Some(observed_at) = delta.observed_at.clone() {
-        if store.first_recorded_at.is_none() {
-            store.first_recorded_at = Some(observed_at.clone());
-        }
-        store.last_recorded_at = Some(observed_at);
-    }
-
-    let entry = store.account_usage_mut(provider, key.to_string());
-    entry.label = label.to_string();
-    entry.account_id = account_id.to_string();
-    entry.requests += delta.request_delta;
-    entry.errors += delta.error_delta;
-    entry.prompt_total += delta.prompt_total_delta;
-    entry.prompt_error_total += delta.prompt_error_total_delta;
-    entry.input_tokens += delta.input_tokens_delta;
-    entry.output_tokens += delta.output_tokens_delta;
-    entry.total_tokens += delta.total_tokens_delta;
-    entry.cache_tokens += delta.cache_tokens_delta;
-    entry.reasoning_tokens += delta.reasoning_tokens_delta;
-    if let Some(observed_at) = delta.observed_at.clone() {
-        if entry.first_seen_at.is_none() {
-            entry.first_seen_at = Some(observed_at.clone());
-        }
-        entry.last_seen_at = Some(observed_at);
-    }
-    if let Some(success_at) = delta.success_at.clone() {
-        entry.last_success_at = Some(success_at);
-    }
-    if let Some(error_at) = delta.error_at.clone() {
-        entry.last_error_at = Some(error_at);
-    }
-    if let Some(error_message) = delta.error_message.clone() {
-        entry.last_error_message = Some(error_message);
-    }
-}
-
 fn update_account_counters(
     state: &AppState,
     provider: Provider,
@@ -15043,6 +14934,55 @@ fn update_account_counters(
     delta: CounterDelta,
 ) {
     let stats_delta = delta.clone();
+    {
+        let mut persisted = state.persisted_stats.lock().unwrap();
+        if delta.request_delta > 0 {
+            persisted.total_requests += delta.request_delta;
+        }
+        if delta.error_delta > 0 {
+            persisted.total_errors += delta.error_delta;
+        }
+        persisted.total_prompt_total += delta.prompt_total_delta;
+        persisted.total_prompt_error_total += delta.prompt_error_total_delta;
+        persisted.total_input_tokens += delta.input_tokens_delta;
+        persisted.total_output_tokens += delta.output_tokens_delta;
+        persisted.total_tokens_used += delta.total_tokens_delta;
+        persisted.total_cache_tokens += delta.cache_tokens_delta;
+        persisted.total_reasoning_tokens += delta.reasoning_tokens_delta;
+        if let Some(observed_at) = delta.observed_at.clone() {
+            if persisted.first_recorded_at.is_none() {
+                persisted.first_recorded_at = Some(observed_at.clone());
+            }
+            persisted.last_recorded_at = Some(observed_at);
+        }
+        let entry = persisted.account_usage_mut(provider, key.clone());
+        entry.label = label.clone();
+        entry.account_id = account_id.clone();
+        entry.requests += delta.request_delta;
+        entry.errors += delta.error_delta;
+        entry.prompt_total += delta.prompt_total_delta;
+        entry.prompt_error_total += delta.prompt_error_total_delta;
+        entry.input_tokens += delta.input_tokens_delta;
+        entry.output_tokens += delta.output_tokens_delta;
+        entry.total_tokens += delta.total_tokens_delta;
+        entry.cache_tokens += delta.cache_tokens_delta;
+        entry.reasoning_tokens += delta.reasoning_tokens_delta;
+        if let Some(observed_at) = delta.observed_at {
+            if entry.first_seen_at.is_none() {
+                entry.first_seen_at = Some(observed_at.clone());
+            }
+            entry.last_seen_at = Some(observed_at);
+        }
+        if let Some(success_at) = delta.success_at {
+            entry.last_success_at = Some(success_at);
+        }
+        if let Some(error_at) = delta.error_at {
+            entry.last_error_at = Some(error_at);
+        }
+        if let Some(error_message) = delta.error_message {
+            entry.last_error_message = Some(error_message);
+        }
+    }
     {
         let mut stats = state.stats.lock().unwrap();
         apply_counter_delta_to_stats(
@@ -15054,19 +14994,7 @@ fn update_account_counters(
             &stats_delta,
         );
     }
-    if state
-        .persistence_tx
-        .send(PersistenceEvent::Stats(StatsDelta {
-            provider,
-            key,
-            label,
-            account_id,
-            delta: stats_delta,
-        }))
-        .is_err()
-    {
-        error!("persistence worker is unavailable; usage stats were not persisted");
-    }
+    let _ = state.persistence_tx.send(PersistenceEvent::StatsDirty);
 }
 
 fn record_request_started(state: &AppState, context: &UsageContext) {
