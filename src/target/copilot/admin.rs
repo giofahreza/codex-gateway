@@ -38,12 +38,15 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
         .map(|account| {
             let stats_key = crate::copilot_stats_key(account);
             let usage = usage_by_key.get(&stats_key).cloned().unwrap_or_default();
+            let runtime =
+                crate::router_account_runtime_json(&state, "copilot", &stats_key, account.enabled);
             serde_json::json!({
                 "account_id": account.account_id,
                 "label": account.label,
                 "login": account.login,
                 "file_name": account.file_name,
                 "enabled": account.enabled,
+                "runtime": runtime,
                 "account_type": account.account_type,
                 "copilot_expires_at": unix_to_rfc3339(account.copilot_expires_at),
                 "models": account.models.iter().filter(|model| super::accounts::is_app_accessible_model(&model.id)).map(|model| serde_json::json!({

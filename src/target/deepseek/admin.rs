@@ -31,11 +31,14 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
         .map(|account| {
             let stats_key = crate::deepseek_stats_key(account);
             let usage = usage_by_key.get(&stats_key).cloned().unwrap_or_default();
+            let runtime =
+                crate::router_account_runtime_json(&state, "deepseek", &stats_key, account.enabled);
             serde_json::json!({
                 "account_id": account.account_id,
                 "label": account.label,
                 "file_name": account.file_name,
                 "enabled": account.enabled,
+                "runtime": runtime,
                 "base_url": account.base_url,
                 "requests": usage.requests,
                 "errors": usage.errors,

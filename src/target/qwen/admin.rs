@@ -58,6 +58,8 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
         .iter()
         .map(|account| {
             let stats_key = crate::qwen_stats_key(account);
+            let runtime =
+                crate::router_account_runtime_json(&state, "qwen", &stats_key, account.enabled);
             let (
                 requests,
                 errors,
@@ -81,6 +83,7 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
                 "subject": account.subject,
                 "file_name": account.file_name,
                 "enabled": account.enabled,
+                "runtime": runtime,
                 "resource_url": account.resource_url,
                 "expired_at": account.expired_at,
                 "requests": requests,

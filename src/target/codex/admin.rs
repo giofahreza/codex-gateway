@@ -193,6 +193,9 @@ pub async fn toggle_credential(
     super::super::copilot::accounts::reload_state(&state);
     super::super::claude::accounts::reload_state(&state);
     super::super::glm::accounts::reload_state(&state);
+    if enable {
+        crate::router_clear_credential_file_cooldown(&state, file_name);
+    }
 
     axum::Json(serde_json::json!({
         "ok": true,

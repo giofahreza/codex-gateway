@@ -53,6 +53,8 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
         .iter()
         .map(|a| {
             let stats_key = crate::grok_stats_key(a);
+            let runtime =
+                crate::router_account_runtime_json(&state, "grok", &stats_key, a.enabled);
             let (
                 requests,
                 errors,
@@ -81,6 +83,7 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
                 "zdr_status": a.zdr_status,
                 "file_name": a.file_name,
                 "enabled": a.enabled,
+                "runtime": runtime,
                 "api_base_url": a.api_base_url,
                 "models": a.models,
                 "rate_limits": a.rate_limits,

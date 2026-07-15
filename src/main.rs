@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
+    future::Future,
     net::SocketAddr,
     path::PathBuf,
     pin::Pin,
@@ -39,11 +40,22 @@ use target::codex::auth::PendingOAuth;
 use target::codex::quota::QuotaCacheEntry;
 use target::codex::tokens::UpstreamToken;
 
-type UnifiedModelCache = Option<(std::time::Instant, Vec<serde_json::Value>)>;
-static UNIFIED_MODEL_CACHE: OnceLock<tokio::sync::Mutex<UnifiedModelCache>> = OnceLock::new();
+#[derive(Clone, Default)]
+struct UnifiedModelCatalog {
+    fetched_at: Option<std::time::Instant>,
+    models: Vec<serde_json::Value>,
+    provider_models: HashMap<String, Vec<serde_json::Value>>,
+    refresh_in_flight: bool,
+}
+
+static UNIFIED_MODEL_CACHE: OnceLock<tokio::sync::Mutex<UnifiedModelCatalog>> = OnceLock::new();
 type CodexModelCache = Option<(std::time::Instant, Bytes)>;
 static CODEX_MODEL_CACHE: OnceLock<tokio::sync::Mutex<CodexModelCache>> = OnceLock::new();
 const MODEL_CACHE_TTL_SECONDS: u64 = 6 * 60 * 60;
+const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(3);
+const MODEL_PROVIDER_PREFIXES: [&str; 10] = [
+    "cod", "agw", "gem", "qwn", "dsk", "grk", "min", "cop", "cld", "glm",
+];
 
 #[derive(Clone)]
 struct AppState {
@@ -1917,6 +1929,12 @@ async fn dashboard() -> impl IntoResponse {
         border-color: rgba(34, 197, 94, 0.35);
       }
       .account-state.enabled::before { background: var(--success); }
+      .account-state.cooldown {
+        color: var(--warning);
+        border-color: rgba(245, 158, 11, 0.5);
+        background: rgba(245, 158, 11, 0.1);
+      }
+      .account-state.cooldown::before { background: var(--warning); }
       .account-state.disabled {
         color: var(--danger);
         border-color: rgba(239, 68, 68, 0.42);
@@ -4349,8 +4367,21 @@ async fn dashboard() -> impl IntoResponse {
       }
       function renderAccountState(a) {
         const enabled = !a || a.enabled !== false;
-        return '<span class="account-state ' + (enabled ? 'enabled' : 'disabled') + '">'
-          + (enabled ? 'Enabled' : 'Disabled')
+        const runtime = a && a.runtime;
+        const runtimeStatus = runtime && String(runtime.status || '').toLowerCase();
+        const isCooldown = enabled && runtimeStatus === 'cooldown';
+        const cls = isCooldown ? 'cooldown' : (enabled ? 'enabled' : 'disabled');
+        const label = isCooldown ? 'Cooldown' : (enabled ? 'Enabled' : 'Disabled');
+        var title = '';
+        if (isCooldown) {
+          title = 'Router cooldown';
+          if (runtime.cooldown_remaining_seconds != null) {
+            title += ' - ' + runtime.cooldown_remaining_seconds + 's remaining';
+          }
+        }
+        const attrs = title ? ' title="' + escapeHtml(title) + '" aria-label="' + escapeHtml(title) + '"' : '';
+        return '<span class="account-state ' + cls + '"' + attrs + '>'
+          + label
           + '</span>';
       }
       function renderAttentionBadge(provider, a) {
@@ -4384,15 +4415,20 @@ async fn dashboard() -> impl IntoResponse {
         }
         const label = accountLabel(a);
         const isEnabled = a.enabled !== false;
+        const isCooldown = isEnabled && a.runtime && String(a.runtime.status || '').toLowerCase() === 'cooldown';
         const toggleLabel = isEnabled ? 'Disable' : 'Enable';
         const toggleClass = isEnabled ? 'danger' : 'is-enabled';
         const menuId = accountActionMenuId(a.file_name);
         const menuArg = escapeHtml(jsString(menuId));
         const fileArg = escapeHtml(jsString(a.file_name));
         const labelArg = escapeHtml(jsString(label));
+        const forceEnableAction = isCooldown
+          ? '<button type="button" role="menuitem" aria-label="' + escapeHtml('Force enable ' + label) + '" onclick="toggleCred(' + fileArg + ', true, ' + labelArg + ')" class="mini-btn action-btn is-enabled">Force enable</button>'
+          : '';
         return '<span class="account-menu-wrap">'
           + '<button type="button" class="mini-btn account-menu-button" aria-label="' + escapeHtml('Open actions for ' + label) + '" aria-haspopup="menu" aria-expanded="false" aria-controls="' + escapeHtml(menuId) + '" onclick="toggleAccountActionMenu(event, ' + menuArg + ')">&#8942;</button>'
           + '<span id="' + escapeHtml(menuId) + '" class="account-action-menu" role="menu" hidden onclick="event.stopPropagation()">'
+          + forceEnableAction
           + '<button type="button" role="menuitem" aria-label="' + escapeHtml(toggleLabel + ' ' + label) + '" onclick="toggleCred(' + fileArg + ', ' + (isEnabled ? 'false' : 'true') + ', ' + labelArg + ')" class="mini-btn action-btn ' + toggleClass + '">' + toggleLabel + '</button>'
           + '<button type="button" role="menuitem" aria-label="' + escapeHtml('Delete ' + label) + '" onclick="deleteCred(' + fileArg + ', ' + labelArg + ')" class="mini-btn action-btn danger">Delete</button>'
           + '</span>'
@@ -7738,6 +7774,27 @@ async fn dashboard_json(State(state): State<AppState>, headers: HeaderMap) -> Re
                 let tokens = state.tokens.lock().unwrap();
                 tokens.get(i).and_then(|t| t.expired_at.clone())
             };
+            let runtime = {
+                let tokens = state.tokens.lock().unwrap();
+                tokens
+                    .get(i)
+                    .map(|token| {
+                        router_account_runtime_json(
+                            &state,
+                            "codex",
+                            &codex_stats_key(token),
+                            token.enabled,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        serde_json::json!({
+                            "status": "disabled",
+                            "cooldown_remaining_seconds": null,
+                            "active_requests": 0,
+                            "consecutive_failures": 0
+                        })
+                    })
+            };
             serde_json::json!({
                 "label": a.label,
                 "account_id": a.account_id,
@@ -7746,6 +7803,7 @@ async fn dashboard_json(State(state): State<AppState>, headers: HeaderMap) -> Re
                 "file_name": file_name,
                 "enabled": enabled,
                 "expired_at": expired_at,
+                "runtime": runtime,
                 "last_success_at": a.last_success_at,
                 "last_error_at": a.last_error_at,
                 "last_error_message": a.last_error_message
@@ -10270,9 +10328,15 @@ async fn proxy(
                 }
             };
             if let Some(message) = sse_error_message(&body_bytes) {
-                record_codex_error(&state, &codex_context, &message);
+                let affects_account_health = codex_error_affects_account_health(&message);
+                record_codex_error_with_health(
+                    &state,
+                    &codex_context,
+                    &message,
+                    affects_account_health,
+                );
                 last_error = Some((StatusCode::BAD_GATEWAY, message.clone()));
-                if attempt_idx + 1 < token_candidates.len() {
+                if affects_account_health && attempt_idx + 1 < token_candidates.len() {
                     continue;
                 }
                 return (
@@ -10316,9 +10380,15 @@ async fn proxy(
                     );
                 }
                 Err(message) => {
-                    record_codex_error(&state, &codex_context, &message);
+                    let affects_account_health = codex_error_affects_account_health(&message);
+                    record_codex_error_with_health(
+                        &state,
+                        &codex_context,
+                        &message,
+                        affects_account_health,
+                    );
                     last_error = Some((StatusCode::BAD_GATEWAY, message.clone()));
-                    if attempt_idx + 1 < token_candidates.len() {
+                    if affects_account_health && attempt_idx + 1 < token_candidates.len() {
                         continue;
                     }
                     return if matches!(source_api, SourceApi::V1) {
@@ -10435,7 +10505,13 @@ async fn proxy(
             }
         };
         if let Some(message) = sse_error_message(&body_bytes) {
-            record_codex_error(&state, &codex_context, &message);
+            let affects_account_health = codex_error_affects_account_health(&message);
+            record_codex_error_with_health(
+                &state,
+                &codex_context,
+                &message,
+                affects_account_health,
+            );
             return (
                 StatusCode::BAD_GATEWAY,
                 [("Content-Type", "application/json")],
@@ -11863,8 +11939,15 @@ async fn dispatch_codex_custom_target(
                 .unwrap_or(false);
             if is_sse {
                 if let Some(message) = sse_error_message(&body_bytes) {
-                    record_codex_error(&state, &context, &message);
-                    if attempt_idx + 1 < token_candidates.len()
+                    let affects_account_health = codex_error_affects_account_health(&message);
+                    record_codex_error_with_health(
+                        &state,
+                        &context,
+                        &message,
+                        affects_account_health,
+                    );
+                    if affects_account_health
+                        && attempt_idx + 1 < token_candidates.len()
                         && should_retry_account_error(StatusCode::TOO_MANY_REQUESTS, &message)
                     {
                         last_error = Some((StatusCode::TOO_MANY_REQUESTS, message));
@@ -12128,125 +12211,161 @@ async fn collect_unified_v1_models(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Vec<serde_json::Value> {
-    let cache = UNIFIED_MODEL_CACHE.get_or_init(|| tokio::sync::Mutex::new(None));
-    // Keep one refresh in flight. Concurrent catalog requests wait for that
-    // result instead of launching another full provider fan-out.
-    let mut cache = cache.lock().await;
-    if let Some((fetched_at, models)) = cache.as_ref() {
-        if model_cache_is_fresh(*fetched_at) {
-            return models.clone();
+    let cache =
+        UNIFIED_MODEL_CACHE.get_or_init(|| tokio::sync::Mutex::new(UnifiedModelCatalog::default()));
+    let stale_provider_models = {
+        let mut cache = cache.lock().await;
+        if cache.fetched_at.is_some_and(model_cache_is_fresh) {
+            return cache.models.clone();
         }
-    }
-    let codex =
-        async { provider_prefixed_models(fetch_codex_v1_models(state, headers).await, "cod") };
+        if cache.refresh_in_flight && !cache.models.is_empty() {
+            return cache.models.clone();
+        }
+        cache.refresh_in_flight = true;
+        cache.provider_models.clone()
+    };
+
+    let codex = async {
+        fetch_provider_models_with_timeout("cod", &stale_provider_models, async {
+            provider_prefixed_models(fetch_codex_v1_models(state, headers).await, "cod")
+        })
+        .await
+    };
     let gemini = async {
-        provider_prefixed_models(
-            fetch_openai_models_from_response(
-                target::gemini::api::models(State(state.clone()), headers.clone())
-                    .await
-                    .into_response(),
+        fetch_provider_models_with_timeout("gem", &stale_provider_models, async {
+            provider_prefixed_models(
+                fetch_openai_models_from_response(
+                    target::gemini::api::models(State(state.clone()), headers.clone())
+                        .await
+                        .into_response(),
+                )
+                .await,
+                "gem",
             )
-            .await,
-            "gem",
-        )
+        })
+        .await
     };
     let antigravity = async {
-        provider_prefixed_models(
-            fetch_openai_models_from_response(
-                target::antigravity::api::models(State(state.clone()), headers.clone())
-                    .await
-                    .into_response(),
+        fetch_provider_models_with_timeout("agw", &stale_provider_models, async {
+            provider_prefixed_models(
+                fetch_openai_models_from_response(
+                    target::antigravity::api::models(State(state.clone()), headers.clone())
+                        .await
+                        .into_response(),
+                )
+                .await,
+                "agw",
             )
-            .await,
-            "agw",
-        )
+        })
+        .await
     };
     let qwen = async {
-        provider_prefixed_models(
-            fetch_openai_models_from_response(
-                target::qwen::api::models(State(state.clone()), headers.clone())
-                    .await
-                    .into_response(),
+        fetch_provider_models_with_timeout("qwn", &stale_provider_models, async {
+            provider_prefixed_models(
+                fetch_openai_models_from_response(
+                    target::qwen::api::models(State(state.clone()), headers.clone())
+                        .await
+                        .into_response(),
+                )
+                .await,
+                "qwn",
             )
-            .await,
-            "qwn",
-        )
+        })
+        .await
     };
     let deepseek = async {
-        provider_prefixed_models(
-            fetch_openai_models_from_response(
-                target::deepseek::api::models(State(state.clone()), headers.clone())
-                    .await
-                    .into_response(),
+        fetch_provider_models_with_timeout("dsk", &stale_provider_models, async {
+            provider_prefixed_models(
+                fetch_openai_models_from_response(
+                    target::deepseek::api::models(State(state.clone()), headers.clone())
+                        .await
+                        .into_response(),
+                )
+                .await,
+                "dsk",
             )
-            .await,
-            "dsk",
-        )
+        })
+        .await
     };
     let grok = async {
-        provider_prefixed_models(
-            fetch_openai_models_from_response(if has_enabled_grok_account(state) {
-                target::grok::api::models(State(state.clone()), headers.clone())
-                    .await
-                    .into_response()
-            } else {
-                (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
-            })
-            .await,
-            "grk",
-        )
+        fetch_provider_models_with_timeout("grk", &stale_provider_models, async {
+            provider_prefixed_models(
+                fetch_openai_models_from_response(if has_enabled_grok_account(state) {
+                    target::grok::api::models(State(state.clone()), headers.clone())
+                        .await
+                        .into_response()
+                } else {
+                    (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
+                })
+                .await,
+                "grk",
+            )
+        })
+        .await
     };
     let minimax = async {
-        provider_prefixed_models(
-            fetch_openai_models_from_response(if has_enabled_minimax_account(state) {
-                target::minimax::api::models(State(state.clone()), headers.clone())
-                    .await
-                    .into_response()
-            } else {
-                (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
-            })
-            .await,
-            "min",
-        )
+        fetch_provider_models_with_timeout("min", &stale_provider_models, async {
+            provider_prefixed_models(
+                fetch_openai_models_from_response(if has_enabled_minimax_account(state) {
+                    target::minimax::api::models(State(state.clone()), headers.clone())
+                        .await
+                        .into_response()
+                } else {
+                    (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
+                })
+                .await,
+                "min",
+            )
+        })
+        .await
     };
     let copilot = async {
-        provider_prefixed_models(
-            fetch_openai_models_from_response(if has_enabled_copilot_account(state) {
-                target::copilot::api::models(State(state.clone()), headers.clone())
-                    .await
-                    .into_response()
-            } else {
-                (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
-            })
-            .await,
-            "cop",
-        )
+        fetch_provider_models_with_timeout("cop", &stale_provider_models, async {
+            provider_prefixed_models(
+                fetch_openai_models_from_response(if has_enabled_copilot_account(state) {
+                    target::copilot::api::models(State(state.clone()), headers.clone())
+                        .await
+                        .into_response()
+                } else {
+                    (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
+                })
+                .await,
+                "cop",
+            )
+        })
+        .await
     };
     let claude = async {
-        provider_prefixed_models(
-            fetch_openai_models_from_response(if has_enabled_claude_account(state) {
-                target::claude::api::models(State(state.clone()), headers.clone())
-                    .await
-                    .into_response()
-            } else {
-                (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
-            })
-            .await,
-            "cld",
-        )
+        fetch_provider_models_with_timeout("cld", &stale_provider_models, async {
+            provider_prefixed_models(
+                fetch_openai_models_from_response(if has_enabled_claude_account(state) {
+                    target::claude::api::models(State(state.clone()), headers.clone())
+                        .await
+                        .into_response()
+                } else {
+                    (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
+                })
+                .await,
+                "cld",
+            )
+        })
+        .await
     };
     let glm = async {
-        provider_prefixed_models(
-            fetch_openai_models_from_response(if has_enabled_glm_account(state) {
-                target::glm::api::models(State(state.clone()), headers.clone())
-                    .await
-                    .into_response()
-            } else {
-                (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
-            })
-            .await,
-            "glm",
-        )
+        fetch_provider_models_with_timeout("glm", &stale_provider_models, async {
+            provider_prefixed_models(
+                fetch_openai_models_from_response(if has_enabled_glm_account(state) {
+                    target::glm::api::models(State(state.clone()), headers.clone())
+                        .await
+                        .into_response()
+                } else {
+                    (StatusCode::SERVICE_UNAVAILABLE, "").into_response()
+                })
+                .await,
+                "glm",
+            )
+        })
+        .await
     };
     let (codex, gemini, antigravity, qwen, deepseek, grok, minimax, copilot, claude, glm) = tokio::join!(
         codex,
@@ -12263,30 +12382,56 @@ async fn collect_unified_v1_models(
 
     let mut models = Vec::new();
     let mut seen = HashSet::new();
-    for provider_models in [
-        codex,
-        gemini,
-        antigravity,
-        qwen,
-        deepseek,
-        grok,
-        minimax,
-        copilot,
-        claude,
-        glm,
-    ] {
-        append_unique_models(&mut models, &mut seen, provider_models);
+    let provider_models = HashMap::from([
+        ("cod".to_string(), codex),
+        ("gem".to_string(), gemini),
+        ("agw".to_string(), antigravity),
+        ("qwn".to_string(), qwen),
+        ("dsk".to_string(), deepseek),
+        ("grk".to_string(), grok),
+        ("min".to_string(), minimax),
+        ("cop".to_string(), copilot),
+        ("cld".to_string(), claude),
+        ("glm".to_string(), glm),
+    ]);
+    for prefix in MODEL_PROVIDER_PREFIXES {
+        append_unique_models(
+            &mut models,
+            &mut seen,
+            provider_models.get(prefix).cloned().unwrap_or_default(),
+        );
     }
     append_unique_models(&mut models, &mut seen, custom_model_openai_entries(state));
 
-    *cache = Some((std::time::Instant::now(), models.clone()));
+    let mut cache = cache.lock().await;
+    cache.fetched_at = Some(std::time::Instant::now());
+    cache.models = models.clone();
+    cache.provider_models = provider_models;
+    cache.refresh_in_flight = false;
 
     models
 }
 
+async fn fetch_provider_models_with_timeout<F>(
+    prefix: &str,
+    stale_provider_models: &HashMap<String, Vec<serde_json::Value>>,
+    future: F,
+) -> Vec<serde_json::Value>
+where
+    F: Future<Output = Vec<serde_json::Value>>,
+{
+    match tokio::time::timeout(MODEL_LIST_TIMEOUT, future).await {
+        Ok(models) => models,
+        Err(_) => stale_provider_models
+            .get(prefix)
+            .cloned()
+            .unwrap_or_default(),
+    }
+}
+
 async fn invalidate_unified_model_cache() {
     if let Some(cache) = UNIFIED_MODEL_CACHE.get() {
-        *cache.lock().await = None;
+        *cache.lock().await = UnifiedModelCatalog::default();
     }
 }
 
@@ -13818,6 +13963,19 @@ pub(crate) fn router_reservation_cancelled(state: &AppState, provider: &str, acc
     }
 }
 
+fn router_request_finished_neutral(state: &AppState, provider: &str, account_key: &str) {
+    let key = account_router_key(provider, account_key);
+    let now = std::time::Instant::now();
+    let mut router = state.account_router.lock().unwrap();
+    let runtime = router.entry(key).or_default();
+    runtime.active_requests = runtime.active_requests.saturating_sub(1);
+    if runtime.cooldown_until.is_some_and(|until| until <= now) {
+        runtime.consecutive_failures = 0;
+        runtime.cooldown_until = None;
+    }
+    runtime.probing = false;
+}
+
 fn router_request_finished(
     state: &AppState,
     provider: &str,
@@ -13873,6 +14031,161 @@ fn apply_router_failure(runtime: &mut AccountRuntimeState, message: &str, now: s
     };
     runtime.cooldown_until = Some(now + Duration::from_secs(delay_seconds.clamp(1, 30 * 60)));
     runtime.probing = false;
+}
+
+fn codex_error_affects_account_health(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    let message = message.trim();
+    if message.is_empty()
+        || message == "upstream returned an sse error"
+        || message.contains("invalid request history")
+    {
+        return false;
+    }
+
+    let is_quota_or_capacity = [
+        "rate limit",
+        "ratelimit",
+        "too many requests",
+        "quota",
+        "resource exhausted",
+        "insufficient_quota",
+        "capacity",
+        "overloaded",
+        "temporarily unavailable",
+        "try again later",
+        "usage limit",
+        "daily limit",
+        "weekly limit",
+        "monthly limit",
+        "requests limit",
+        "token limit exceeded",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle));
+    if contains_http_status(message, 400) && !is_quota_or_capacity {
+        return false;
+    }
+
+    [401, 403, 408, 409, 429, 500, 502, 503, 504]
+        .iter()
+        .any(|status| contains_http_status(message, *status))
+        || is_quota_or_capacity
+        || [
+            "unauthorized",
+            "forbidden",
+            "timeout",
+            "timed out",
+            "failed to reach",
+            "upstream send failed",
+            "stream read failed",
+            "body read failed",
+            "error body read failed",
+            "error decoding response body",
+            "ended before producing",
+            "oversized sse prelude",
+        ]
+        .iter()
+        .any(|needle| message.contains(needle))
+}
+
+pub(crate) fn router_account_runtime_json(
+    state: &AppState,
+    provider: &str,
+    account_key: &str,
+    enabled: bool,
+) -> serde_json::Value {
+    let key = account_router_key(provider, account_key);
+    let now = std::time::Instant::now();
+    let mut router = state.account_router.lock().unwrap();
+    let runtime = router.entry(key).or_default();
+    let status = account_runtime_status(enabled, runtime, now);
+    let cooldown_remaining_seconds = match runtime.cooldown_until {
+        Some(until) if until > now => Some((until - now).as_secs().max(1)),
+        _ => None,
+    };
+    serde_json::json!({
+        "status": account_runtime_status_label(status),
+        "cooldown_remaining_seconds": cooldown_remaining_seconds,
+        "active_requests": runtime.active_requests,
+        "consecutive_failures": runtime.consecutive_failures,
+    })
+}
+
+fn account_runtime_status_label(status: AccountRuntimeStatus) -> &'static str {
+    match status {
+        AccountRuntimeStatus::Healthy => "healthy",
+        AccountRuntimeStatus::Cooldown => "cooldown",
+        AccountRuntimeStatus::Probing => "probing",
+        AccountRuntimeStatus::Disabled => "disabled",
+    }
+}
+
+fn clear_router_account_runtime(state: &AppState, provider: &str, account_key: &str) {
+    let key = account_router_key(provider, account_key);
+    let mut router = state.account_router.lock().unwrap();
+    let runtime = router.entry(key).or_default();
+    runtime.consecutive_failures = 0;
+    runtime.cooldown_until = None;
+    runtime.probing = false;
+}
+
+pub(crate) fn router_clear_credential_file_cooldown(state: &AppState, file_name: &str) {
+    let file_name = file_name.trim();
+    if file_name.is_empty() {
+        return;
+    }
+
+    for token in state.tokens.lock().unwrap().iter() {
+        if token.file_name.as_deref() == Some(file_name) {
+            clear_router_account_runtime(state, "codex", &codex_stats_key(token));
+        }
+    }
+    for account in state.agw_accounts.lock().unwrap().iter() {
+        if account.file_name.as_deref() == Some(file_name) {
+            clear_router_account_runtime(state, "antigravity", &antigravity_stats_key(account));
+        }
+    }
+    for account in state.gemini_accounts.lock().unwrap().iter() {
+        if account.file_name.as_deref() == Some(file_name) {
+            clear_router_account_runtime(state, "gemini", &gemini_stats_key(account));
+        }
+    }
+    for account in state.qwen_accounts.lock().unwrap().iter() {
+        if account.file_name.as_deref() == Some(file_name) {
+            clear_router_account_runtime(state, "qwen", &qwen_stats_key(account));
+        }
+    }
+    for account in state.deepseek_accounts.lock().unwrap().iter() {
+        if account.file_name.as_deref() == Some(file_name) {
+            clear_router_account_runtime(state, "deepseek", &deepseek_stats_key(account));
+        }
+    }
+    for account in state.minimax_accounts.lock().unwrap().iter() {
+        if account.file_name.as_deref() == Some(file_name) {
+            clear_router_account_runtime(state, "minimax", &minimax_stats_key(account));
+        }
+    }
+    for account in state.grok_accounts.lock().unwrap().iter() {
+        if account.file_name.as_deref() == Some(file_name) {
+            clear_router_account_runtime(state, "grok", &grok_stats_key(account));
+        }
+    }
+    for account in state.copilot_accounts.lock().unwrap().iter() {
+        if account.file_name.as_deref() == Some(file_name) {
+            clear_router_account_runtime(state, "copilot", &copilot_stats_key(account));
+        }
+    }
+    for account in state.claude_accounts.lock().unwrap().iter() {
+        if account.file_name.as_deref() == Some(file_name) {
+            clear_router_account_runtime(state, "claude", &claude_stats_key(account));
+        }
+    }
+    for account in state.glm_accounts.lock().unwrap().iter() {
+        if account.file_name.as_deref() == Some(file_name) {
+            clear_router_account_runtime(state, "glm", &glm_stats_key(account));
+        }
+    }
 }
 
 fn contains_http_status(message: &str, status: u16) -> bool {
@@ -15059,15 +15372,28 @@ fn record_request_started(state: &AppState, context: &UsageContext) {
 }
 
 fn record_request_error(state: &AppState, context: &UsageContext, message: impl Into<String>) {
+    record_request_error_with_health(state, context, message, true);
+}
+
+fn record_request_error_with_health(
+    state: &AppState,
+    context: &UsageContext,
+    message: impl Into<String>,
+    affects_account_health: bool,
+) {
     let observed_at = now_rfc3339();
     let message = message.into();
-    router_request_finished(
-        state,
-        context.provider_name,
-        &context.key,
-        false,
-        Some(&message),
-    );
+    if affects_account_health {
+        router_request_finished(
+            state,
+            context.provider_name,
+            &context.key,
+            false,
+            Some(&message),
+        );
+    } else {
+        router_request_finished_neutral(state, context.provider_name, &context.key);
+    }
     update_account_counters(
         state,
         context.provider,
@@ -15171,7 +15497,18 @@ fn record_codex_request(state: &AppState, context: &UsageContext) {
 }
 
 fn record_codex_error(state: &AppState, context: &UsageContext, message: impl Into<String>) {
-    record_request_error(state, context, message);
+    let message = message.into();
+    let affects_account_health = codex_error_affects_account_health(&message);
+    record_codex_error_with_health(state, context, message, affects_account_health);
+}
+
+fn record_codex_error_with_health(
+    state: &AppState,
+    context: &UsageContext,
+    message: impl Into<String>,
+    affects_account_health: bool,
+) {
+    record_request_error_with_health(state, context, message, affects_account_health);
 }
 
 pub(crate) fn record_antigravity_request(state: &AppState, context: &UsageContext) {
@@ -15774,9 +16111,9 @@ mod codex_provider_model_tests {
 #[cfg(test)]
 mod account_selection_tests {
     use super::{
-        account_runtime_status, apply_router_failure, parse_retry_after_seconds,
-        select_ordered_account_indices, AccountRuntimeState, AccountRuntimeStatus,
-        AccountSelectionScore,
+        account_runtime_status, apply_router_failure, codex_error_affects_account_health,
+        parse_retry_after_seconds, select_ordered_account_indices, AccountRuntimeState,
+        AccountRuntimeStatus, AccountSelectionScore,
     };
     use std::collections::VecDeque;
     use std::time::{Duration, Instant};
@@ -15953,6 +16290,33 @@ mod account_selection_tests {
         assert_eq!(runtime.consecutive_failures, 0);
         assert!(runtime.cooldown_until.is_none());
         assert!(!runtime.probing);
+    }
+
+    #[test]
+    fn generic_codex_sse_error_does_not_affect_account_health() {
+        assert!(!codex_error_affects_account_health(
+            "upstream returned an SSE error"
+        ));
+        assert!(!codex_error_affects_account_health(
+            "Invalid request history: function_call_output has no matching function_call"
+        ));
+        assert!(!codex_error_affects_account_health(
+            "upstream status 400: unsupported parameter"
+        ));
+    }
+
+    #[test]
+    fn codex_auth_quota_and_upstream_errors_affect_account_health() {
+        assert!(codex_error_affects_account_health("upstream status 401"));
+        assert!(codex_error_affects_account_health(
+            "upstream status 429 retry-after=30"
+        ));
+        assert!(codex_error_affects_account_health(
+            "upstream stream read failed: timeout"
+        ));
+        assert!(codex_error_affects_account_health(
+            "upstream status 503 temporarily unavailable"
+        ));
     }
 
     #[test]

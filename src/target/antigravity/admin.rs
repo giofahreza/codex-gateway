@@ -26,11 +26,18 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
         .map(|account| {
             let stats_key = crate::antigravity_stats_key(account);
             let usage = usage_by_key.get(&stats_key).cloned().unwrap_or_default();
+            let runtime = crate::router_account_runtime_json(
+                &state,
+                "antigravity",
+                &stats_key,
+                account.enabled,
+            );
             serde_json::json!({
                 "label": account.label,
                 "email": account.email,
                 "file_name": account.file_name,
                 "enabled": account.enabled,
+                "runtime": runtime,
                 "project_id": account.project_id,
                 "expired_at": account.access_token_expires_at,
                 "requests": usage.requests,

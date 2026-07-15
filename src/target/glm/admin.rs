@@ -34,12 +34,15 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
         .map(|account| {
             let stats_key = crate::glm_stats_key(account);
             let usage = usage_by_key.get(&stats_key).cloned().unwrap_or_default();
+            let runtime =
+                crate::router_account_runtime_json(&state, "glm", &stats_key, account.enabled);
             serde_json::json!({
                 "account_id": account.account_id,
                 "label": account.label,
                 "account_type": account.normalized_account_type(),
                 "file_name": account.file_name,
                 "enabled": account.enabled,
+                "runtime": runtime,
                 "base_url": account.openai_base_url(),
                 "openai_base_url": account.openai_base_url(),
                 "anthropic_base_url": account.anthropic_base_url,
