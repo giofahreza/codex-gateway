@@ -41,6 +41,9 @@ use target::codex::tokens::UpstreamToken;
 
 type UnifiedModelCache = Option<(std::time::Instant, Vec<serde_json::Value>)>;
 static UNIFIED_MODEL_CACHE: OnceLock<tokio::sync::Mutex<UnifiedModelCache>> = OnceLock::new();
+type CodexModelCache = Option<(std::time::Instant, Bytes)>;
+static CODEX_MODEL_CACHE: OnceLock<tokio::sync::Mutex<CodexModelCache>> = OnceLock::new();
+const MODEL_CACHE_TTL_SECONDS: u64 = 6 * 60 * 60;
 
 #[derive(Clone)]
 struct AppState {
@@ -8137,7 +8140,7 @@ async fn custom_models_save_route(
                 .remove(&original_alias);
         }
     }
-    invalidate_unified_model_cache().await;
+    invalidate_model_caches().await;
     axum::Json(serde_json::json!({
         "ok": true,
         "message": "Custom model saved",
@@ -8203,7 +8206,7 @@ async fn custom_models_delete_route(
             .into_response();
     }
     state.custom_model_rr.lock().unwrap().remove(&alias);
-    invalidate_unified_model_cache().await;
+    invalidate_model_caches().await;
     axum::Json(serde_json::json!({
         "ok": true,
         "message": "Custom model deleted"
@@ -8699,9 +8702,11 @@ async fn login_submit_route(
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::codex::admin::login_submit(State(state), Form(form))
+    let response = target::codex::admin::login_submit(State(state), Form(form))
         .await
-        .into_response()
+        .into_response();
+    invalidate_model_caches().await;
+    response
 }
 
 async fn agw_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -8738,9 +8743,11 @@ async fn agw_login_submit_route(
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::antigravity::admin::login_submit(State(state), Form(form))
+    let response = target::antigravity::admin::login_submit(State(state), Form(form))
         .await
-        .into_response()
+        .into_response();
+    invalidate_model_caches().await;
+    response
 }
 
 async fn gemini_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -8793,9 +8800,11 @@ async fn gemini_login_submit_route(
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::gemini::admin::login_submit(State(state), Form(form))
+    let response = target::gemini::admin::login_submit(State(state), Form(form))
         .await
-        .into_response()
+        .into_response();
+    invalidate_model_caches().await;
+    response
 }
 
 async fn qwen_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -8837,9 +8846,11 @@ async fn qwen_login_submit_route(
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::qwen::admin::login_submit(State(state), headers, Form(form))
+    let response = target::qwen::admin::login_submit(State(state), headers, Form(form))
         .await
-        .into_response()
+        .into_response();
+    invalidate_model_caches().await;
+    response
 }
 
 async fn qwen_login_status_route(
@@ -8865,9 +8876,11 @@ async fn oauth_login_callback_route(
     if let Some(response) = require_admin_session_text(&state, &headers) {
         return response;
     }
-    target::oauth::login_callback_route(state, provider, method, headers, uri)
+    let response = target::oauth::login_callback_route(state, provider, method, headers, uri)
         .await
-        .into_response()
+        .into_response();
+    invalidate_model_caches().await;
+    response
 }
 
 async fn deepseek_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -8897,9 +8910,11 @@ async fn minimax_login_start_route(
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::minimax::admin::login_start(State(state), method, body)
+    let response = target::minimax::admin::login_start(State(state), method, body)
         .await
-        .into_response()
+        .into_response();
+    invalidate_model_caches().await;
+    response
 }
 
 async fn copilot_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -8941,9 +8956,11 @@ async fn copilot_login_submit_route(
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::copilot::admin::login_submit(State(state), Form(form))
+    let response = target::copilot::admin::login_submit(State(state), Form(form))
         .await
-        .into_response()
+        .into_response();
+    invalidate_model_caches().await;
+    response
 }
 
 async fn claude_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -8986,9 +9003,11 @@ async fn claude_login_submit_route(
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::claude::admin::login_submit(State(state), Form(form))
+    let response = target::claude::admin::login_submit(State(state), Form(form))
         .await
-        .into_response()
+        .into_response();
+    invalidate_model_caches().await;
+    response
 }
 
 async fn glm_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -9017,9 +9036,11 @@ async fn glm_login_start_route(
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::glm::admin::login_start(State(state), method, body)
+    let response = target::glm::admin::login_start(State(state), method, body)
         .await
-        .into_response()
+        .into_response();
+    invalidate_model_caches().await;
+    response
 }
 
 async fn deepseek_login_start_route(
@@ -9031,9 +9052,11 @@ async fn deepseek_login_start_route(
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::deepseek::admin::login_start(State(state), method, body)
+    let response = target::deepseek::admin::login_start(State(state), method, body)
         .await
-        .into_response()
+        .into_response();
+    invalidate_model_caches().await;
+    response
 }
 
 async fn grok_accounts_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -9069,9 +9092,11 @@ async fn grok_login_submit_route(
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::grok::admin::login_submit(State(state), Form(form))
+    let response = target::grok::admin::login_submit(State(state), Form(form))
         .await
-        .into_response()
+        .into_response();
+    invalidate_model_caches().await;
+    response
 }
 
 async fn grok_login_status_route(
@@ -9458,9 +9483,11 @@ async fn delete_credential_route(
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::codex::admin::delete_credential(State(state), Form(form))
+    let response = target::codex::admin::delete_credential(State(state), Form(form))
         .await
-        .into_response()
+        .into_response();
+    invalidate_model_caches().await;
+    response
 }
 
 /// Enables or disables a saved credential file and persists the disabled list.
@@ -9494,9 +9521,11 @@ async fn toggle_credential_route(
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::codex::admin::toggle_credential(State(state), Form(form))
+    let response = target::codex::admin::toggle_credential(State(state), Form(form))
         .await
-        .into_response()
+        .into_response();
+    invalidate_model_caches().await;
+    response
 }
 
 pub(crate) fn model_from_request_value(value: &serde_json::Value) -> Option<String> {
@@ -11913,7 +11942,7 @@ fn upstream_failure_message(status: StatusCode, retry_after: Option<&str>, body:
 }
 
 async fn codex_models_response(state: AppState, headers: HeaderMap) -> axum::response::Response {
-    let body_bytes = fetch_raw_codex_models_body(&state, &headers)
+    let body_bytes = cached_raw_codex_models_body(&state, &headers)
         .await
         .unwrap_or_else(|| Bytes::from_static(br#"{"models":[]}"#));
     let body_bytes = augment_codex_models_json(&body_bytes, &state);
@@ -11925,8 +11954,36 @@ async fn codex_models_response(state: AppState, headers: HeaderMap) -> axum::res
         .into_response()
 }
 
+async fn cached_raw_codex_models_body(state: &AppState, headers: &HeaderMap) -> Option<Bytes> {
+    let cache = CODEX_MODEL_CACHE.get_or_init(|| tokio::sync::Mutex::new(None));
+    let mut cache = cache.lock().await;
+    if let Some((fetched_at, body)) = cache.as_ref() {
+        if model_cache_is_fresh(*fetched_at) {
+            return Some(body.clone());
+        }
+    }
+    let stale = cache.as_ref().map(|(_, body)| body.clone());
+    if let Some(body) = fetch_raw_codex_models_body(state, headers).await {
+        *cache = Some((std::time::Instant::now(), body.clone()));
+        return Some(body);
+    }
+    stale
+}
+
 async fn fetch_raw_codex_models_body(state: &AppState, headers: &HeaderMap) -> Option<Bytes> {
-    let (_token_idx, token) = pick_token(state)?;
+    for token in enabled_codex_model_tokens(state) {
+        if let Some(body) = fetch_raw_codex_models_body_with_token(state, headers, &token).await {
+            return Some(body);
+        }
+    }
+    None
+}
+
+async fn fetch_raw_codex_models_body_with_token(
+    state: &AppState,
+    headers: &HeaderMap,
+    token: &UpstreamToken,
+) -> Option<Bytes> {
     let session_id = Uuid::new_v4().to_string();
     let mut req = state.client.request(
         Method::GET,
@@ -11955,6 +12012,21 @@ async fn fetch_raw_codex_models_body(state: &AppState, headers: &HeaderMap) -> O
         return None;
     }
     resp.bytes().await.ok()
+}
+
+fn enabled_codex_model_tokens(state: &AppState) -> Vec<UpstreamToken> {
+    state
+        .tokens
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|token| token.enabled)
+        .cloned()
+        .collect()
+}
+
+fn model_cache_is_fresh(fetched_at: std::time::Instant) -> bool {
+    fetched_at.elapsed() < Duration::from_secs(MODEL_CACHE_TTL_SECONDS)
 }
 
 async fn unified_v1_models_response(
@@ -12061,7 +12133,7 @@ async fn collect_unified_v1_models(
     // result instead of launching another full provider fan-out.
     let mut cache = cache.lock().await;
     if let Some((fetched_at, models)) = cache.as_ref() {
-        if fetched_at.elapsed() < Duration::from_secs(30) {
+        if model_cache_is_fresh(*fetched_at) {
             return models.clone();
         }
     }
@@ -12216,6 +12288,17 @@ async fn invalidate_unified_model_cache() {
     if let Some(cache) = UNIFIED_MODEL_CACHE.get() {
         *cache.lock().await = None;
     }
+}
+
+async fn invalidate_codex_model_cache() {
+    if let Some(cache) = CODEX_MODEL_CACHE.get() {
+        *cache.lock().await = None;
+    }
+}
+
+async fn invalidate_model_caches() {
+    invalidate_unified_model_cache().await;
+    invalidate_codex_model_cache().await;
 }
 
 fn custom_model_openai_entries(state: &AppState) -> Vec<serde_json::Value> {
@@ -12516,39 +12599,8 @@ fn append_unique_models(
 }
 
 async fn fetch_codex_v1_models(state: &AppState, headers: &HeaderMap) -> Vec<serde_json::Value> {
-    let Some((_token_idx, token)) = pick_token(state) else {
+    let Some(body) = cached_raw_codex_models_body(state, headers).await else {
         return Vec::new();
-    };
-
-    let mut req = state.client.request(
-        Method::GET,
-        target::codex::gateway::build_upstream_url(
-            &state.cfg.upstream_base,
-            "models",
-            Some("client_version=1.0.0"),
-        ),
-    );
-    for (key, value) in headers.iter() {
-        if should_drop_incoming_header(key.as_str()) {
-            continue;
-        }
-        req = req.header(key, value);
-    }
-    req = req.header("Authorization", format!("Bearer {}", token.token));
-    req = target::codex::gateway::apply_default_headers(
-        req,
-        headers,
-        token.account_id.as_deref(),
-        &Uuid::new_v4().to_string(),
-    );
-
-    let resp = match req.send().await {
-        Ok(resp) if resp.status().is_success() => resp,
-        _ => return Vec::new(),
-    };
-    let body = match resp.bytes().await {
-        Ok(body) => body,
-        Err(_) => return Vec::new(),
     };
     let converted = match models_list_to_openai_json(&body) {
         Ok(body) => body,
@@ -14805,10 +14857,6 @@ fn require_admin_session_text(state: &AppState, headers: &HeaderMap) -> Option<R
     )
 }
 
-fn candidate_tokens(state: &AppState) -> Vec<(usize, UpstreamToken)> {
-    candidate_tokens_with_reservation(state, false)
-}
-
 fn candidate_tokens_with_reservation(
     state: &AppState,
     reserve_first: bool,
@@ -14838,10 +14886,6 @@ fn candidate_tokens_with_reservation(
         .into_iter()
         .map(|candidate_idx| (candidate_idx, tokens[candidate_idx].clone()))
         .collect()
-}
-
-fn pick_token(state: &AppState) -> Option<(usize, UpstreamToken)> {
-    candidate_tokens(state).into_iter().next()
 }
 
 fn stats_accounts_mut(stats: &mut UsageStats, provider: Provider) -> &mut Vec<AccountUsage> {
@@ -15847,6 +15891,17 @@ mod account_selection_tests {
             .next()
             .expect("picked account");
         assert_eq!(picked, 1);
+    }
+
+    #[test]
+    fn model_cache_ttl_is_six_hours() {
+        let now = Instant::now();
+        assert!(super::model_cache_is_fresh(
+            now - Duration::from_secs(6 * 60 * 60 - 1)
+        ));
+        assert!(!super::model_cache_is_fresh(
+            now - Duration::from_secs(6 * 60 * 60 + 1)
+        ));
     }
 
     #[test]
