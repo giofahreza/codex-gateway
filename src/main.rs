@@ -8,14 +8,15 @@ use axum::{
     Json, Router,
 };
 use bytes::{Bytes, BytesMut};
-use futures_util::{stream, StreamExt};
+use futures_util::{stream, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    pin::Pin,
+    sync::{mpsc, Arc, Mutex, OnceLock, RwLock},
     time::Duration,
 };
 use tracing::{error, info};
@@ -37,6 +38,9 @@ use stats_store::{Provider, StatsStore};
 use target::codex::auth::PendingOAuth;
 use target::codex::quota::QuotaCacheEntry;
 use target::codex::tokens::UpstreamToken;
+
+type UnifiedModelCache = Option<(std::time::Instant, Vec<serde_json::Value>)>;
+static UNIFIED_MODEL_CACHE: OnceLock<tokio::sync::Mutex<UnifiedModelCache>> = OnceLock::new();
 
 #[derive(Clone)]
 struct AppState {
@@ -74,9 +78,10 @@ struct AppState {
     deepseek_quota_cache: Arc<Mutex<HashMap<String, target::deepseek::quota::QuotaCacheEntry>>>,
     claude_quota_cache: Arc<Mutex<HashMap<String, target::claude::quota::QuotaCacheEntry>>>,
     glm_quota_cache: Arc<Mutex<HashMap<String, target::glm::quota::QuotaCacheEntry>>>,
+    quota_snapshots: Arc<Mutex<HashMap<String, Vec<serde_json::Value>>>>,
     oauth_pending: Arc<Mutex<HashMap<String, PendingOAuth>>>,
     agw_oauth_pending: Arc<Mutex<HashMap<String, target::antigravity::auth::PendingOAuth>>>,
-    gemini_oauth_pending: Arc<Mutex<HashSet<String>>>,
+    gemini_oauth_pending: Arc<Mutex<HashMap<String, std::time::Instant>>>,
     qwen_oauth_pending: Arc<Mutex<HashMap<String, target::qwen::auth::PendingOAuth>>>,
     grok_oauth_pending: Arc<Mutex<HashMap<String, target::grok::auth::PendingOAuth>>>,
     copilot_oauth_pending: Arc<Mutex<HashMap<String, target::copilot::auth::PendingDevice>>>,
@@ -84,10 +89,20 @@ struct AppState {
     admin_sessions: Arc<Mutex<HashMap<String, admin_auth::AdminSession>>>,
     admin_login_attempts: Arc<Mutex<HashMap<String, admin_auth::LoginAttemptState>>>,
     api_keys: Arc<Mutex<api_keys::ApiKeyStore>>,
+    api_key_cache: Arc<RwLock<HashMap<String, ApiKeyCacheEntry>>>,
+    api_key_last_used: Arc<Mutex<HashMap<String, String>>>,
     internal_proxy_secret: Arc<String>,
     notification_settings: Arc<Mutex<notifications::NotificationSettings>>,
     disabled: Arc<Mutex<HashSet<String>>>,
-    usage_history_lock: Arc<Mutex<()>>,
+    persistence_tx: mpsc::Sender<PersistenceEvent>,
+    account_router: Arc<Mutex<HashMap<String, AccountRuntimeState>>>,
+    account_refresh_locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+}
+
+#[derive(Clone)]
+enum ApiKeyCacheEntry {
+    Verified(String),
+    Rejected(std::time::Instant),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,6 +130,50 @@ struct Config {
     admin_auth: admin_auth::AdminAuthConfig,
     #[serde(default)]
     oauth: target::oauth::OAuthConfig,
+    #[serde(default = "default_max_request_body_bytes")]
+    max_request_body_bytes: usize,
+    #[serde(default = "default_max_concurrent_requests")]
+    max_concurrent_requests: usize,
+    #[serde(default)]
+    trusted_proxy: bool,
+    #[serde(default = "default_history_retention_days")]
+    history_retention_days: u64,
+    #[serde(default = "default_history_max_entries")]
+    history_max_entries: usize,
+    #[serde(default = "default_upstream_connect_timeout_seconds")]
+    upstream_connect_timeout_seconds: u64,
+    #[serde(default = "default_upstream_read_timeout_seconds")]
+    upstream_read_timeout_seconds: u64,
+    #[serde(default = "default_upstream_first_event_timeout_seconds")]
+    upstream_first_event_timeout_seconds: u64,
+}
+
+fn default_max_request_body_bytes() -> usize {
+    16 * 1024 * 1024
+}
+
+fn default_max_concurrent_requests() -> usize {
+    128
+}
+
+fn default_history_retention_days() -> u64 {
+    30
+}
+
+fn default_history_max_entries() -> usize {
+    200_000
+}
+
+fn default_upstream_connect_timeout_seconds() -> u64 {
+    10
+}
+
+fn default_upstream_read_timeout_seconds() -> u64 {
+    120
+}
+
+fn default_upstream_first_event_timeout_seconds() -> u64 {
+    45
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,7 +263,37 @@ pub(crate) struct UsageContext {
     prompt: PromptMetrics,
 }
 
-#[derive(Default)]
+pub(crate) struct StreamRequestGuard {
+    state: AppState,
+    provider: &'static str,
+    account_key: String,
+    finished: bool,
+}
+
+impl StreamRequestGuard {
+    pub(crate) fn new(state: &AppState, context: &UsageContext) -> Self {
+        Self {
+            state: state.clone(),
+            provider: context.provider_name,
+            account_key: context.key.clone(),
+            finished: false,
+        }
+    }
+
+    pub(crate) fn finish(&mut self) {
+        self.finished = true;
+    }
+}
+
+impl Drop for StreamRequestGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            router_request_abandoned(&self.state, self.provider, &self.account_key);
+        }
+    }
+}
+
+#[derive(Default, Clone)]
 struct CounterDelta {
     request_delta: u64,
     error_delta: u64,
@@ -219,6 +308,31 @@ struct CounterDelta {
     success_at: Option<String>,
     error_at: Option<String>,
     error_message: Option<String>,
+}
+
+enum PersistenceEvent {
+    StatsDirty,
+    History(usage_store::UsageHistoryEntry),
+    ApiKeys(api_keys::ApiKeyStore),
+    Shutdown(mpsc::SyncSender<()>),
+}
+
+#[derive(Default)]
+struct AccountRuntimeState {
+    active_requests: usize,
+    reserved_requests: usize,
+    recent_requests: VecDeque<std::time::Instant>,
+    consecutive_failures: u32,
+    cooldown_until: Option<std::time::Instant>,
+    probing: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AccountRuntimeStatus {
+    Healthy,
+    Cooldown,
+    Probing,
+    Disabled,
 }
 
 #[tokio::main]
@@ -243,7 +357,7 @@ async fn main() {
     let claude_accounts = target::claude::accounts::load_accounts(&cfg, &disabled);
     let glm_accounts = target::glm::accounts::load_accounts(&cfg, &disabled);
     let custom_models = custom_models::load(&cfg);
-    let persisted_stats = stats_store::load(&cfg);
+    let persisted_stats = Arc::new(Mutex::new(stats_store::load(&cfg)));
     let admin_sessions = admin_auth::load_sessions(&admin_session_path(&cfg));
     let notification_settings = notifications::load(&cfg);
     let mut api_key_store = api_keys::load(&cfg);
@@ -269,12 +383,19 @@ async fn main() {
         &copilot_accounts,
         &claude_accounts,
         &glm_accounts,
-        &persisted_stats,
+        &persisted_stats.lock().unwrap(),
     );
     let quota_cache = vec![None; tokens.len()];
 
     let client = reqwest::Client::builder()
         .http1_only()
+        .connect_timeout(Duration::from_secs(
+            cfg.upstream_connect_timeout_seconds.max(1),
+        ))
+        .read_timeout(Duration::from_secs(
+            cfg.upstream_read_timeout_seconds.max(1),
+        ))
+        .timeout(Duration::from_secs(30 * 60))
         .tcp_keepalive(Duration::from_secs(60))
         .pool_idle_timeout(None)
         .no_gzip()
@@ -283,8 +404,13 @@ async fn main() {
         .build()
         .unwrap();
 
+    let (persistence_tx, persistence_rx) = mpsc::channel();
+    let cfg = Arc::new(cfg);
+    let persistence_worker =
+        start_persistence_worker(cfg.clone(), persisted_stats.clone(), persistence_rx);
+
     let state = AppState {
-        cfg: Arc::new(cfg),
+        cfg: cfg.clone(),
         rr: Arc::new(Mutex::new(0)),
         agw_rr: Arc::new(Mutex::new(0)),
         gemini_rr: Arc::new(Mutex::new(0)),
@@ -309,7 +435,7 @@ async fn main() {
         glm_accounts: Arc::new(Mutex::new(glm_accounts)),
         custom_models: Arc::new(Mutex::new(custom_models)),
         stats: Arc::new(Mutex::new(stats)),
-        persisted_stats: Arc::new(Mutex::new(persisted_stats)),
+        persisted_stats,
         quota_cache: Arc::new(Mutex::new(quota_cache)),
         agw_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         gemini_quota_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -318,9 +444,10 @@ async fn main() {
         deepseek_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         claude_quota_cache: Arc::new(Mutex::new(HashMap::new())),
         glm_quota_cache: Arc::new(Mutex::new(HashMap::new())),
+        quota_snapshots: Arc::new(Mutex::new(HashMap::new())),
         oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         agw_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
-        gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),
+        gemini_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         qwen_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         grok_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
         copilot_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
@@ -328,10 +455,14 @@ async fn main() {
         admin_sessions: Arc::new(Mutex::new(admin_sessions)),
         admin_login_attempts: Arc::new(Mutex::new(HashMap::new())),
         api_keys: Arc::new(Mutex::new(api_key_store)),
+        api_key_cache: Arc::new(RwLock::new(HashMap::new())),
+        api_key_last_used: Arc::new(Mutex::new(HashMap::new())),
         internal_proxy_secret: Arc::new(Uuid::new_v4().simple().to_string()),
         notification_settings: Arc::new(Mutex::new(notification_settings)),
         disabled: Arc::new(Mutex::new(disabled)),
-        usage_history_lock: Arc::new(Mutex::new(())),
+        persistence_tx,
+        account_router: Arc::new(Mutex::new(HashMap::new())),
+        account_refresh_locks: Arc::new(Mutex::new(HashMap::new())),
     };
     migrate_qwen_usage_keys(&state);
     migrate_grok_usage_keys(&state);
@@ -340,6 +471,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", any(health))
+        .route("/ready", any(ready))
         .route("/favicon.ico", any(favicon_route))
         .route("/", any(dashboard_root))
         .route("/dashboard", any(dashboard))
@@ -350,6 +482,7 @@ async fn main() {
         .route("/admin/api-keys/create", any(admin_api_keys_create_route))
         .route("/admin/api-keys/revoke", any(admin_api_keys_revoke_route))
         .route("/dashboard.json", any(dashboard_json))
+        .route("/dashboard/snapshot.json", any(dashboard_snapshot_route))
         .route("/quota.json", any(quota_json_route))
         .route(
             "/codex/rate-limit-reset-credit/consume",
@@ -409,13 +542,53 @@ async fn main() {
         .route("/docs/*rest", any(source::openapi::swagger_ui_asset))
         .route("/api-docs/openapi.json", any(source::openapi::openapi_json))
         .route("/*path", any(proxy))
-        .with_state(state.clone());
+        .with_state(state.clone())
+        .layer(axum::extract::DefaultBodyLimit::max(
+            state.cfg.max_request_body_bytes,
+        ))
+        .layer(tower::limit::ConcurrencyLimitLayer::new(
+            state.cfg.max_concurrent_requests,
+        ));
+
+    let quota_refresh = tokio::spawn(background_quota_refresh(state.clone()));
+    let maintenance = tokio::spawn(background_maintenance(state.clone()));
 
     let addr: SocketAddr = state.cfg.listen.parse().expect("invalid listen address");
     info!("listening on {}", addr);
     axum::serve(tokio::net::TcpListener::bind(addr).await.unwrap(), app)
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .unwrap();
+
+    quota_refresh.abort();
+    maintenance.abort();
+    let (flushed_tx, flushed_rx) = mpsc::sync_channel(0);
+    if state
+        .persistence_tx
+        .send(PersistenceEvent::Shutdown(flushed_tx))
+        .is_ok()
+    {
+        let _ = flushed_rx.recv_timeout(Duration::from_secs(10));
+    }
+    let _ = persistence_worker.join();
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+    info!("shutdown signal received; draining active requests");
 }
 
 /// Returns `ok` when the gateway process is running.
@@ -426,6 +599,207 @@ async fn main() {
 )]
 async fn health() -> impl IntoResponse {
     (StatusCode::OK, "ok")
+}
+
+async fn ready(State(state): State<AppState>) -> impl IntoResponse {
+    let has_enabled_account = state
+        .tokens
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|token| token.enabled)
+        || state
+            .agw_accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|account| account.enabled)
+        || state
+            .gemini_accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|account| account.enabled)
+        || state
+            .qwen_accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|account| account.enabled)
+        || state
+            .deepseek_accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|account| account.enabled)
+        || state
+            .minimax_accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|account| account.enabled)
+        || state
+            .grok_accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|account| account.enabled)
+        || state
+            .copilot_accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|account| account.enabled)
+        || state
+            .claude_accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|account| account.enabled)
+        || state
+            .glm_accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|account| account.enabled);
+    if has_enabled_account {
+        (StatusCode::OK, "ready")
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no enabled upstream accounts",
+        )
+    }
+}
+
+async fn background_quota_refresh(state: AppState) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        let (codex, antigravity, gemini, qwen, deepseek, minimax, copilot, claude, glm) = tokio::join!(
+            target::codex::quota::get_quota_summaries(&state),
+            target::antigravity::quota::get_quota_summaries(&state),
+            target::gemini::quota::get_quota_summaries(&state),
+            target::qwen::quota::get_quota_summaries(&state),
+            target::deepseek::quota::get_quota_summaries(&state),
+            target::minimax::quota::get_quota_summaries(&state),
+            target::copilot::admin::quota_accounts(&state),
+            target::claude::quota::get_quota_summaries(&state),
+            target::glm::quota::get_quota_summaries(&state),
+        );
+        {
+            let mut snapshots = state.quota_snapshots.lock().unwrap();
+            snapshots.insert("codex".to_string(), codex.clone());
+            snapshots.insert("antigravity".to_string(), antigravity.clone());
+            snapshots.insert("gemini".to_string(), gemini.clone());
+            snapshots.insert("qwen".to_string(), qwen.clone());
+            snapshots.insert("deepseek".to_string(), deepseek.clone());
+            snapshots.insert("minimax".to_string(), minimax.clone());
+            snapshots.insert("copilot".to_string(), copilot.clone());
+            snapshots.insert("claude".to_string(), claude.clone());
+            snapshots.insert("glm".to_string(), glm.clone());
+        }
+        let now = now_rfc3339();
+        let options = notification_account_options(&state);
+        for (provider, label, accounts) in [
+            ("codex", "Codex", codex),
+            ("antigravity", "Antigravity", antigravity),
+            ("gemini", "Gemini", gemini),
+            ("qwen", "Qwen", qwen),
+            ("deepseek", "DeepSeek", deepseek),
+            ("minimax", "MiniMax", minimax),
+            ("copilot", "GitHub Copilot", copilot),
+            ("claude", "Claude", claude),
+            ("glm", "GLM", glm),
+        ] {
+            notifications::notify_model_quota_transitions(
+                &state,
+                provider,
+                label,
+                &accounts,
+                options.clone(),
+                &now,
+            );
+        }
+    }
+}
+
+fn quota_snapshot(state: &AppState, provider: &str) -> Vec<serde_json::Value> {
+    state
+        .quota_snapshots
+        .lock()
+        .unwrap()
+        .get(provider)
+        .cloned()
+        .unwrap_or_default()
+}
+
+async fn background_maintenance(state: AppState) {
+    const OAUTH_STATE_TTL: Duration = Duration::from_secs(15 * 60);
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        state
+            .oauth_pending
+            .lock()
+            .unwrap()
+            .retain(|_, pending| pending.created_at.elapsed() < OAUTH_STATE_TTL);
+        state
+            .agw_oauth_pending
+            .lock()
+            .unwrap()
+            .retain(|_, pending| pending.created_at.elapsed() < OAUTH_STATE_TTL);
+        state
+            .gemini_oauth_pending
+            .lock()
+            .unwrap()
+            .retain(|_, created_at| created_at.elapsed() < OAUTH_STATE_TTL);
+        state
+            .qwen_oauth_pending
+            .lock()
+            .unwrap()
+            .retain(|_, pending| pending.created_at.elapsed() < OAUTH_STATE_TTL);
+        state
+            .grok_oauth_pending
+            .lock()
+            .unwrap()
+            .retain(|_, pending| pending.created_at.elapsed() < OAUTH_STATE_TTL);
+        state
+            .claude_oauth_pending
+            .lock()
+            .unwrap()
+            .retain(|_, pending| pending.created_at.elapsed() < OAUTH_STATE_TTL);
+        let now_unix = chrono::Utc::now().timestamp();
+        state
+            .copilot_oauth_pending
+            .lock()
+            .unwrap()
+            .retain(|_, pending| pending.expires_at_unix > now_unix);
+        cleanup_generated_temp_files(Duration::from_secs(60 * 60));
+    }
+}
+
+fn cleanup_generated_temp_files(max_age: Duration) {
+    let dir = std::path::Path::new("/tmp/gpt-gateway-downloads");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let expired = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= max_age);
+        if expired {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 async fn favicon_route() -> impl IntoResponse {
@@ -2475,6 +2849,9 @@ async fn dashboard() -> impl IntoResponse {
       let lastCopilotQuota = new Map();
       let lastClaudeQuota = new Map();
       let lastGlmQuota = new Map();
+      let dashboardSnapshot = null;
+      let dashboardSnapshotAt = 0;
+      let dashboardSnapshotRequest = null;
       let openAgwRows = new Set();
       let openGeminiRows = new Set();
       let openQwenRows = new Set();
@@ -3318,25 +3695,10 @@ async fn dashboard() -> impl IntoResponse {
         }, 3200);
       }
       function refreshCredentialViews() {
-        refresh();
-        refreshQuota();
-        refreshAgwQuota();
-        refreshAgwAccounts();
-        refreshGeminiQuota();
-        refreshGeminiAccounts();
-        refreshQwenQuota();
-        refreshQwenAccounts();
-        refreshDeepSeekAccounts();
-        refreshDeepSeekQuota();
-        refreshGrokQuota().then(() => refreshGrokAccounts());
-        refreshMiniMaxAccounts();
-        refreshMiniMaxQuota();
-        refreshCopilotQuota();
-        refreshCopilotAccounts();
-        refreshClaudeQuota();
-        refreshClaudeAccounts();
-        refreshGlmQuota();
-        refreshGlmAccounts();
+        invalidateDashboardSnapshot();
+        refreshDashboardSnapshot(true).then(function() {
+          renderDashboardSnapshot();
+        });
         refreshCustomModels();
       }
       function accountActionMenuId(fileName) {
@@ -3517,7 +3879,74 @@ async fn dashboard() -> impl IntoResponse {
           document.getElementById('logoutBtn').style.display = 'inline-block';
         }
       }
+      function dashboardSnapshotPayload(url) {
+        if (!dashboardSnapshot) return undefined;
+        const providers = dashboardSnapshot.providers || {};
+        const quotas = dashboardSnapshot.quotas || {};
+        const routeMap = {
+          '/dashboard.json': dashboardSnapshot.dashboard,
+          '/quota.json': quotas.codex,
+          '/agw/accounts.json': providers.agw,
+          '/agw/quota.json': quotas.agw,
+          '/gemini/accounts.json': providers.gemini,
+          '/gemini/quota.json': quotas.gemini,
+          '/qwen/accounts.json': providers.qwen,
+          '/qwen/quota.json': quotas.qwen,
+          '/deepseek/accounts.json': providers.deepseek,
+          '/deepseek/quota.json': quotas.deepseek,
+          '/minimax/accounts.json': providers.minimax,
+          '/minimax/quota.json': quotas.minimax,
+          '/grok/accounts.json': providers.grok,
+          '/grok/quota.json': quotas.grok,
+          '/copilot/accounts.json': providers.copilot,
+          '/copilot/quota.json': quotas.copilot,
+          '/claude/accounts.json': providers.claude,
+          '/claude/quota.json': quotas.claude,
+          '/glm/accounts.json': providers.glm,
+          '/glm/quota.json': quotas.glm
+        };
+        return routeMap[url];
+      }
+      function invalidateDashboardSnapshot() {
+        dashboardSnapshot = null;
+        dashboardSnapshotAt = 0;
+      }
+      async function refreshDashboardSnapshot(force) {
+        if (!force && dashboardSnapshot && Date.now() - dashboardSnapshotAt < 8000) {
+          return dashboardSnapshot;
+        }
+        if (dashboardSnapshotRequest) return dashboardSnapshotRequest;
+        const requestEpoch = adminAuthEpoch;
+        dashboardSnapshotRequest = fetch('/dashboard/snapshot.json', { credentials: 'same-origin' })
+          .then(async function(res) {
+            if (res.status === 401) {
+              if (requestEpoch === adminAuthEpoch) showAdminLogin('Session expired. Log in again.');
+              return null;
+            }
+            if (!res.ok) throw new Error('Dashboard snapshot returned ' + res.status);
+            const data = await res.json();
+            dashboardSnapshot = data;
+            dashboardSnapshotAt = Date.now();
+            return data;
+          })
+          .catch(function(err) {
+            console.error('dashboard snapshot refresh failed', err);
+            return null;
+          })
+          .finally(function() {
+            dashboardSnapshotRequest = null;
+          });
+        return dashboardSnapshotRequest;
+      }
       async function adminFetch(url, options) {
+        const method = String(options && options.method || 'GET').toUpperCase();
+        const cached = method === 'GET' ? dashboardSnapshotPayload(url) : undefined;
+        if (cached !== undefined) {
+          return new Response(JSON.stringify(cached), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
         const requestEpoch = adminAuthEpoch;
         const res = await fetch(url, Object.assign({ credentials: 'same-origin' }, options || {}));
         if (res.status === 401) {
@@ -4208,8 +4637,7 @@ async fn dashboard() -> impl IntoResponse {
         dashboardState.totalErrors = data.total_errors || 0;
         dashboardState.providers.codex = accounts;
         var cards = accounts.map(function(a) { return buildCard(a, lastQuota.get(a.file_name || a.label)); }).join('');
-        document.getElementById('codexCards').innerHTML = cards || '<div class="empty-state">No Codex accounts</div>';
-        document.getElementById('codexBadgeCount').textContent = accounts.length + ' accounts';
+        renderProviderCards('codex', 'codexCards', 'codexBadgeCount', accounts, cards, 'No Codex accounts');
         updateOverview();
       }
       async function refreshQuota() {
@@ -4337,8 +4765,7 @@ async fn dashboard() -> impl IntoResponse {
         var accounts = data.accounts || [];
         dashboardState.providers.agw = accounts;
         var cards = accounts.map(function(a) { return buildProviderCard(a, lastAgwQuota.get(a.file_name || a.label), 'agw'); }).join('');
-        document.getElementById('agwCards').innerHTML = cards || '<div class="empty-state">No Antigravity accounts</div>';
-        document.getElementById('agwBadgeCount').textContent = accounts.length + ' accounts';
+        renderProviderCards('agw', 'agwCards', 'agwBadgeCount', accounts, cards, 'No Antigravity accounts');
         updateOverview();
       }
       async function refreshAgwQuota() {
@@ -4359,8 +4786,7 @@ async fn dashboard() -> impl IntoResponse {
         var accounts = data.accounts || [];
         dashboardState.providers.gemini = accounts;
         var cards = accounts.map(function(a) { return buildProviderCard(a, lastGeminiQuota.get(a.file_name || a.label), 'gemini'); }).join('');
-        document.getElementById('geminiCards').innerHTML = cards || '<div class="empty-state">No Gemini accounts</div>';
-        document.getElementById('geminiBadgeCount').textContent = accounts.length + ' accounts';
+        renderProviderCards('gemini', 'geminiCards', 'geminiBadgeCount', accounts, cards, 'No Gemini accounts');
         updateOverview();
       }
       async function refreshGeminiQuota() {
@@ -4381,8 +4807,7 @@ async fn dashboard() -> impl IntoResponse {
         var accounts = data.accounts || [];
         dashboardState.providers.qwen = accounts;
         var cards = accounts.map(function(a) { return buildQwenCard(a, lastQwenQuota.get(a.file_name || a.label)); }).join('');
-        document.getElementById('qwenCards').innerHTML = cards || '<div class="empty-state">No Qwen accounts</div>';
-        document.getElementById('qwenBadgeCount').textContent = accounts.length + ' accounts';
+        renderProviderCards('qwen', 'qwenCards', 'qwenBadgeCount', accounts, cards, 'No Qwen accounts');
         updateOverview();
       }
       async function refreshQwenQuota() {
@@ -4403,8 +4828,7 @@ async fn dashboard() -> impl IntoResponse {
         var accounts = data.accounts || [];
         dashboardState.providers.deepseek = accounts;
         var cards = accounts.map(function(a) { return buildProviderCard(a, lastDeepSeekQuota.get(a.file_name || a.label), 'deepseek'); }).join('');
-        document.getElementById('deepseekCards').innerHTML = cards || '<div class="empty-state">No DeepSeek accounts</div>';
-        document.getElementById('deepseekBadgeCount').textContent = accounts.length + ' accounts';
+        renderProviderCards('deepseek', 'deepseekCards', 'deepseekBadgeCount', accounts, cards, 'No DeepSeek accounts');
         updateOverview();
       }
       async function refreshDeepSeekQuota() {
@@ -4444,8 +4868,7 @@ async fn dashboard() -> impl IntoResponse {
         var accounts = data.accounts || [];
         dashboardState.providers.minimax = accounts;
         var cards = accounts.map(function(a) { return buildMiniMaxCard(a, lastMiniMaxQuota.get(a.file_name || a.label)); }).join('');
-        document.getElementById('minimaxCards').innerHTML = cards || '<div class="empty-state">No MiniMax accounts</div>';
-        document.getElementById('minimaxBadgeCount').textContent = accounts.length + ' accounts';
+        renderProviderCards('minimax', 'minimaxCards', 'minimaxBadgeCount', accounts, cards, 'No MiniMax accounts');
         updateOverview();
       }
       async function refreshMiniMaxQuota() {
@@ -4491,8 +4914,7 @@ async fn dashboard() -> impl IntoResponse {
         var cards = accounts.map(function(a) {
           return buildCopilotCard(a, lastCopilotQuota.get(a.file_name || a.label) || lastCopilotQuota.get(a.login) || null);
         }).join('');
-        document.getElementById('copilotCards').innerHTML = cards || '<div class="empty-state">No GitHub Copilot accounts</div>';
-        document.getElementById('copilotBadgeCount').textContent = accounts.length + ' accounts';
+        renderProviderCards('copilot', 'copilotCards', 'copilotBadgeCount', accounts, cards, 'No GitHub Copilot accounts');
         updateOverview();
       }
       async function refreshCopilotQuota() {
@@ -4545,8 +4967,7 @@ async fn dashboard() -> impl IntoResponse {
         var cards = accounts.map(function(a) {
           return buildClaudeCard(a, lastClaudeQuota.get(a.file_name || a.label) || lastClaudeQuota.get(a.organization_uuid) || lastClaudeQuota.get(a.account_id) || lastClaudeQuota.get(a.email) || null);
         }).join('');
-        document.getElementById('claudeCards').innerHTML = cards || '<div class="empty-state">No Claude accounts</div>';
-        document.getElementById('claudeBadgeCount').textContent = accounts.length + ' accounts';
+        renderProviderCards('claude', 'claudeCards', 'claudeBadgeCount', accounts, cards, 'No Claude accounts');
         updateOverview();
       }
       async function refreshClaudeQuota() {
@@ -4595,8 +5016,7 @@ async fn dashboard() -> impl IntoResponse {
         var cards = accounts.map(function(a) {
           return buildGlmCard(a, lastGlmQuota.get(a.file_name || a.label) || lastGlmQuota.get(a.account_id) || null);
         }).join('');
-        document.getElementById('glmCards').innerHTML = cards || '<div class="empty-state">No GLM accounts</div>';
-        document.getElementById('glmBadgeCount').textContent = accounts.length + ' accounts';
+        renderProviderCards('glm', 'glmCards', 'glmBadgeCount', accounts, cards, 'No GLM accounts');
         updateOverview();
       }
       async function refreshGlmQuota() {
@@ -5423,6 +5843,16 @@ async fn dashboard() -> impl IntoResponse {
         refreshCustomModels();
       }
       let lastGrokQuota = new Map();
+      const providerCardSignatures = new Map();
+      function renderProviderCards(provider, cardsId, badgeId, accounts, cards, emptyText) {
+        const quota = dashboardState.quotas[provider];
+        const quotaValue = quota instanceof Map ? Array.from(quota.entries()) : quota;
+        const signature = JSON.stringify({ accounts: accounts, quota: quotaValue });
+        if (providerCardSignatures.get(provider) === signature) return;
+        providerCardSignatures.set(provider, signature);
+        document.getElementById(cardsId).innerHTML = cards || '<div class="empty-state">' + emptyText + '</div>';
+        document.getElementById(badgeId).textContent = accounts.length + ' accounts';
+      }
       // Pick a stable key that matches whatever the accounts card uses first.
       function grokQuotaKey(a) {
         return a && (a.email || a.label || a.file_name) || '__grok__';
@@ -5456,8 +5886,7 @@ async fn dashboard() -> impl IntoResponse {
           var q = lastGrokQuota.get(grokQuotaKey(a)) || quotaSnap;
           return buildGrokCard(a, q);
         }).join('');
-        document.getElementById('grokCards').innerHTML = cards || '<div class="empty-state">No Grok accounts</div>';
-        document.getElementById('grokBadgeCount').textContent = accounts.length + ' accounts';
+        renderProviderCards('grok', 'grokCards', 'grokBadgeCount', accounts, cards, 'No Grok accounts');
         updateOverview();
       }
       async function refreshGrokQuota() {
@@ -6962,48 +7391,36 @@ async fn dashboard() -> impl IntoResponse {
         const data = await res.json();
         var tone = data.ok === false || data.outcome === 'no_credit' ? 'error' : '';
         notify(data.message || 'Reset request completed', tone);
+        invalidateDashboardSnapshot();
         refreshQuota();
       }
-      async function startDashboard() {
-        refresh();
-        refreshContextChart();
+      function renderDashboardSnapshot() {
         refreshQuota();
-        refreshAgwQuota().then(() => refreshAgwAccounts());
-        refreshGeminiQuota().then(() => refreshGeminiAccounts());
-        refreshQwenQuota().then(() => refreshQwenAccounts());
-        refreshDeepSeekAccounts();
+        refreshAgwQuota();
+        refreshGeminiQuota();
+        refreshQwenQuota();
         refreshDeepSeekQuota();
-        refreshGrokQuota().then(() => refreshGrokAccounts());
-        refreshMiniMaxAccounts();
+        refreshGrokQuota();
         refreshMiniMaxQuota();
-        refreshCopilotQuota().then(() => refreshCopilotAccounts());
-        refreshClaudeQuota().then(() => refreshClaudeAccounts());
-        refreshGlmQuota().then(() => refreshGlmAccounts());
+        refreshCopilotQuota();
+        refreshClaudeQuota();
+        refreshGlmQuota();
+      }
+      async function startDashboard() {
+        await refreshDashboardSnapshot(true);
+        renderDashboardSnapshot();
+        refreshContextChart();
         refreshCustomModels();
         if (dashboardIntervalsStarted) {
           return;
         }
         dashboardIntervalsStarted = true;
-        setInterval(() => { if (adminAuthenticated) refresh(); }, 5000);
-        setInterval(() => { if (adminAuthenticated) refreshQuota(); }, 60000);
-        setInterval(() => { if (adminAuthenticated) refreshAgwQuota(); }, 60000);
-        setInterval(() => { if (adminAuthenticated) refreshGeminiQuota(); }, 60000);
-        setInterval(() => { if (adminAuthenticated) refreshQwenQuota(); }, 60000);
-        setInterval(() => { if (adminAuthenticated) refreshDeepSeekQuota(); }, 60000);
-        setInterval(() => { if (adminAuthenticated) refreshGrokQuota(); }, 60000);
-        setInterval(() => { if (adminAuthenticated) refreshMiniMaxQuota(); }, 60000);
-        setInterval(() => { if (adminAuthenticated) refreshCopilotQuota(); }, 60000);
-        setInterval(() => { if (adminAuthenticated) refreshClaudeQuota(); }, 60000);
-        setInterval(() => { if (adminAuthenticated) refreshGlmQuota(); }, 60000);
-        setInterval(() => { if (adminAuthenticated) refreshAgwAccounts(); }, 10000);
-        setInterval(() => { if (adminAuthenticated) refreshGeminiAccounts(); }, 10000);
-        setInterval(() => { if (adminAuthenticated) refreshQwenAccounts(); }, 10000);
-        setInterval(() => { if (adminAuthenticated) refreshDeepSeekAccounts(); }, 10000);
-        setInterval(() => { if (adminAuthenticated) refreshMiniMaxAccounts(); }, 10000);
-        setInterval(() => { if (adminAuthenticated) refreshGrokAccounts(); }, 10000);
-        setInterval(() => { if (adminAuthenticated) refreshCopilotAccounts(); }, 10000);
-        setInterval(() => { if (adminAuthenticated) refreshClaudeAccounts(); }, 10000);
-        setInterval(() => { if (adminAuthenticated) refreshGlmAccounts(); }, 10000);
+        setInterval(() => {
+          if (!adminAuthenticated) return;
+          refreshDashboardSnapshot(true).then(function(snapshot) {
+            if (snapshot) renderDashboardSnapshot();
+          });
+        }, 10000);
         setInterval(() => { if (adminAuthenticated) refreshContextChart(); }, 60000);
       }
       document.getElementById('adminLoginForm').addEventListener('submit', async (e) => {
@@ -7086,7 +7503,7 @@ async fn admin_login_route(
     Form(form): Form<admin_auth::LoginForm>,
 ) -> impl IntoResponse {
     let now = std::time::SystemTime::now();
-    let client_key = admin_auth::login_client_key(&headers);
+    let client_key = admin_auth::login_client_key(&headers, state.cfg.trusted_proxy);
     if let Some(message) = {
         let mut attempts = state.admin_login_attempts.lock().unwrap();
         admin_auth::current_lockout_message(&mut attempts, &client_key, now)
@@ -7121,7 +7538,11 @@ async fn admin_login_route(
             .into_response();
             admin_auth::append_set_cookie(
                 response.headers_mut(),
-                &admin_auth::build_session_cookie(&session_id, ttl_seconds),
+                &admin_auth::build_session_cookie(
+                    &session_id,
+                    ttl_seconds,
+                    state.cfg.admin_auth.secure_cookies,
+                ),
             );
             response
         }
@@ -7161,7 +7582,10 @@ async fn admin_logout_route(
         "message": "logged out"
     }))
     .into_response();
-    admin_auth::append_set_cookie(response.headers_mut(), &admin_auth::clear_session_cookie());
+    admin_auth::append_set_cookie(
+        response.headers_mut(),
+        &admin_auth::clear_session_cookie(state.cfg.admin_auth.secure_cookies),
+    );
     response
 }
 
@@ -7220,6 +7644,7 @@ async fn admin_api_keys_create_route(
         )
             .into_response();
     }
+    state.api_key_cache.write().unwrap().clear();
     axum::Json(serde_json::json!({
         "ok": true,
         "key": created.key,
@@ -7241,7 +7666,10 @@ async fn admin_api_keys_revoke_route(
     let snapshot = {
         let mut store = state.api_keys.lock().unwrap();
         match api_keys::revoke_key(&mut store, payload.id.trim(), &now) {
-            Ok(_) => store.clone(),
+            Ok(_) => {
+                state.api_key_cache.write().unwrap().clear();
+                store.clone()
+            }
             Err(err) => {
                 return (
                     StatusCode::NOT_FOUND,
@@ -7338,6 +7766,148 @@ async fn dashboard_json(State(state): State<AppState>, headers: HeaderMap) -> Re
     .into_response()
 }
 
+async fn dashboard_snapshot_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+
+    let dashboard = async {
+        response_json_value(dashboard_json(State(state.clone()), headers.clone()).await).await
+    };
+    let antigravity = async {
+        response_json_value(
+            target::antigravity::admin::accounts_json(State(state.clone()))
+                .await
+                .into_response(),
+        )
+        .await
+    };
+    let gemini = async {
+        response_json_value(
+            target::gemini::admin::accounts_json(State(state.clone()))
+                .await
+                .into_response(),
+        )
+        .await
+    };
+    let qwen = async {
+        response_json_value(
+            target::qwen::admin::accounts_json(State(state.clone()))
+                .await
+                .into_response(),
+        )
+        .await
+    };
+    let deepseek = async {
+        response_json_value(
+            target::deepseek::admin::accounts_json(State(state.clone()))
+                .await
+                .into_response(),
+        )
+        .await
+    };
+    let minimax = async {
+        response_json_value(
+            target::minimax::admin::accounts_json(State(state.clone()))
+                .await
+                .into_response(),
+        )
+        .await
+    };
+    let grok = async {
+        response_json_value(
+            target::grok::admin::accounts_json(State(state.clone()))
+                .await
+                .into_response(),
+        )
+        .await
+    };
+    let copilot = async {
+        response_json_value(
+            target::copilot::admin::accounts_json(State(state.clone()))
+                .await
+                .into_response(),
+        )
+        .await
+    };
+    let claude = async {
+        response_json_value(
+            target::claude::admin::accounts_json(State(state.clone()))
+                .await
+                .into_response(),
+        )
+        .await
+    };
+    let glm = async {
+        response_json_value(
+            target::glm::admin::accounts_json(State(state.clone()))
+                .await
+                .into_response(),
+        )
+        .await
+    };
+    let (dashboard, antigravity, gemini, qwen, deepseek, minimax, grok, copilot, claude, glm) = tokio::join!(
+        dashboard,
+        antigravity,
+        gemini,
+        qwen,
+        deepseek,
+        minimax,
+        grok,
+        copilot,
+        claude,
+        glm,
+    );
+
+    let quota = |provider: &str| {
+        serde_json::json!({
+            "accounts": quota_snapshot(&state, provider)
+        })
+    };
+    axum::Json(serde_json::json!({
+        "generated_at": now_rfc3339(),
+        "dashboard": dashboard,
+        "providers": {
+            "agw": antigravity,
+            "gemini": gemini,
+            "qwen": qwen,
+            "deepseek": deepseek,
+            "minimax": minimax,
+            "grok": grok,
+            "copilot": copilot,
+            "claude": claude,
+            "glm": glm
+        },
+        "quotas": {
+            "codex": quota("codex"),
+            "agw": quota("antigravity"),
+            "gemini": quota("gemini"),
+            "qwen": quota("qwen"),
+            "deepseek": quota("deepseek"),
+            "minimax": quota("minimax"),
+            "grok": target::grok::admin::cached_quota_json(&state),
+            "copilot": quota("copilot"),
+            "claude": quota("claude"),
+            "glm": quota("glm")
+        }
+    }))
+    .into_response()
+}
+
+async fn response_json_value(response: Response) -> serde_json::Value {
+    let status = response.status();
+    match axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024).await {
+        Ok(body) => serde_json::from_slice(&body).unwrap_or_else(|_| {
+            serde_json::json!({
+                "error": format!("dashboard source returned non-JSON status {}", status)
+            })
+        }),
+        Err(err) => serde_json::json!({
+            "error": format!("dashboard source body failed: {}", err)
+        }),
+    }
+}
+
 /// Returns cached quota usage for each configured Codex credential.
 #[utoipa::path(
     get,
@@ -7352,7 +7922,7 @@ async fn quota_json_route(State(state): State<AppState>, headers: HeaderMap) -> 
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    let accounts = target::codex::quota::get_quota_summaries(&state).await;
+    let accounts = quota_snapshot(&state, "codex");
     quota_accounts_json_response(&state, "codex", "Codex", accounts)
 }
 
@@ -7567,6 +8137,7 @@ async fn custom_models_save_route(
                 .remove(&original_alias);
         }
     }
+    invalidate_unified_model_cache().await;
     axum::Json(serde_json::json!({
         "ok": true,
         "message": "Custom model saved",
@@ -7632,6 +8203,7 @@ async fn custom_models_delete_route(
             .into_response();
     }
     state.custom_model_rr.lock().unwrap().remove(&alias);
+    invalidate_unified_model_cache().await;
     axum::Json(serde_json::json!({
         "ok": true,
         "message": "Custom model deleted"
@@ -8145,7 +8717,7 @@ async fn agw_quota_json_route(State(state): State<AppState>, headers: HeaderMap)
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    let accounts = target::antigravity::quota::get_quota_summaries(&state).await;
+    let accounts = quota_snapshot(&state, "antigravity");
     quota_accounts_json_response(&state, "agw", "Antigravity", accounts)
 }
 
@@ -8184,7 +8756,7 @@ async fn gemini_quota_json_route(State(state): State<AppState>, headers: HeaderM
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    let accounts = target::gemini::quota::get_quota_summaries(&state).await;
+    let accounts = quota_snapshot(&state, "gemini");
     quota_accounts_json_response(&state, "gemini", "Gemini", accounts)
 }
 
@@ -8192,7 +8764,7 @@ async fn minimax_quota_json_route(State(state): State<AppState>, headers: Header
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    let accounts = target::minimax::quota::get_quota_summaries(&state).await;
+    let accounts = quota_snapshot(&state, "minimax");
     quota_accounts_json_response(&state, "minimax", "MiniMax", accounts)
 }
 
@@ -8200,7 +8772,7 @@ async fn deepseek_quota_json_route(State(state): State<AppState>, headers: Heade
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    let accounts = target::deepseek::quota::get_quota_summaries(&state).await;
+    let accounts = quota_snapshot(&state, "deepseek");
     quota_accounts_json_response(&state, "deepseek", "DeepSeek", accounts)
 }
 
@@ -8239,7 +8811,7 @@ async fn qwen_quota_json_route(State(state): State<AppState>, headers: HeaderMap
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    let accounts = target::qwen::quota::get_quota_summaries(&state).await;
+    let accounts = quota_snapshot(&state, "qwen");
     quota_accounts_json_response(&state, "qwen", "Qwen", accounts)
 }
 
@@ -8343,7 +8915,7 @@ async fn copilot_quota_json_route(State(state): State<AppState>, headers: Header
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    let accounts = target::copilot::admin::quota_accounts(&state).await;
+    let accounts = quota_snapshot(&state, "copilot");
     quota_accounts_json_response(&state, "copilot", "GitHub Copilot", accounts)
 }
 
@@ -8387,7 +8959,7 @@ async fn claude_quota_json_route(State(state): State<AppState>, headers: HeaderM
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    let accounts = target::claude::quota::get_quota_summaries(&state).await;
+    let accounts = quota_snapshot(&state, "claude");
     quota_accounts_json_response(&state, "claude", "Claude", accounts)
 }
 
@@ -8432,7 +9004,7 @@ async fn glm_quota_json_route(State(state): State<AppState>, headers: HeaderMap)
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    let accounts = target::glm::quota::get_quota_summaries(&state).await;
+    let accounts = quota_snapshot(&state, "glm");
     quota_accounts_json_response(&state, "glm", "GLM (Z.AI)", accounts)
 }
 
@@ -8477,9 +9049,7 @@ async fn grok_quota_route(State(state): State<AppState>, headers: HeaderMap) -> 
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    target::grok::admin::quota_json(State(state))
-        .await
-        .into_response()
+    axum::Json(target::grok::admin::cached_quota_json(&state)).into_response()
 }
 
 async fn grok_login_start_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -8620,7 +9190,12 @@ async fn usage_history_route(
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    match usage_store::load(&state.cfg, &query) {
+    let cfg = state.cfg.clone();
+    let events = match tokio::task::spawn_blocking(move || usage_store::load(&cfg, &query)).await {
+        Ok(result) => result,
+        Err(err) => Err(format!("history worker failed: {}", err)),
+    };
+    match events {
         Ok(events) => axum::Json(serde_json::json!({ "events": events })).into_response(),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -8670,20 +9245,31 @@ async fn context_history_route(
         .filter(|v| !v.is_empty());
     let per_model = query.per_model;
 
+    let bucket_secs = bucket_minutes * 60;
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
     let cutoff_str = cutoff.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let requested_start_ts = (cutoff.timestamp() / bucket_secs as i64) * bucket_secs as i64;
+    let end_bucket_ts = (chrono::Utc::now().timestamp() / bucket_secs as i64) * bucket_secs as i64;
+    let requested_buckets =
+        ((end_bucket_ts - requested_start_ts) / bucket_secs as i64 + 1).max(1) as usize;
+    let num_buckets = requested_buckets.min(max_buckets as usize);
+    let start_ts = end_bucket_ts - (num_buckets.saturating_sub(1) as i64 * bucket_secs as i64);
 
-    let all = match usage_store::load(
-        &state.cfg,
-        &usage_store::UsageHistoryQuery {
-            limit: None,
-            provider: None,
-            account_key: None,
-            model: None,
-        },
-    ) {
-        Ok(entries) => entries,
-        Err(err) => {
+    let cfg = state.cfg.clone();
+    let account_filter_for_query = account_filter.map(str::to_string);
+    let aggregate = tokio::task::spawn_blocking(move || {
+        usage_store::aggregate_context(
+            &cfg,
+            &cutoff_str,
+            bucket_secs,
+            account_filter_for_query.as_deref(),
+            per_model,
+        )
+    })
+    .await;
+    let rows = match aggregate {
+        Ok(Ok(rows)) => rows,
+        Ok(Err(err)) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [("Content-Type", "application/json")],
@@ -8691,21 +9277,20 @@ async fn context_history_route(
             )
                 .into_response();
         }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [("Content-Type", "application/json")],
+                openai_error_body(
+                    &format!("history worker failed: {}", err),
+                    "server_error",
+                    None,
+                ),
+            )
+                .into_response();
+        }
     };
-
-    let filtered: Vec<_> = all
-        .iter()
-        .filter(|e| e.success && e.recorded_at >= cutoff_str)
-        .filter(|e| {
-            if let Some(ak) = account_filter {
-                e.account_key == ak
-            } else {
-                true
-            }
-        })
-        .collect();
-
-    if filtered.is_empty() {
+    if rows.is_empty() {
         return axum::Json(serde_json::json!({
             "labels": [],
             "buckets": [],
@@ -8715,13 +9300,6 @@ async fn context_history_route(
         }))
         .into_response();
     }
-
-    let bucket_secs = bucket_minutes * 60;
-    let start_ts = cutoff.timestamp();
-    let end_ts = chrono::Utc::now().timestamp();
-    let num_buckets =
-        ((end_ts - start_ts + bucket_secs as i64 - 1) / bucket_secs as i64).max(1) as usize;
-    let num_buckets = num_buckets.min(max_buckets as usize);
 
     let mut labels = Vec::with_capacity(num_buckets);
     let label_format = if hours > 48 { "%m-%d %H:%M" } else { "%H:%M" };
@@ -8733,16 +9311,11 @@ async fn context_history_route(
     }
 
     if per_model {
-        // Group by model → buckets
         let mut model_data: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
 
-        for entry in &filtered {
-            let model = entry.model.as_deref().unwrap_or("unknown").to_string();
-            let ts = match chrono::DateTime::parse_from_rfc3339(&entry.recorded_at) {
-                Ok(dt) => dt.timestamp(),
-                Err(_) => continue,
-            };
-            let bucket_idx = ((ts - start_ts) / bucket_secs as i64) as usize;
+        for row in rows {
+            let model = row.model.unwrap_or_else(|| "unknown".to_string());
+            let bucket_idx = ((row.bucket_start - start_ts) / bucket_secs as i64) as usize;
             if bucket_idx >= num_buckets {
                 continue;
             }
@@ -8752,12 +9325,10 @@ async fn context_history_route(
             });
 
             let b = &mut buckets[bucket_idx];
-            b["input"] = serde_json::json!(b["input"].as_u64().unwrap_or(0) + entry.input_tokens);
-            b["output"] =
-                serde_json::json!(b["output"].as_u64().unwrap_or(0) + entry.output_tokens);
-            b["cache"] = serde_json::json!(b["cache"].as_u64().unwrap_or(0) + entry.cache_tokens);
-            b["reasoning"] =
-                serde_json::json!(b["reasoning"].as_u64().unwrap_or(0) + entry.reasoning_tokens);
+            b["input"] = serde_json::json!(row.input_tokens);
+            b["output"] = serde_json::json!(row.output_tokens);
+            b["cache"] = serde_json::json!(row.cache_tokens);
+            b["reasoning"] = serde_json::json!(row.reasoning_tokens);
         }
 
         return axum::Json(serde_json::json!({
@@ -8782,27 +9353,18 @@ async fn context_history_route(
         num_buckets
     ];
 
-    for entry in &filtered {
-        let ts = match chrono::DateTime::parse_from_rfc3339(&entry.recorded_at) {
-            Ok(dt) => dt.timestamp(),
-            Err(_) => continue,
-        };
-        let bucket_idx = ((ts - start_ts) / bucket_secs as i64) as usize;
+    for row in rows {
+        let bucket_idx = ((row.bucket_start - start_ts) / bucket_secs as i64) as usize;
         if bucket_idx >= num_buckets {
             continue;
         }
         let b = &mut buckets[bucket_idx];
-        b["input_tokens"] =
-            serde_json::json!(b["input_tokens"].as_u64().unwrap_or(0) + entry.input_tokens);
-        b["output_tokens"] =
-            serde_json::json!(b["output_tokens"].as_u64().unwrap_or(0) + entry.output_tokens);
-        b["total_tokens"] =
-            serde_json::json!(b["total_tokens"].as_u64().unwrap_or(0) + entry.total_tokens);
-        b["cache_tokens"] =
-            serde_json::json!(b["cache_tokens"].as_u64().unwrap_or(0) + entry.cache_tokens);
-        b["reasoning_tokens"] =
-            serde_json::json!(b["reasoning_tokens"].as_u64().unwrap_or(0) + entry.reasoning_tokens);
-        b["request_count"] = serde_json::json!(b["request_count"].as_u64().unwrap_or(0) + 1);
+        b["input_tokens"] = serde_json::json!(row.input_tokens);
+        b["output_tokens"] = serde_json::json!(row.output_tokens);
+        b["total_tokens"] = serde_json::json!(row.total_tokens);
+        b["cache_tokens"] = serde_json::json!(row.cache_tokens);
+        b["reasoning_tokens"] = serde_json::json!(row.reasoning_tokens);
+        b["request_count"] = serde_json::json!(row.request_count);
     }
 
     axum::Json(serde_json::json!({
@@ -9189,6 +9751,128 @@ fn usage_metrics_from_sse_response_body(body: &Bytes) -> Option<UsageMetrics> {
     None
 }
 
+fn sse_error_message(body: &Bytes) -> Option<String> {
+    let text = String::from_utf8_lossy(body);
+    for line in text.lines() {
+        let Some(data) = line.strip_prefix("data: ").map(str::trim) else {
+            continue;
+        };
+        if data == "[DONE]" {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(data) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some(message) = sse_error_from_value(&value) {
+            return Some(message);
+        }
+    }
+    None
+}
+
+fn sse_error_from_value(value: &serde_json::Value) -> Option<String> {
+    let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let error = value.get("error");
+    let response_error = value
+        .get("response")
+        .and_then(|response| response.get("error"));
+    if event_type != "error"
+        && event_type != "response.failed"
+        && error.is_none()
+        && response_error.is_none()
+    {
+        return None;
+    }
+    Some(
+        error
+            .and_then(|error| error.get("message"))
+            .or_else(|| value.get("message"))
+            .or_else(|| response_error.and_then(|error| error.get("message")))
+            .and_then(|message| message.as_str())
+            .unwrap_or("upstream returned an SSE error")
+            .to_string(),
+    )
+}
+
+type ReqwestByteStream =
+    Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static>>;
+
+async fn read_sse_prelude(
+    stream: &mut ReqwestByteStream,
+    timeout: Duration,
+) -> Result<Bytes, String> {
+    const MAX_PRELUDE_BYTES: usize = 1024 * 1024;
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut prefix = BytesMut::new();
+    let mut parser = BytesMut::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "upstream first-event timeout after {} seconds",
+                timeout.as_secs()
+            ));
+        }
+        let next = tokio::time::timeout(remaining, stream.next())
+            .await
+            .map_err(|_| {
+                format!(
+                    "upstream first-event timeout after {} seconds",
+                    timeout.as_secs()
+                )
+            })?;
+        let chunk = match next {
+            Some(Ok(chunk)) => chunk,
+            Some(Err(err)) => return Err(format!("upstream stream read failed: {}", err)),
+            None => return Err("upstream stream ended before producing a response".to_string()),
+        };
+        prefix.extend_from_slice(&chunk);
+        parser.extend_from_slice(&chunk);
+        if prefix.len() > MAX_PRELUDE_BYTES {
+            return Err("upstream produced an oversized SSE prelude".to_string());
+        }
+
+        while let Some((event_end, delimiter_len)) = find_sse_event_boundary(&parser) {
+            let raw_event = parser.split_to(event_end + delimiter_len);
+            let event = &raw_event[..event_end];
+            let text = String::from_utf8_lossy(event);
+            let data = text
+                .lines()
+                .filter_map(|line| {
+                    line.trim_end_matches('\r')
+                        .strip_prefix("data:")
+                        .map(str::trim_start)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if data.is_empty() {
+                continue;
+            }
+            if data == "[DONE]" {
+                return Ok(prefix.freeze());
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) else {
+                continue;
+            };
+            if let Some(message) = sse_error_from_value(&value) {
+                return Err(message);
+            }
+            let event_type = value
+                .get("type")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if !matches!(
+                event_type,
+                "" | "ping" | "response.created" | "response.in_progress"
+            ) {
+                return Ok(prefix.freeze());
+            }
+        }
+    }
+}
+
 async fn proxy(
     State(state): State<AppState>,
     method: Method,
@@ -9220,7 +9904,7 @@ async fn proxy(
     }
 
     // Read full body (small/simple proxy)
-    let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
+    let body_bytes = match axum::body::to_bytes(body, state.cfg.max_request_body_bytes).await {
         Ok(b) => b,
         Err(_) => {
             return if matches!(source_api, SourceApi::V1) {
@@ -9275,13 +9959,18 @@ async fn proxy(
             .await;
         }
         TargetModel::Antigravity => {
-            return target::antigravity::api::responses(
-                State(state),
-                headers,
-                routed.upstream_body,
-            )
-            .await
-            .into_response();
+            return match routed.upstream_path.as_str() {
+                "responses/compact" => {
+                    target::antigravity::api::compact(State(state), headers, routed.upstream_body)
+                        .await
+                        .into_response()
+                }
+                _ => {
+                    target::antigravity::api::responses(State(state), headers, routed.upstream_body)
+                        .await
+                        .into_response()
+                }
+            };
         }
         TargetModel::Gemini => {
             return target::gemini::api::responses(State(state), headers, routed.upstream_body)
@@ -9399,7 +10088,7 @@ async fn proxy(
         | TargetModel::CodexModels
         | TargetModel::UnifiedV1Models => unreachable!("non-codex targets return earlier"),
     };
-    let token_candidates = candidate_tokens(&state);
+    let token_candidates = candidate_tokens_with_reservation(&state, true);
     if token_candidates.is_empty() {
         return if matches!(source_api, SourceApi::V1) {
             (
@@ -9482,11 +10171,11 @@ async fn proxy(
 
         let status = resp.status();
         if status.as_u16() >= 400 {
-            record_codex_error(
-                &state,
-                &codex_context,
-                format!("upstream status {}", status),
-            );
+            let retry_after = resp
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
             let mut out_headers = HeaderMap::new();
             for (k, v) in resp.headers().iter() {
                 let name = k.as_str().to_ascii_lowercase();
@@ -9500,6 +10189,7 @@ async fn proxy(
                 Err(err) => {
                     let message = format!("upstream error body read failed: {}", err);
                     error!("{}", message);
+                    record_codex_error(&state, &codex_context, &message);
                     last_error = Some((StatusCode::BAD_GATEWAY, message));
                     if attempt_idx + 1 < token_candidates.len() {
                         continue;
@@ -9507,7 +10197,8 @@ async fn proxy(
                     break;
                 }
             };
-            let message = String::from_utf8_lossy(&body_bytes).to_string();
+            let message = upstream_failure_message(status, retry_after.as_deref(), &body_bytes);
+            record_codex_error(&state, &codex_context, &message);
             if attempt_idx + 1 < token_candidates.len()
                 && should_retry_account_error(status, &message)
             {
@@ -9529,6 +10220,90 @@ async fn proxy(
             } else {
                 (status, out_headers, body_bytes).into_response()
             };
+        }
+
+        let is_sse = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("text/event-stream"));
+        if is_sse && matches!(routed.response_mode, ResponseMode::SseToJson) {
+            let body_bytes = match resp.bytes().await {
+                Ok(body) => body,
+                Err(err) => {
+                    let message = format!("upstream body read failed: {}", err);
+                    record_codex_error(&state, &codex_context, &message);
+                    last_error = Some((StatusCode::BAD_GATEWAY, message));
+                    if attempt_idx + 1 < token_candidates.len() {
+                        continue;
+                    }
+                    break;
+                }
+            };
+            if let Some(message) = sse_error_message(&body_bytes) {
+                record_codex_error(&state, &codex_context, &message);
+                last_error = Some((StatusCode::BAD_GATEWAY, message.clone()));
+                if attempt_idx + 1 < token_candidates.len() {
+                    continue;
+                }
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    [("Content-Type", "application/json")],
+                    openai_error_body(&message, "server_error", None),
+                )
+                    .into_response();
+            }
+            let metrics = usage_metrics_from_sse_response_body(&body_bytes).unwrap_or_default();
+            record_usage_success(&state, &codex_context, &metrics);
+            return (
+                status,
+                [("Content-Type", "application/json")],
+                sse_to_response_json(&body_bytes),
+            )
+                .into_response();
+        }
+
+        if is_sse {
+            let mut out_headers = HeaderMap::new();
+            for (key, value) in resp.headers().iter() {
+                let name = key.as_str().to_ascii_lowercase();
+                if !is_hop_header(&name) && name != "content-encoding" && name != "content-length" {
+                    out_headers.insert(key.clone(), value.clone());
+                }
+            }
+            let mut upstream: ReqwestByteStream = Box::pin(resp.bytes_stream());
+            let first_event_timeout =
+                Duration::from_secs(state.cfg.upstream_first_event_timeout_seconds.max(1));
+            match read_sse_prelude(&mut upstream, first_event_timeout).await {
+                Ok(prefix) => {
+                    return codex_live_stream_response(
+                        state.clone(),
+                        codex_context,
+                        source_api,
+                        status,
+                        out_headers,
+                        prefix,
+                        upstream,
+                    );
+                }
+                Err(message) => {
+                    record_codex_error(&state, &codex_context, &message);
+                    last_error = Some((StatusCode::BAD_GATEWAY, message.clone()));
+                    if attempt_idx + 1 < token_candidates.len() {
+                        continue;
+                    }
+                    return if matches!(source_api, SourceApi::V1) {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            [("Content-Type", "application/json")],
+                            openai_error_body(&message, "server_error", None),
+                        )
+                            .into_response()
+                    } else {
+                        (StatusCode::BAD_GATEWAY, message).into_response()
+                    };
+                }
+            }
         }
 
         selected_response = Some((resp, codex_context));
@@ -9630,6 +10405,15 @@ async fn proxy(
                 return (StatusCode::BAD_GATEWAY, "upstream error").into_response();
             }
         };
+        if let Some(message) = sse_error_message(&body_bytes) {
+            record_codex_error(&state, &codex_context, &message);
+            return (
+                StatusCode::BAD_GATEWAY,
+                [("Content-Type", "application/json")],
+                openai_error_body(&message, "server_error", None),
+            )
+                .into_response();
+        }
         let metrics = usage_metrics_from_sse_response_body(&body_bytes).unwrap_or_default();
         record_usage_success(&state, &codex_context, &metrics);
         let json_body = sse_to_response_json(&body_bytes);
@@ -9733,7 +10517,7 @@ async fn proxy(
     let stream = resp.bytes_stream().map(move |chunk| {
         if let Err(ref err) = chunk {
             error!("stream chunk error: {}", err);
-            record_codex_error(&stats_state, &stream_context, "stream chunk error");
+            usage_tracker.fail("stream chunk error");
         }
         if let Ok(ref bytes) = chunk {
             usage_tracker.push(bytes);
@@ -9760,6 +10544,53 @@ async fn proxy(
         );
     }
     (status, out_headers, body).into_response()
+}
+
+fn codex_live_stream_response(
+    state: AppState,
+    context: UsageContext,
+    source_api: SourceApi,
+    status: StatusCode,
+    mut out_headers: HeaderMap,
+    prefix: Bytes,
+    upstream: ReqwestByteStream,
+) -> Response {
+    let content_type = out_headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase());
+    let mut usage_tracker = CodexSseUsageTracker::new(state, context);
+    let combined = stream::once(async move { Ok::<Bytes, reqwest::Error>(prefix) }).chain(upstream);
+    let tracked = combined.map(move |chunk| {
+        match &chunk {
+            Ok(bytes) => usage_tracker.push(bytes),
+            Err(err) => {
+                error!("stream chunk error: {}", err);
+                usage_tracker.fail("stream chunk error");
+            }
+        }
+        chunk.map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "stream"))
+    });
+    let tracked: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static>> =
+        Box::pin(tracked);
+    let stream = if matches!(source_api, SourceApi::V1)
+        && content_type
+            .as_deref()
+            .is_some_and(|value| value.contains("text/event-stream"))
+    {
+        compat_v1_sse_stream(tracked).left_stream()
+    } else {
+        tracked.right_stream()
+    };
+    if matches!(source_api, SourceApi::V1)
+        && !out_headers.contains_key(axum::http::header::CONTENT_TYPE)
+    {
+        out_headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream"),
+        );
+    }
+    (status, out_headers, Body::from_stream(stream)).into_response()
 }
 
 async fn custom_model_response(
@@ -9995,8 +10826,8 @@ fn custom_model_target_score(
         _ => best_provider_score_for_model(state, &target.model),
     };
     let weight = u64::from(target.weight.max(1));
-    score.historical_tokens /= weight;
-    score.historical_requests /= weight;
+    score.active_requests /= weight;
+    score.recent_requests /= weight;
     score
 }
 
@@ -10133,8 +10964,8 @@ fn best_provider_score_for_model_account(
         TargetModel::Custom | TargetModel::CodexModels | TargetModel::UnifiedV1Models => {
             AccountSelectionScore {
                 quota_pressure: Some(f64::INFINITY),
-                historical_tokens: u64::MAX,
-                historical_requests: u64::MAX,
+                active_requests: u64::MAX,
+                recent_requests: u64::MAX,
             }
         }
     }
@@ -10252,8 +11083,8 @@ fn best_provider_score_for_model_except_account(
         TargetModel::Custom | TargetModel::CodexModels | TargetModel::UnifiedV1Models => {
             AccountSelectionScore {
                 quota_pressure: Some(f64::INFINITY),
-                historical_tokens: u64::MAX,
-                historical_requests: u64::MAX,
+                active_requests: u64::MAX,
+                recent_requests: u64::MAX,
             }
         }
     }
@@ -10344,8 +11175,8 @@ fn best_provider_score_for_model(state: &AppState, model: &str) -> AccountSelect
         TargetModel::Custom | TargetModel::CodexModels | TargetModel::UnifiedV1Models => {
             AccountSelectionScore {
                 quota_pressure: Some(f64::INFINITY),
-                historical_tokens: u64::MAX,
-                historical_requests: u64::MAX,
+                active_requests: u64::MAX,
+                recent_requests: u64::MAX,
             }
         }
     }
@@ -10772,8 +11603,8 @@ where
     }
     best.unwrap_or(AccountSelectionScore {
         quota_pressure: Some(f64::INFINITY),
-        historical_tokens: u64::MAX,
-        historical_requests: u64::MAX,
+        active_requests: u64::MAX,
+        recent_requests: u64::MAX,
     })
 }
 
@@ -10852,11 +11683,14 @@ async fn dispatch_custom_target(
         TargetModel::Codex => {
             dispatch_codex_custom_target(state, headers, upstream_path, body, response_mode).await
         }
-        TargetModel::Antigravity => {
-            target::antigravity::api::responses(State(state), headers, body)
+        TargetModel::Antigravity => match upstream_path {
+            "responses/compact" => target::antigravity::api::compact(State(state), headers, body)
                 .await
-                .into_response()
-        }
+                .into_response(),
+            _ => target::antigravity::api::responses(State(state), headers, body)
+                .await
+                .into_response(),
+        },
         TargetModel::Gemini => target::gemini::api::responses(State(state), headers, body)
             .await
             .into_response(),
@@ -10911,7 +11745,7 @@ async fn dispatch_codex_custom_target(
 ) -> axum::response::Response {
     let upstream =
         target::codex::gateway::build_upstream_url(&state.cfg.upstream_base, upstream_path, None);
-    let token_candidates = candidate_tokens(&state);
+    let token_candidates = candidate_tokens_with_reservation(&state, true);
     if token_candidates.is_empty() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -10999,6 +11833,16 @@ async fn dispatch_codex_custom_target(
                 .map(|value| value.contains("text/event-stream"))
                 .unwrap_or(false);
             if is_sse {
+                if let Some(message) = sse_error_message(&body_bytes) {
+                    record_codex_error(&state, &context, &message);
+                    if attempt_idx + 1 < token_candidates.len()
+                        && should_retry_account_error(StatusCode::TOO_MANY_REQUESTS, &message)
+                    {
+                        last_error = Some((StatusCode::TOO_MANY_REQUESTS, message));
+                        continue;
+                    }
+                    return (StatusCode::BAD_GATEWAY, out_headers, body_bytes).into_response();
+                }
                 if let Some(metrics) = usage_metrics_from_sse_response_body(&body_bytes) {
                     record_usage_success(&state, &context, &metrics);
                 }
@@ -11020,8 +11864,11 @@ async fn dispatch_codex_custom_target(
             }
             return (status, out_headers, body_bytes).into_response();
         } else {
-            let message = String::from_utf8_lossy(&body_bytes).to_string();
-            record_codex_error(&state, &context, format!("upstream status {}", status));
+            let retry_after = out_headers
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok());
+            let message = upstream_failure_message(status, retry_after, &body_bytes);
+            record_codex_error(&state, &context, &message);
             if attempt_idx + 1 < token_candidates.len()
                 && should_retry_account_error(status, &message)
             {
@@ -11048,6 +11895,21 @@ async fn dispatch_codex_custom_target(
         ),
     )
         .into_response()
+}
+
+fn upstream_failure_message(status: StatusCode, retry_after: Option<&str>, body: &[u8]) -> String {
+    let retry_hint = retry_after
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("; retry-after={}", value))
+        .unwrap_or_default();
+    let body = String::from_utf8_lossy(body);
+    let body = body.trim();
+    if body.is_empty() {
+        format!("upstream status {}{}", status, retry_hint)
+    } else {
+        format!("upstream status {}{}: {}", status, retry_hint, body)
+    }
 }
 
 async fn codex_models_response(state: AppState, headers: HeaderMap) -> axum::response::Response {
@@ -11194,17 +12056,18 @@ async fn collect_unified_v1_models(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Vec<serde_json::Value> {
-    let mut models = Vec::new();
-    let mut seen = HashSet::new();
-
-    append_unique_models(
-        &mut models,
-        &mut seen,
-        provider_prefixed_models(fetch_codex_v1_models(state, headers).await, "cod"),
-    );
-    append_unique_models(
-        &mut models,
-        &mut seen,
+    let cache = UNIFIED_MODEL_CACHE.get_or_init(|| tokio::sync::Mutex::new(None));
+    // Keep one refresh in flight. Concurrent catalog requests wait for that
+    // result instead of launching another full provider fan-out.
+    let mut cache = cache.lock().await;
+    if let Some((fetched_at, models)) = cache.as_ref() {
+        if fetched_at.elapsed() < Duration::from_secs(30) {
+            return models.clone();
+        }
+    }
+    let codex =
+        async { provider_prefixed_models(fetch_codex_v1_models(state, headers).await, "cod") };
+    let gemini = async {
         provider_prefixed_models(
             fetch_openai_models_from_response(
                 target::gemini::api::models(State(state.clone()), headers.clone())
@@ -11213,11 +12076,9 @@ async fn collect_unified_v1_models(
             )
             .await,
             "gem",
-        ),
-    );
-    append_unique_models(
-        &mut models,
-        &mut seen,
+        )
+    };
+    let antigravity = async {
         provider_prefixed_models(
             fetch_openai_models_from_response(
                 target::antigravity::api::models(State(state.clone()), headers.clone())
@@ -11226,11 +12087,9 @@ async fn collect_unified_v1_models(
             )
             .await,
             "agw",
-        ),
-    );
-    append_unique_models(
-        &mut models,
-        &mut seen,
+        )
+    };
+    let qwen = async {
         provider_prefixed_models(
             fetch_openai_models_from_response(
                 target::qwen::api::models(State(state.clone()), headers.clone())
@@ -11239,11 +12098,9 @@ async fn collect_unified_v1_models(
             )
             .await,
             "qwn",
-        ),
-    );
-    append_unique_models(
-        &mut models,
-        &mut seen,
+        )
+    };
+    let deepseek = async {
         provider_prefixed_models(
             fetch_openai_models_from_response(
                 target::deepseek::api::models(State(state.clone()), headers.clone())
@@ -11252,11 +12109,9 @@ async fn collect_unified_v1_models(
             )
             .await,
             "dsk",
-        ),
-    );
-    append_unique_models(
-        &mut models,
-        &mut seen,
+        )
+    };
+    let grok = async {
         provider_prefixed_models(
             fetch_openai_models_from_response(if has_enabled_grok_account(state) {
                 target::grok::api::models(State(state.clone()), headers.clone())
@@ -11267,11 +12122,9 @@ async fn collect_unified_v1_models(
             })
             .await,
             "grk",
-        ),
-    );
-    append_unique_models(
-        &mut models,
-        &mut seen,
+        )
+    };
+    let minimax = async {
         provider_prefixed_models(
             fetch_openai_models_from_response(if has_enabled_minimax_account(state) {
                 target::minimax::api::models(State(state.clone()), headers.clone())
@@ -11282,11 +12135,9 @@ async fn collect_unified_v1_models(
             })
             .await,
             "min",
-        ),
-    );
-    append_unique_models(
-        &mut models,
-        &mut seen,
+        )
+    };
+    let copilot = async {
         provider_prefixed_models(
             fetch_openai_models_from_response(if has_enabled_copilot_account(state) {
                 target::copilot::api::models(State(state.clone()), headers.clone())
@@ -11297,11 +12148,9 @@ async fn collect_unified_v1_models(
             })
             .await,
             "cop",
-        ),
-    );
-    append_unique_models(
-        &mut models,
-        &mut seen,
+        )
+    };
+    let claude = async {
         provider_prefixed_models(
             fetch_openai_models_from_response(if has_enabled_claude_account(state) {
                 target::claude::api::models(State(state.clone()), headers.clone())
@@ -11312,11 +12161,9 @@ async fn collect_unified_v1_models(
             })
             .await,
             "cld",
-        ),
-    );
-    append_unique_models(
-        &mut models,
-        &mut seen,
+        )
+    };
+    let glm = async {
         provider_prefixed_models(
             fetch_openai_models_from_response(if has_enabled_glm_account(state) {
                 target::glm::api::models(State(state.clone()), headers.clone())
@@ -11327,11 +12174,48 @@ async fn collect_unified_v1_models(
             })
             .await,
             "glm",
-        ),
+        )
+    };
+    let (codex, gemini, antigravity, qwen, deepseek, grok, minimax, copilot, claude, glm) = tokio::join!(
+        codex,
+        gemini,
+        antigravity,
+        qwen,
+        deepseek,
+        grok,
+        minimax,
+        copilot,
+        claude,
+        glm
     );
+
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    for provider_models in [
+        codex,
+        gemini,
+        antigravity,
+        qwen,
+        deepseek,
+        grok,
+        minimax,
+        copilot,
+        claude,
+        glm,
+    ] {
+        append_unique_models(&mut models, &mut seen, provider_models);
+    }
     append_unique_models(&mut models, &mut seen, custom_model_openai_entries(state));
 
+    *cache = Some((std::time::Instant::now(), models.clone()));
+
     models
+}
+
+async fn invalidate_unified_model_cache() {
+    if let Some(cache) = UNIFIED_MODEL_CACHE.get() {
+        *cache.lock().await = None;
+    }
 }
 
 fn custom_model_openai_entries(state: &AppState) -> Vec<serde_json::Value> {
@@ -11433,8 +12317,10 @@ fn is_supported_provider_prefix(prefix: &str) -> bool {
 #[cfg(test)]
 mod unified_model_catalog_tests {
     use super::{
-        model_entry_matches_id, provider_prefixed_model, split_provider_prefixed_model_id,
+        model_entry_matches_id, provider_prefixed_model, read_sse_prelude,
+        split_provider_prefixed_model_id, sse_error_message, ReqwestByteStream,
     };
+    use std::time::Duration;
 
     #[test]
     fn provider_prefixed_model_adds_public_prefix_and_keeps_upstream_model() {
@@ -11501,6 +12387,67 @@ mod unified_model_catalog_tests {
         assert!(!model_entry_matches_id(&antigravity, "gemini-2.5-pro"));
         assert!(model_entry_matches_id(&gemini, "gemini-2.5-pro"));
         assert!(model_entry_matches_id(&antigravity, "agw:gemini-2.5-pro"));
+    }
+
+    #[test]
+    fn detects_quota_errors_inside_successful_sse() {
+        let body = bytes::Bytes::from_static(
+            br#"event: error
+data: {"type":"error","error":{"message":"rate limit exceeded"}}
+
+data: [DONE]
+
+"#,
+        );
+        assert_eq!(
+            sse_error_message(&body).as_deref(),
+            Some("rate limit exceeded")
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_prelude_rejects_quota_error_before_output() {
+        let mut stream: ReqwestByteStream = Box::pin(futures_util::stream::iter(vec![
+            Ok::<_, reqwest::Error>(bytes::Bytes::from_static(
+                b"data: {\"type\":\"response.created\"}\n\n",
+            )),
+            Ok::<_, reqwest::Error>(bytes::Bytes::from_static(
+                b"data: {\"type\":\"error\",\"error\":{\"message\":\"quota exceeded\"}}\n\n",
+            )),
+        ]));
+
+        let error = read_sse_prelude(&mut stream, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert_eq!(error, "quota exceeded");
+    }
+
+    #[tokio::test]
+    async fn sse_prelude_returns_metadata_and_first_output_together() {
+        let mut stream: ReqwestByteStream = Box::pin(futures_util::stream::iter(vec![Ok::<
+            _,
+            reqwest::Error,
+        >(
+            bytes::Bytes::from_static(
+                b"data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
+            ),
+        )]));
+
+        let prefix = read_sse_prelude(&mut stream, Duration::from_secs(1))
+            .await
+            .unwrap();
+        let text = String::from_utf8(prefix.to_vec()).unwrap();
+        assert!(text.contains("response.created"));
+        assert!(text.contains("response.output_text.delta"));
+    }
+
+    #[tokio::test]
+    async fn sse_prelude_times_out_when_upstream_never_emits() {
+        let mut stream: ReqwestByteStream = Box::pin(futures_util::stream::pending());
+        let error = read_sse_prelude(&mut stream, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+        assert!(error.contains("first-event timeout"));
     }
 }
 
@@ -11662,7 +12609,7 @@ impl CodexSseUsageTracker {
     }
 
     fn push(&mut self, chunk: &Bytes) {
-        if self.recorded || !self.context.prompt.is_prompt {
+        if self.recorded {
             return;
         }
 
@@ -11692,12 +12639,18 @@ impl CodexSseUsageTracker {
 
         let data_text = data_lines.join("\n");
         if data_text == "[DONE]" {
+            record_usage_success(&self.state, &self.context, &UsageMetrics::default());
+            self.recorded = true;
             return;
         }
         let value: serde_json::Value = match serde_json::from_str(&data_text) {
             Ok(value) => value,
             Err(_) => return,
         };
+        if let Some(message) = sse_error_from_value(&value) {
+            self.fail(&message);
+            return;
+        }
         if value.get("type").and_then(|v| v.as_str()) != Some("response.completed") {
             return;
         }
@@ -11707,6 +12660,22 @@ impl CodexSseUsageTracker {
         let metrics = usage_metrics_from_response_value(response);
         record_usage_success(&self.state, &self.context, &metrics);
         self.recorded = true;
+    }
+
+    fn fail(&mut self, message: &str) {
+        if self.recorded {
+            return;
+        }
+        record_codex_error(&self.state, &self.context, message);
+        self.recorded = true;
+    }
+}
+
+impl Drop for CodexSseUsageTracker {
+    fn drop(&mut self) {
+        if !self.recorded {
+            router_request_abandoned(&self.state, self.context.provider_name, &self.context.key);
+        }
     }
 }
 
@@ -12561,22 +13530,14 @@ const ACCOUNT_SELECTION_QUOTA_EPSILON: f64 = 0.01;
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct AccountSelectionScore {
     quota_pressure: Option<f64>,
-    historical_tokens: u64,
-    historical_requests: u64,
+    active_requests: u64,
+    recent_requests: u64,
 }
 
 impl AccountSelectionScore {
     pub(crate) fn is_better_than(&self, other: &Self) -> bool {
         if self.is_quota_exhausted() != other.is_quota_exhausted() {
             return !self.is_quota_exhausted();
-        }
-
-        if self.historical_tokens != other.historical_tokens {
-            return self.historical_tokens < other.historical_tokens;
-        }
-
-        if self.historical_requests != other.historical_requests {
-            return self.historical_requests < other.historical_requests;
         }
 
         match (self.quota_pressure, other.quota_pressure) {
@@ -12593,6 +13554,14 @@ impl AccountSelectionScore {
                 return true;
             }
             _ => {}
+        }
+
+        if self.active_requests != other.active_requests {
+            return self.active_requests < other.active_requests;
+        }
+
+        if self.recent_requests != other.recent_requests {
+            return self.recent_requests < other.recent_requests;
         }
 
         false
@@ -12667,19 +13636,216 @@ fn usage_backed_selection_score(
     key: String,
     quota_pressure: Option<f64>,
 ) -> AccountSelectionScore {
-    let stored = {
-        state
-            .persisted_stats
-            .lock()
-            .unwrap()
-            .account_usage(provider, &key)
-            .cloned()
-    };
+    let provider_name = provider_name(provider);
+    let (active_requests, recent_requests) = router_account_load(state, provider_name, &key);
     AccountSelectionScore {
         quota_pressure: quota_pressure.filter(|value| !value.is_nan()),
-        historical_tokens: stored.as_ref().map(|usage| usage.total_tokens).unwrap_or(0),
-        historical_requests: stored.as_ref().map(|usage| usage.requests).unwrap_or(0),
+        active_requests: active_requests as u64,
+        recent_requests: recent_requests as u64,
     }
+}
+
+fn provider_name(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Codex => "codex",
+        Provider::Antigravity => "antigravity",
+        Provider::Gemini => "gemini",
+        Provider::Qwen => "qwen",
+        Provider::DeepSeek => "deepseek",
+        Provider::Grok => "grok",
+        Provider::MiniMax => "minimax",
+        Provider::Copilot => "copilot",
+        Provider::Claude => "claude",
+        Provider::Glm => "glm",
+    }
+}
+
+fn account_router_key(provider: &str, account_key: &str) -> String {
+    format!("{}|{}", provider, account_key)
+}
+
+pub(crate) fn router_account_eligible(state: &AppState, provider: &str, account_key: &str) -> bool {
+    let key = account_router_key(provider, account_key);
+    let now = std::time::Instant::now();
+    let mut router = state.account_router.lock().unwrap();
+    let runtime = router.entry(key).or_default();
+    matches!(
+        account_runtime_status(true, runtime, now),
+        AccountRuntimeStatus::Healthy
+    )
+}
+
+fn account_runtime_status(
+    enabled: bool,
+    runtime: &AccountRuntimeState,
+    now: std::time::Instant,
+) -> AccountRuntimeStatus {
+    if !enabled {
+        return AccountRuntimeStatus::Disabled;
+    }
+    match runtime.cooldown_until {
+        Some(until) if until > now => AccountRuntimeStatus::Cooldown,
+        Some(_) if runtime.probing => AccountRuntimeStatus::Probing,
+        _ => AccountRuntimeStatus::Healthy,
+    }
+}
+
+pub(crate) fn account_refresh_lock(
+    state: &AppState,
+    provider: &str,
+    account_key: &str,
+) -> Arc<tokio::sync::Mutex<()>> {
+    state
+        .account_refresh_locks
+        .lock()
+        .unwrap()
+        .entry(account_router_key(provider, account_key))
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+fn router_account_load(state: &AppState, provider: &str, account_key: &str) -> (usize, usize) {
+    let mut router = state.account_router.lock().unwrap();
+    let runtime = router
+        .entry(account_router_key(provider, account_key))
+        .or_default();
+    let cutoff = std::time::Instant::now() - Duration::from_secs(5 * 60);
+    runtime.recent_requests.retain(|started| *started >= cutoff);
+    (runtime.active_requests, runtime.recent_requests.len())
+}
+
+fn router_request_started(state: &AppState, provider: &str, account_key: &str) {
+    let key = account_router_key(provider, account_key);
+    let mut router = state.account_router.lock().unwrap();
+    let runtime = router.entry(key).or_default();
+    if runtime.reserved_requests > 0 {
+        runtime.reserved_requests -= 1;
+        return;
+    }
+    runtime.active_requests = runtime.active_requests.saturating_add(1);
+    let now = std::time::Instant::now();
+    runtime.probing = runtime.cooldown_until.is_some_and(|until| until <= now);
+    let cutoff = now - Duration::from_secs(5 * 60);
+    runtime.recent_requests.retain(|started| *started >= cutoff);
+    runtime.recent_requests.push_back(now);
+}
+
+/// Reserve the first account while its provider round-robin lock is still
+/// held. This closes the gap between scoring and request bookkeeping: a
+/// concurrent prompt cannot select the same apparently-idle account before
+/// the first prompt has recorded its request.
+pub(crate) fn router_reserve_account(state: &AppState, provider: &str, account_key: &str) {
+    let key = account_router_key(provider, account_key);
+    let mut router = state.account_router.lock().unwrap();
+    let runtime = router.entry(key).or_default();
+    runtime.active_requests = runtime.active_requests.saturating_add(1);
+    runtime.reserved_requests = runtime.reserved_requests.saturating_add(1);
+    let now = std::time::Instant::now();
+    runtime.probing = runtime.cooldown_until.is_some_and(|until| until <= now);
+    let cutoff = now - Duration::from_secs(5 * 60);
+    runtime.recent_requests.retain(|started| *started >= cutoff);
+    runtime.recent_requests.push_back(now);
+}
+
+pub(crate) fn router_request_abandoned(state: &AppState, provider: &str, account_key: &str) {
+    let key = account_router_key(provider, account_key);
+    let mut router = state.account_router.lock().unwrap();
+    let runtime = router.entry(key).or_default();
+    runtime.active_requests = runtime.active_requests.saturating_sub(1);
+    runtime.probing = false;
+}
+
+pub(crate) fn router_reservation_cancelled(state: &AppState, provider: &str, account_key: &str) {
+    let key = account_router_key(provider, account_key);
+    let mut router = state.account_router.lock().unwrap();
+    let runtime = router.entry(key).or_default();
+    if runtime.reserved_requests > 0 {
+        runtime.reserved_requests -= 1;
+        runtime.active_requests = runtime.active_requests.saturating_sub(1);
+        runtime.probing = false;
+    }
+}
+
+fn router_request_finished(
+    state: &AppState,
+    provider: &str,
+    account_key: &str,
+    success: bool,
+    message: Option<&str>,
+) {
+    let key = account_router_key(provider, account_key);
+    let mut router = state.account_router.lock().unwrap();
+    let runtime = router.entry(key).or_default();
+    runtime.active_requests = runtime.active_requests.saturating_sub(1);
+    if success {
+        runtime.consecutive_failures = 0;
+        runtime.cooldown_until = None;
+        runtime.probing = false;
+        return;
+    }
+
+    apply_router_failure(
+        runtime,
+        message.unwrap_or_default(),
+        std::time::Instant::now(),
+    );
+}
+
+fn apply_router_failure(runtime: &mut AccountRuntimeState, message: &str, now: std::time::Instant) {
+    let message = message.to_ascii_lowercase();
+    let is_quota = contains_http_status(&message, 429)
+        || message.contains("rate limit")
+        || message.contains("ratelimit")
+        || message.contains("quota")
+        || message.contains("resource exhausted")
+        || message.contains("usage limit");
+    let deterministic_bad_request = message.contains("invalid request history")
+        || (contains_http_status(&message, 400) && !is_quota);
+    if deterministic_bad_request {
+        runtime.consecutive_failures = 0;
+        runtime.cooldown_until = None;
+        runtime.probing = false;
+        return;
+    }
+    runtime.consecutive_failures = runtime.consecutive_failures.saturating_add(1);
+    let is_timeout = message.contains("timeout")
+        || message.contains("timed out")
+        || message.contains("failed to reach");
+    let retry_after_seconds = parse_retry_after_seconds(&message);
+    let delay_seconds = if is_quota {
+        retry_after_seconds.unwrap_or(30 * 60)
+    } else if is_timeout {
+        5
+    } else {
+        2u64.saturating_pow(runtime.consecutive_failures.min(6))
+    };
+    runtime.cooldown_until = Some(now + Duration::from_secs(delay_seconds.clamp(1, 30 * 60)));
+    runtime.probing = false;
+}
+
+fn contains_http_status(message: &str, status: u16) -> bool {
+    let status = status.to_string();
+    message
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|part| part == status)
+}
+
+fn parse_retry_after_seconds(message: &str) -> Option<u64> {
+    const MARKERS: [&str; 4] = [
+        "retry-after=",
+        "retry-after:",
+        "retry_after=",
+        "\"retry-after\":",
+    ];
+    MARKERS.iter().find_map(|marker| {
+        let value = message.split(marker).nth(1)?.trim_start();
+        let digits = value
+            .trim_start_matches(['\'', '"'])
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        digits.parse::<u64>().ok()
+    })
 }
 
 pub(crate) fn codex_token_selection_score(
@@ -13266,10 +14432,113 @@ pub(crate) fn glm_usage_context(
     }
 }
 
+fn start_persistence_worker(
+    cfg: Arc<Config>,
+    persisted_stats: Arc<Mutex<stats_store::StatsStore>>,
+    receiver: mpsc::Receiver<PersistenceEvent>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("gateway-persistence".to_string())
+        .spawn(move || {
+            let mut stats_dirty = false;
+            let mut pending_api_keys = None;
+            let mut pending_history = Vec::new();
+            let flush_interval = Duration::from_secs(2);
+            let mut next_flush = std::time::Instant::now() + flush_interval;
+            let mut last_history_maintenance = std::time::Instant::now()
+                .checked_sub(Duration::from_secs(3600))
+                .unwrap_or_else(std::time::Instant::now);
+
+            loop {
+                let wait = next_flush.saturating_duration_since(std::time::Instant::now());
+                match receiver.recv_timeout(wait) {
+                    Ok(PersistenceEvent::StatsDirty) => stats_dirty = true,
+                    Ok(PersistenceEvent::History(entry)) => pending_history.push(entry),
+                    Ok(PersistenceEvent::ApiKeys(snapshot)) => pending_api_keys = Some(snapshot),
+                    Ok(PersistenceEvent::Shutdown(flushed)) => {
+                        flush_persistence(
+                            &cfg,
+                            &persisted_stats,
+                            &mut stats_dirty,
+                            &mut pending_api_keys,
+                            &mut pending_history,
+                        );
+                        let _ = flushed.send(());
+                        break;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        flush_persistence(
+                            &cfg,
+                            &persisted_stats,
+                            &mut stats_dirty,
+                            &mut pending_api_keys,
+                            &mut pending_history,
+                        );
+                        break;
+                    }
+                }
+
+                let now = std::time::Instant::now();
+                if now >= next_flush || pending_history.len() >= 512 {
+                    flush_persistence(
+                        &cfg,
+                        &persisted_stats,
+                        &mut stats_dirty,
+                        &mut pending_api_keys,
+                        &mut pending_history,
+                    );
+                    next_flush = now + flush_interval;
+                }
+                if last_history_maintenance.elapsed() >= Duration::from_secs(3600) {
+                    if let Err(err) = usage_store::prune(
+                        &cfg,
+                        cfg.history_retention_days,
+                        cfg.history_max_entries,
+                    ) {
+                        error!("failed to prune usage history: {}", err);
+                    }
+                    last_history_maintenance = std::time::Instant::now();
+                }
+            }
+        })
+        .expect("failed to start persistence worker")
+}
+
+fn flush_persistence(
+    cfg: &Config,
+    persisted_stats: &Arc<Mutex<stats_store::StatsStore>>,
+    stats_dirty: &mut bool,
+    pending_api_keys: &mut Option<api_keys::ApiKeyStore>,
+    pending_history: &mut Vec<usage_store::UsageHistoryEntry>,
+) {
+    if *stats_dirty {
+        let snapshot = persisted_stats.lock().unwrap().clone();
+        if let Err(err) = stats_store::save(cfg, &snapshot) {
+            error!("failed to persist usage stats: {}", err);
+        }
+        *stats_dirty = false;
+    }
+    if let Some(snapshot) = pending_api_keys.take() {
+        if let Err(err) = api_keys::save(cfg, &snapshot) {
+            error!("failed to persist API key store: {}", err);
+        }
+    }
+    if !pending_history.is_empty() {
+        let entries = std::mem::take(pending_history);
+        if let Err(err) = usage_store::append_batch(cfg, &entries) {
+            error!("failed to append usage history: {}", err);
+        }
+    }
+}
+
 fn append_usage_history(state: &AppState, entry: usage_store::UsageHistoryEntry) {
-    let _guard = state.usage_history_lock.lock().unwrap();
-    if let Err(err) = usage_store::append(&state.cfg, &entry) {
-        error!("failed to append usage history: {}", err);
+    if state
+        .persistence_tx
+        .send(PersistenceEvent::History(entry))
+        .is_err()
+    {
+        error!("persistence worker is unavailable; usage history was dropped");
     }
 }
 
@@ -13404,23 +14673,81 @@ fn check_api_key(state: &AppState, headers: &HeaderMap) -> bool {
         return false;
     };
     let now = now_rfc3339();
-    let snapshot = {
-        let mut store = state.api_keys.lock().unwrap();
-        let Some(key_id) = api_keys::verify_token(&store, token) else {
+    let lookup_hash = api_keys::token_lookup_hash(token);
+    let cached = state
+        .api_key_cache
+        .read()
+        .unwrap()
+        .get(&lookup_hash)
+        .cloned();
+    let key_id = if let Some(ApiKeyCacheEntry::Verified(key_id)) = cached {
+        // Administrative mutations invalidate the whole cache before they
+        // become visible. A cache hit therefore needs no API-key store lock.
+        Some(key_id)
+    } else if let Some(ApiKeyCacheEntry::Rejected(rejected_at)) = cached {
+        if rejected_at.elapsed() < Duration::from_secs(5) {
             return false;
-        };
-        if api_keys::touch_last_used(&mut store, &key_id, &now) {
-            Some(store.clone())
+        }
+        state.api_key_cache.write().unwrap().remove(&lookup_hash);
+        verify_api_key_cache_miss(state, token, &lookup_hash)
+    } else {
+        verify_api_key_cache_miss(state, token, &lookup_hash)
+    };
+    let Some(key_id) = key_id else {
+        return false;
+    };
+
+    // Last-used metadata is throttled to one update per minute and flushed
+    // by the persistence worker, so it does not add a disk write per request.
+    let should_touch = {
+        let mut touched = state.api_key_last_used.lock().unwrap();
+        let bucket = now.get(..16).unwrap_or(&now).to_string();
+        if touched.get(&key_id) == Some(&bucket) {
+            false
         } else {
-            None
+            touched.insert(key_id.clone(), bucket);
+            true
         }
     };
-    if let Some(snapshot) = snapshot {
-        if let Err(err) = api_keys::save(state.cfg.as_ref(), &snapshot) {
-            error!("failed to update API key last_used_at: {}", err);
+    if should_touch {
+        let snapshot = {
+            let mut store = state.api_keys.lock().unwrap();
+            if api_keys::touch_last_used(&mut store, &key_id, &now) {
+                Some(store.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(snapshot) = snapshot {
+            let _ = state
+                .persistence_tx
+                .send(PersistenceEvent::ApiKeys(snapshot));
         }
     }
     true
+}
+
+fn verify_api_key_cache_miss(state: &AppState, token: &str, lookup_hash: &str) -> Option<String> {
+    // Clone only the lookup candidates while holding the short-lived mutex.
+    // Argon2 verification runs after the mutex is released.
+    let candidates = {
+        let store = state.api_keys.lock().unwrap();
+        api_keys::verification_candidates(&store, token)
+    };
+    let verified = candidates
+        .iter()
+        .find(|record| api_keys::verify_record(record, token))
+        .map(|record| record.id.clone());
+    let cache_entry = verified
+        .as_ref()
+        .map(|key_id| ApiKeyCacheEntry::Verified(key_id.clone()))
+        .unwrap_or_else(|| ApiKeyCacheEntry::Rejected(std::time::Instant::now()));
+    state
+        .api_key_cache
+        .write()
+        .unwrap()
+        .insert(lookup_hash.to_string(), cache_entry);
+    verified
 }
 
 fn extract_api_key(headers: &HeaderMap) -> Option<&str> {
@@ -13479,6 +14806,13 @@ fn require_admin_session_text(state: &AppState, headers: &HeaderMap) -> Option<R
 }
 
 fn candidate_tokens(state: &AppState) -> Vec<(usize, UpstreamToken)> {
+    candidate_tokens_with_reservation(state, false)
+}
+
+fn candidate_tokens_with_reservation(
+    state: &AppState,
+    reserve_first: bool,
+) -> Vec<(usize, UpstreamToken)> {
     let mut idx = state.rr.lock().unwrap();
     let tokens = state.tokens.lock().unwrap().clone();
     if tokens.is_empty() {
@@ -13488,11 +14822,17 @@ fn candidate_tokens(state: &AppState) -> Vec<(usize, UpstreamToken)> {
     let picked_indices = select_ordered_account_indices(
         len,
         *idx,
-        |candidate_idx| tokens[candidate_idx].enabled,
+        |candidate_idx| {
+            tokens[candidate_idx].enabled
+                && router_account_eligible(state, "codex", &codex_stats_key(&tokens[candidate_idx]))
+        },
         |candidate_idx| codex_token_selection_score(state, candidate_idx, &tokens[candidate_idx]),
     );
     if let Some(picked_idx) = picked_indices.first() {
         *idx = (picked_idx + 1) % len;
+        if reserve_first {
+            router_reserve_account(state, "codex", &codex_stats_key(&tokens[*picked_idx]));
+        }
     }
     picked_indices
         .into_iter()
@@ -13504,6 +14844,87 @@ fn pick_token(state: &AppState) -> Option<(usize, UpstreamToken)> {
     candidate_tokens(state).into_iter().next()
 }
 
+fn stats_accounts_mut(stats: &mut UsageStats, provider: Provider) -> &mut Vec<AccountUsage> {
+    match provider {
+        Provider::Codex => &mut stats.codex_accounts,
+        Provider::Antigravity => &mut stats.agw_accounts,
+        Provider::Gemini => &mut stats.gemini_accounts,
+        Provider::Qwen => &mut stats.qwen_accounts,
+        Provider::DeepSeek => &mut stats.deepseek_accounts,
+        Provider::Grok => &mut stats.grok_accounts,
+        Provider::MiniMax => &mut stats.minimax_accounts,
+        Provider::Copilot => &mut stats.copilot_accounts,
+        Provider::Claude => &mut stats.claude_accounts,
+        Provider::Glm => &mut stats.glm_accounts,
+    }
+}
+
+fn apply_counter_delta_to_stats(
+    stats: &mut UsageStats,
+    provider: Provider,
+    key: &str,
+    label: &str,
+    account_id: &str,
+    delta: &CounterDelta,
+) {
+    if delta.request_delta > 0 {
+        stats.total_requests += delta.request_delta;
+    }
+    if delta.error_delta > 0 {
+        stats.total_errors += delta.error_delta;
+    }
+    stats.total_prompt_total += delta.prompt_total_delta;
+    stats.total_prompt_error_total += delta.prompt_error_total_delta;
+    stats.total_input_tokens += delta.input_tokens_delta;
+    stats.total_output_tokens += delta.output_tokens_delta;
+    stats.total_tokens_used += delta.total_tokens_delta;
+    stats.total_cache_tokens += delta.cache_tokens_delta;
+    stats.total_reasoning_tokens += delta.reasoning_tokens_delta;
+    if let Some(observed_at) = delta.observed_at.clone() {
+        if stats.first_recorded_at.is_none() {
+            stats.first_recorded_at = Some(observed_at.clone());
+        }
+        stats.last_recorded_at = Some(observed_at);
+    }
+
+    let accounts = stats_accounts_mut(stats, provider);
+    let entry_index = accounts.iter().position(|entry| entry.key == key);
+    let entry_index = entry_index.unwrap_or_else(|| {
+        accounts.push(AccountUsage {
+            key: key.to_string(),
+            ..Default::default()
+        });
+        accounts.len() - 1
+    });
+    let entry = &mut accounts[entry_index];
+    entry.label = label.to_string();
+    entry.account_id = account_id.to_string();
+    entry.requests += delta.request_delta;
+    entry.errors += delta.error_delta;
+    entry.prompt_total += delta.prompt_total_delta;
+    entry.prompt_error_total += delta.prompt_error_total_delta;
+    entry.input_tokens += delta.input_tokens_delta;
+    entry.output_tokens += delta.output_tokens_delta;
+    entry.total_tokens += delta.total_tokens_delta;
+    entry.cache_tokens += delta.cache_tokens_delta;
+    entry.reasoning_tokens += delta.reasoning_tokens_delta;
+    if let Some(observed_at) = delta.observed_at.clone() {
+        if entry.first_seen_at.is_none() {
+            entry.first_seen_at = Some(observed_at.clone());
+        }
+        entry.last_seen_at = Some(observed_at);
+    }
+    if let Some(success_at) = delta.success_at.clone() {
+        entry.last_success_at = Some(success_at);
+    }
+    if let Some(error_at) = delta.error_at.clone() {
+        entry.last_error_at = Some(error_at);
+    }
+    if let Some(error_message) = delta.error_message.clone() {
+        entry.last_error_message = Some(error_message);
+    }
+}
+
 fn update_account_counters(
     state: &AppState,
     provider: Provider,
@@ -13512,6 +14933,7 @@ fn update_account_counters(
     account_id: String,
     delta: CounterDelta,
 ) {
+    let stats_delta = delta.clone();
     {
         let mut persisted = state.persisted_stats.lock().unwrap();
         if delta.request_delta > 0 {
@@ -13533,9 +14955,9 @@ fn update_account_counters(
             }
             persisted.last_recorded_at = Some(observed_at);
         }
-        let entry = persisted.account_usage_mut(provider, key);
-        entry.label = label;
-        entry.account_id = account_id;
+        let entry = persisted.account_usage_mut(provider, key.clone());
+        entry.label = label.clone();
+        entry.account_id = account_id.clone();
         entry.requests += delta.request_delta;
         entry.errors += delta.error_delta;
         entry.prompt_total += delta.prompt_total_delta;
@@ -13561,11 +14983,22 @@ fn update_account_counters(
             entry.last_error_message = Some(error_message);
         }
     }
-    persist_stats_store(state);
-    sync_usage_stats(state);
+    {
+        let mut stats = state.stats.lock().unwrap();
+        apply_counter_delta_to_stats(
+            &mut stats,
+            provider,
+            &key,
+            &label,
+            &account_id,
+            &stats_delta,
+        );
+    }
+    let _ = state.persistence_tx.send(PersistenceEvent::StatsDirty);
 }
 
 fn record_request_started(state: &AppState, context: &UsageContext) {
+    router_request_started(state, context.provider_name, &context.key);
     update_account_counters(
         state,
         context.provider,
@@ -13584,6 +15017,13 @@ fn record_request_started(state: &AppState, context: &UsageContext) {
 fn record_request_error(state: &AppState, context: &UsageContext, message: impl Into<String>) {
     let observed_at = now_rfc3339();
     let message = message.into();
+    router_request_finished(
+        state,
+        context.provider_name,
+        &context.key,
+        false,
+        Some(&message),
+    );
     update_account_counters(
         state,
         context.provider,
@@ -13633,6 +15073,7 @@ fn record_request_error(state: &AppState, context: &UsageContext, message: impl 
 
 fn record_usage_success(state: &AppState, context: &UsageContext, metrics: &UsageMetrics) {
     let observed_at = now_rfc3339();
+    router_request_finished(state, context.provider_name, &context.key, true, None);
     update_account_counters(
         state,
         context.provider,
@@ -14288,20 +15729,26 @@ mod codex_provider_model_tests {
 
 #[cfg(test)]
 mod account_selection_tests {
-    use super::{select_ordered_account_indices, AccountSelectionScore};
+    use super::{
+        account_runtime_status, apply_router_failure, parse_retry_after_seconds,
+        select_ordered_account_indices, AccountRuntimeState, AccountRuntimeStatus,
+        AccountSelectionScore,
+    };
+    use std::collections::VecDeque;
+    use std::time::{Duration, Instant};
 
     #[test]
-    fn historical_usage_wins_before_non_exhausted_quota_pressure() {
+    fn quota_headroom_wins_before_request_history() {
         let scores = [
             AccountSelectionScore {
                 quota_pressure: Some(81.0),
-                historical_tokens: 1,
-                historical_requests: 1,
+                active_requests: 1,
+                recent_requests: 1,
             },
             AccountSelectionScore {
                 quota_pressure: Some(22.0),
-                historical_tokens: 10_000,
-                historical_requests: 100,
+                active_requests: 10_000,
+                recent_requests: 100,
             },
         ];
 
@@ -14309,7 +15756,7 @@ mod account_selection_tests {
             .into_iter()
             .next()
             .expect("picked account");
-        assert_eq!(picked, 0);
+        assert_eq!(picked, 1);
     }
 
     #[test]
@@ -14317,18 +15764,18 @@ mod account_selection_tests {
         let scores = [
             AccountSelectionScore {
                 quota_pressure: Some(f64::INFINITY),
-                historical_tokens: 1,
-                historical_requests: 1,
+                active_requests: 1,
+                recent_requests: 1,
             },
             AccountSelectionScore {
                 quota_pressure: Some(90.0),
-                historical_tokens: 10_000,
-                historical_requests: 100,
+                active_requests: 10_000,
+                recent_requests: 100,
             },
             AccountSelectionScore {
                 quota_pressure: Some(f64::INFINITY),
-                historical_tokens: 2,
-                historical_requests: 2,
+                active_requests: 2,
+                recent_requests: 2,
             },
         ];
 
@@ -14341,13 +15788,13 @@ mod account_selection_tests {
         let scores = [
             AccountSelectionScore {
                 quota_pressure: Some(50.0),
-                historical_tokens: 10,
-                historical_requests: 1,
+                active_requests: 10,
+                recent_requests: 1,
             },
             AccountSelectionScore {
                 quota_pressure: Some(50.0),
-                historical_tokens: 10,
-                historical_requests: 1,
+                active_requests: 10,
+                recent_requests: 1,
             },
         ];
 
@@ -14363,13 +15810,13 @@ mod account_selection_tests {
         let scores = [
             AccountSelectionScore {
                 quota_pressure: Some(1.0),
-                historical_tokens: 0,
-                historical_requests: 0,
+                active_requests: 0,
+                recent_requests: 0,
             },
             AccountSelectionScore {
                 quota_pressure: Some(90.0),
-                historical_tokens: 0,
-                historical_requests: 0,
+                active_requests: 0,
+                recent_requests: 0,
             },
         ];
 
@@ -14378,6 +15825,95 @@ mod account_selection_tests {
             .next()
             .expect("picked account");
         assert_eq!(picked, 1);
+    }
+
+    #[test]
+    fn active_requests_win_after_equal_quota_headroom() {
+        let scores = [
+            AccountSelectionScore {
+                quota_pressure: Some(40.0),
+                active_requests: 3,
+                recent_requests: 0,
+            },
+            AccountSelectionScore {
+                quota_pressure: Some(40.0),
+                active_requests: 0,
+                recent_requests: 9,
+            },
+        ];
+
+        let picked = select_ordered_account_indices(2, 0, |_| true, |idx| scores[idx])
+            .into_iter()
+            .next()
+            .expect("picked account");
+        assert_eq!(picked, 1);
+    }
+
+    #[test]
+    fn cooldown_state_blocks_until_expiry_then_allows_one_probe() {
+        let now = Instant::now();
+        let runtime = AccountRuntimeState {
+            cooldown_until: Some(now + Duration::from_secs(10)),
+            ..Default::default()
+        };
+        assert_eq!(
+            account_runtime_status(true, &runtime, now),
+            AccountRuntimeStatus::Cooldown
+        );
+
+        let expired = AccountRuntimeState {
+            cooldown_until: Some(now - Duration::from_secs(1)),
+            ..Default::default()
+        };
+        assert_eq!(
+            account_runtime_status(true, &expired, now),
+            AccountRuntimeStatus::Healthy
+        );
+
+        let probing = AccountRuntimeState {
+            cooldown_until: Some(now - Duration::from_secs(1)),
+            probing: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            account_runtime_status(true, &probing, now),
+            AccountRuntimeStatus::Probing
+        );
+    }
+
+    #[test]
+    fn deterministic_invalid_history_does_not_create_cooldown() {
+        let mut runtime = AccountRuntimeState {
+            consecutive_failures: 4,
+            cooldown_until: Some(Instant::now() + Duration::from_secs(60)),
+            probing: true,
+            recent_requests: VecDeque::new(),
+            ..Default::default()
+        };
+        apply_router_failure(
+            &mut runtime,
+            "Invalid request history: function_call_output has no matching function_call",
+            Instant::now(),
+        );
+        assert_eq!(runtime.consecutive_failures, 0);
+        assert!(runtime.cooldown_until.is_none());
+        assert!(!runtime.probing);
+    }
+
+    #[test]
+    fn quota_retry_after_is_bounded_and_parsed_from_common_formats() {
+        assert_eq!(parse_retry_after_seconds("429 retry-after=45"), Some(45));
+        assert_eq!(
+            parse_retry_after_seconds("quota error {\"retry-after\": 90}"),
+            Some(90)
+        );
+
+        let now = Instant::now();
+        let mut runtime = AccountRuntimeState::default();
+        apply_router_failure(&mut runtime, "status 429 retry-after=999999", now);
+        let cooldown = runtime.cooldown_until.expect("quota cooldown");
+        assert!(cooldown <= now + Duration::from_secs(30 * 60));
+        assert!(cooldown > now);
     }
 }
 

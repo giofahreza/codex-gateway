@@ -117,11 +117,23 @@ pub fn candidate_accounts(state: &crate::AppState) -> Vec<MiniMaxAccount> {
     let picked_indices = crate::select_ordered_account_indices(
         len,
         *idx,
-        |candidate_idx| accounts[candidate_idx].enabled,
+        |candidate_idx| {
+            accounts[candidate_idx].enabled
+                && crate::router_account_eligible(
+                    state,
+                    "minimax",
+                    &crate::minimax_stats_key(&accounts[candidate_idx]),
+                )
+        },
         |candidate_idx| crate::minimax_account_selection_score(state, &accounts[candidate_idx]),
     );
     if let Some(picked_idx) = picked_indices.first() {
         *idx = (picked_idx + 1) % len;
+        crate::router_reserve_account(
+            state,
+            "minimax",
+            &crate::minimax_stats_key(&accounts[*picked_idx]),
+        );
     }
     picked_indices
         .into_iter()

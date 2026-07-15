@@ -607,6 +607,7 @@ pub(super) async fn stream_chat_completions(
     let usage_context = context.clone();
     let model = model.to_string();
     let stream = async_stream::stream! {
+        let mut lifecycle = crate::StreamRequestGuard::new(&usage_state, &usage_context);
         let mut upstream = resp.bytes_stream();
         let mut parser = GLMSseParser::default();
         let mut accumulator = GLMStreamAccumulator::new(model.clone());
@@ -621,6 +622,7 @@ pub(super) async fn stream_chat_completions(
                 Err(err) => {
                     let message = format!("GLM stream body read failed: {}", err);
                     crate::record_glm_error(&usage_state, &usage_context, &message);
+                    lifecycle.finish();
                     yield Ok(response_sse_event(&json!({
                         "type": "response.failed",
                         "error": {
@@ -653,6 +655,7 @@ pub(super) async fn stream_chat_completions(
             "response": response
         })));
         yield Ok(done_sse_event());
+        lifecycle.finish();
     };
 
     Ok((
@@ -675,6 +678,7 @@ async fn stream_chat_completions_passthrough(
     let usage_state = state.clone();
     let usage_context = context.clone();
     let stream = async_stream::stream! {
+        let mut lifecycle = crate::StreamRequestGuard::new(&usage_state, &usage_context);
         let mut upstream = resp.bytes_stream();
         let mut parser = GLMSseParser::default();
         let mut accumulator = GLMStreamAccumulator::new(model);
@@ -689,6 +693,7 @@ async fn stream_chat_completions_passthrough(
                 Err(err) => {
                     let message = format!("GLM chat completions stream read failed: {}", err);
                     crate::record_glm_error(&usage_state, &usage_context, &message);
+                    lifecycle.finish();
                     yield Err(std::io::Error::new(std::io::ErrorKind::Other, "stream"));
                     return;
                 }
@@ -700,6 +705,7 @@ async fn stream_chat_completions_passthrough(
         let response = accumulator.to_response();
         let metrics = crate::usage_metrics_from_response_value(&response);
         crate::record_glm_success(&usage_state, &usage_context, &metrics);
+        lifecycle.finish();
     };
 
     (

@@ -486,6 +486,15 @@ mod tests {
             disabled_files: None,
             admin_auth: Default::default(),
             oauth: Default::default(),
+            max_request_body_bytes: crate::default_max_request_body_bytes(),
+            max_concurrent_requests: crate::default_max_concurrent_requests(),
+            trusted_proxy: false,
+            history_retention_days: crate::default_history_retention_days(),
+            history_max_entries: crate::default_history_max_entries(),
+            upstream_connect_timeout_seconds: crate::default_upstream_connect_timeout_seconds(),
+            upstream_read_timeout_seconds: crate::default_upstream_read_timeout_seconds(),
+            upstream_first_event_timeout_seconds:
+                crate::default_upstream_first_event_timeout_seconds(),
         }
     }
 

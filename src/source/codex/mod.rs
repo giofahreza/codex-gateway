@@ -26,7 +26,9 @@ pub fn route_to_target(
         });
     }
 
-    if upstream_path == "responses" && *method == Method::POST {
+    if matches!(upstream_path.as_str(), "responses" | "responses/compact")
+        && *method == Method::POST
+    {
         crate::source::v1::provider::validate_provider_prefix_in_body(&body)?;
         let target = crate::source::v1::provider::target_from_request_body(&body)
             .unwrap_or(TargetModel::Codex);
@@ -62,6 +64,7 @@ fn normalize_codex_provider_body(body: Bytes) -> Bytes {
 
     let mut output = Map::new();
     copy_json_field(&input, &mut output, "model");
+    copy_json_field(&input, &mut output, "previous_model");
     copy_json_field(&input, &mut output, "instructions");
     copy_json_field(&input, &mut output, "input");
     copy_json_field(&input, &mut output, "messages");
@@ -160,6 +163,27 @@ mod tests {
         assert_eq!(body["input"], "hi");
         assert!(body.get("store").is_none());
         assert!(body.get("include").is_none());
+    }
+
+    #[test]
+    fn codex_compaction_route_preserves_previous_model_request() {
+        let uri: Uri = "/codex/responses/compact".parse().unwrap();
+        let routed = route_to_target(
+            "/codex/responses/compact",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(
+                br#"{"model":"gpt-5.4","previous_model":"gpt-5.3-codex","input":[]}"#,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::Codex);
+        assert_eq!(routed.upstream_path, "responses/compact");
+        let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "gpt-5.4");
+        assert_eq!(body["previous_model"], "gpt-5.3-codex");
     }
 
     #[test]

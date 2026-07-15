@@ -172,7 +172,7 @@ async fn save_account(state: &crate::AppState, body: &Bytes) -> axum::response::
         }))
         .into_response();
     }
-    if let Err(err) = std::fs::write(&path, serde_json::to_vec_pretty(&out).unwrap()) {
+    if let Err(err) = super::super::atomic_write_json(&path, &out) {
         return axum::Json(serde_json::json!({
             "ok": false,
             "message": format!("failed to write auth file: {}", err)

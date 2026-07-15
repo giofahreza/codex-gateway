@@ -236,25 +236,48 @@ pub async fn responses(
                     tokio::spawn(async move {
                         let mut chunk_stream = resp.bytes_stream();
                         let mut buffer = Vec::new();
+                        let mut failed = false;
                         while let Some(chunk) =
                             futures_util::StreamExt::next(&mut chunk_stream).await
                         {
                             match chunk {
                                 Ok(bytes) => {
                                     buffer.extend_from_slice(&bytes);
-                                    let _ = tx.send(Ok(bytes)).await;
+                                    if tx.send(Ok(bytes)).await.is_err() {
+                                        crate::router_request_abandoned(
+                                            &state_clone,
+                                            context_clone.provider_name,
+                                            &context_clone.key,
+                                        );
+                                        return;
+                                    }
                                 }
                                 Err(e) => {
+                                    let message = format!("Grok stream read failed: {}", e);
                                     let _ = tx.send(Err(axum::Error::new(e))).await;
+                                    crate::record_grok_error(
+                                        &state_clone,
+                                        &context_clone,
+                                        &message,
+                                    );
+                                    failed = true;
                                     break;
                                 }
                             }
                         }
-                        let body_bytes = Bytes::from(buffer);
-                        if let Some(usage) =
-                            crate::usage_metrics_from_sse_response_body(&body_bytes)
-                        {
-                            crate::record_grok_success(&state_clone, &context_clone, &usage);
+                        if !failed {
+                            let body_bytes = Bytes::from(buffer);
+                            if let Some(usage) =
+                                crate::usage_metrics_from_sse_response_body(&body_bytes)
+                            {
+                                crate::record_grok_success(&state_clone, &context_clone, &usage);
+                            } else {
+                                crate::record_grok_success(
+                                    &state_clone,
+                                    &context_clone,
+                                    &crate::UsageMetrics::default(),
+                                );
+                            }
                         }
                     });
 

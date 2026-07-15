@@ -18,7 +18,8 @@ pub fn convert(
         query = normalize_models_query(&query);
     }
 
-    let is_responses_post = upstream_path == "responses" && *method == Method::POST;
+    let is_responses_post = matches!(upstream_path.as_str(), "responses" | "responses/compact")
+        && *method == Method::POST;
     let response_mode = resolve_mode(&upstream_path, method, headers, &body);
 
     let upstream_body = if is_responses_post {
@@ -113,4 +114,33 @@ fn convert_openai_compat_body_to_codex(headers: &HeaderMap, body: Bytes) -> Byte
         }
     }
     body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderMap, Method, Uri};
+    use serde_json::Value;
+
+    #[test]
+    fn compact_strips_codex_provider_prefix() {
+        let uri: Uri = "/v1/responses/compact".parse().unwrap();
+        let routed = convert(
+            "responses/compact".to_string(),
+            &uri,
+            &Method::POST,
+            &HeaderMap::from_iter([(
+                "content-type".parse().unwrap(),
+                "application/json".parse().unwrap(),
+            )]),
+            Bytes::from_static(
+                br#"{"model":"cod:gpt-5.4","previous_model":"gpt-5.3-codex","input":[]}"#,
+            ),
+        );
+
+        let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(routed.upstream_path, "responses/compact");
+        assert_eq!(body["model"], "gpt-5.4");
+        assert_eq!(body["previous_model"], "gpt-5.3-codex");
+    }
 }

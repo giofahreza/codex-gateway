@@ -34,6 +34,8 @@ pub(crate) struct AdminAuthConfig {
     pub totp_secret: Option<String>,
     #[serde(default)]
     pub session_ttl_seconds: Option<u64>,
+    #[serde(default)]
+    pub secure_cookies: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -67,6 +69,9 @@ pub(crate) fn apply_env_overrides(cfg: &mut AdminAuthConfig) {
         if let Ok(parsed) = value.parse::<u64>() {
             cfg.session_ttl_seconds = Some(parsed);
         }
+    }
+    if let Some(value) = env_value(&["ADMIN_AUTH_SECURE_COOKIES"]) {
+        cfg.secure_cookies = parse_bool(&value).unwrap_or(cfg.secure_cookies);
     }
 }
 
@@ -123,25 +128,29 @@ pub(crate) fn verify_login(
     Ok(())
 }
 
-pub(crate) fn login_client_key(headers: &HeaderMap) -> String {
-    let forwarded_ip = [
-        "cf-connecting-ip",
-        "true-client-ip",
-        "x-real-ip",
-        "x-forwarded-for",
-    ]
-    .iter()
-    .find_map(|header_name| {
-        headers.get(*header_name).and_then(|value| {
-            value.to_str().ok().and_then(|raw| {
-                raw.split(',')
-                    .next()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToOwned::to_owned)
+pub(crate) fn login_client_key(headers: &HeaderMap, trust_forwarded_headers: bool) -> String {
+    let forwarded_ip = if trust_forwarded_headers {
+        [
+            "cf-connecting-ip",
+            "true-client-ip",
+            "x-real-ip",
+            "x-forwarded-for",
+        ]
+        .iter()
+        .find_map(|header_name| {
+            headers.get(*header_name).and_then(|value| {
+                value.to_str().ok().and_then(|raw| {
+                    raw.split(',')
+                        .next()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned)
+                })
             })
         })
-    });
+    } else {
+        None
+    };
     let user_agent = headers
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
@@ -243,17 +252,19 @@ pub(crate) fn remove_session(headers: &HeaderMap, sessions: &mut HashMap<String,
     prune_expired_sessions(sessions);
 }
 
-pub(crate) fn build_session_cookie(session_id: &str, ttl_seconds: u64) -> String {
+pub(crate) fn build_session_cookie(session_id: &str, ttl_seconds: u64, secure: bool) -> String {
+    let secure_suffix = if secure { "; Secure" } else { "" };
     format!(
-        "{}={}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax",
-        ADMIN_SESSION_COOKIE, session_id, ttl_seconds
+        "{}={}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax{}",
+        ADMIN_SESSION_COOKIE, session_id, ttl_seconds, secure_suffix
     )
 }
 
-pub(crate) fn clear_session_cookie() -> String {
+pub(crate) fn clear_session_cookie(secure: bool) -> String {
+    let secure_suffix = if secure { "; Secure" } else { "" };
     format!(
-        "{}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
-        ADMIN_SESSION_COOKIE
+        "{}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{}",
+        ADMIN_SESSION_COOKIE, secure_suffix
     )
 }
 
@@ -462,6 +473,7 @@ mod tests {
             api_key: Some("admin-key".to_string()),
             totp_secret: Some("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".to_string()),
             session_ttl_seconds: None,
+            secure_cookies: false,
         };
 
         let now = UNIX_EPOCH + std::time::Duration::from_secs(59);
@@ -475,6 +487,7 @@ mod tests {
             api_key: Some("admin-key".to_string()),
             totp_secret: Some("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".to_string()),
             session_ttl_seconds: None,
+            secure_cookies: false,
         };
 
         let now = UNIX_EPOCH + std::time::Duration::from_secs(59);
@@ -485,7 +498,7 @@ mod tests {
     fn session_cookie_round_trip_validates_and_clears() {
         let mut sessions = HashMap::new();
         let session_id = create_session(&mut sessions, 600);
-        let cookie = build_session_cookie(&session_id, 600);
+        let cookie = build_session_cookie(&session_id, 600, false);
         let cookie_pair = cookie.split(';').next().unwrap_or_default();
 
         let mut headers = HeaderMap::new();

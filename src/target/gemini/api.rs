@@ -172,6 +172,7 @@ pub async fn responses(
         ) {
             Ok(payload) => payload,
             Err(err) => {
+                crate::router_reservation_cancelled(&state, context.provider_name, &context.key);
                 return (
                     StatusCode::BAD_REQUEST,
                     [("Content-Type", "application/json")],

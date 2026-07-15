@@ -566,11 +566,8 @@ pub fn save_auth(
         "saved_at": chrono::Utc::now().to_rfc3339()
     });
 
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&out).map_err(|e| format!("serialize: {}", e))?,
-    )
-    .map_err(|e| format!("write auth file: {}", e))?;
+    super::super::atomic_write_json(&path, &out)
+        .map_err(|err| format!("write auth file: {}", err))?;
 
     Ok(path.to_string_lossy().to_string())
 }
@@ -770,11 +767,8 @@ fn update_auth_file(
     if value == before {
         return Ok(false);
     }
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&value).map_err(|e| format!("serialize auth file: {}", e))?,
-    )
-    .map_err(|e| format!("write auth file: {}", e))?;
+    super::super::atomic_write_json(&path, &value)
+        .map_err(|err| format!("write auth file: {}", err))?;
     Ok(true)
 }
 

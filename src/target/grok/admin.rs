@@ -297,6 +297,59 @@ pub async fn quota_json(State(state): State<crate::AppState>) -> impl IntoRespon
     }))
 }
 
+/// Returns the rate-limit metadata observed on real Grok requests. Dashboard
+/// refreshes must never issue paid text, image, or video probes merely to
+/// render an account card.
+pub fn cached_quota_json(state: &crate::AppState) -> serde_json::Value {
+    let Some(account) = super::accounts::first_enabled(state) else {
+        return serde_json::json!({
+            "error": { "code": "no_account", "message": "No Grok accounts configured" }
+        });
+    };
+
+    let mut text_limits = serde_json::Map::new();
+    for limit in &account.rate_limits {
+        text_limits.insert(
+            limit.scope.clone(),
+            serde_json::json!({
+                "limit": limit.limit,
+                "remaining": limit.remaining,
+                "used": limit.used,
+                "used_percent": limit.used_percent,
+                "remaining_percent": limit.remaining_percent,
+                "reset_label": limit.reset_label,
+            }),
+        );
+    }
+    let has_text_limits = !text_limits.is_empty();
+
+    serde_json::json!({
+        "account": {
+            "email": account.email,
+            "user_id": account.user_id,
+            "team_id": account.team_id,
+            "zdr_status": account.zdr_status,
+            "team_blocked": account.team_blocked,
+            "label": account.label,
+            "file_name": account.file_name,
+            "expires_at": account.expires_at,
+        },
+        "kinds": {
+            "DEFAULT_TEXT": {
+                "modelName": account.last_effective_model,
+                "requestKind": "DEFAULT",
+                "rate_limits": text_limits,
+            }
+        },
+        "observed_rate_limits": account.rate_limits,
+        "note": if !has_text_limits {
+            "No Grok rate-limit headers have been observed yet. Send a normal Grok request to populate this snapshot."
+        } else {
+            "Cached from the latest real Grok request. Dashboard refreshes do not send paid quota probes."
+        },
+    })
+}
+
 pub async fn login_start(State(state): State<crate::AppState>) -> impl IntoResponse {
     let pending = super::auth::PendingOAuth::new();
     let url = pending.build_authorize_url();

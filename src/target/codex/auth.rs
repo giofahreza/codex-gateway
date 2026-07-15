@@ -133,7 +133,7 @@ pub fn save_auth(state: &crate::AppState, token_resp: &TokenResponse) -> Result<
         "type": "codex",
         "expired": expires_at.to_rfc3339()
     });
-    std::fs::write(&path, serde_json::to_vec_pretty(&out).unwrap()).map_err(|e| e.to_string())?;
+    super::super::atomic_write_json(&path, &out)?;
 
     super::tokens::reload_state(state);
     Ok(path.to_string_lossy().to_string())

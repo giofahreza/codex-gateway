@@ -364,6 +364,7 @@ async fn stream_messages(
     let usage_state = state.clone();
     let usage_context = context.clone();
     let stream = async_stream::stream! {
+        let mut lifecycle = crate::StreamRequestGuard::new(&usage_state, &usage_context);
         let mut upstream = resp.bytes_stream();
         let mut parser = AnthropicSseUsageTracker::default();
         while let Some(chunk) = upstream.next().await {
@@ -375,6 +376,7 @@ async fn stream_messages(
                 Err(err) => {
                     let message = format!("GLM Anthropic stream read failed: {}", err);
                     crate::record_glm_error(&usage_state, &usage_context, &message);
+                    lifecycle.finish();
                     yield Err(std::io::Error::new(std::io::ErrorKind::Other, "stream"));
                     return;
                 }
@@ -385,6 +387,7 @@ async fn stream_messages(
         } else {
             crate::record_glm_success(&usage_state, &usage_context, &crate::UsageMetrics::default());
         }
+        lifecycle.finish();
     };
 
     (StatusCode::OK, headers, Body::from_stream(stream)).into_response()

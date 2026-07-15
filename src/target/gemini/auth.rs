@@ -450,7 +450,7 @@ pub fn save_auth(
         "checked": checked,
         "token": token
     });
-    std::fs::write(&path, serde_json::to_vec_pretty(&out).unwrap()).map_err(|e| e.to_string())?;
+    super::super::atomic_write_json(&path, &out)?;
     super::accounts::reload_state(state);
     Ok(path.to_string_lossy().to_string())
 }
@@ -459,8 +459,19 @@ pub async fn ensure_access_token(
     state: &crate::AppState,
     account: &GeminiAccount,
 ) -> Result<String, String> {
-    if let Some(access_token) = account.access_token.as_ref() {
-        let still_valid = account
+    let account_key = crate::gemini_stats_key(account);
+    let refresh_lock = crate::account_refresh_lock(state, "gemini", &account_key);
+    let _guard = refresh_lock.lock().await;
+    let current = state
+        .gemini_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate.file_name == account.file_name)
+        .cloned()
+        .unwrap_or_else(|| account.clone());
+    if let Some(access_token) = current.access_token.as_ref() {
+        let still_valid = current
             .expiry
             .as_deref()
             .and_then(parse_rfc3339)
@@ -471,8 +482,8 @@ pub async fn ensure_access_token(
         }
     }
 
-    let refreshed = refresh_access_token(&state.client, account).await?;
-    persist_refreshed_account(state, account, &refreshed)?;
+    let refreshed = refresh_access_token(&state.client, &current).await?;
+    persist_refreshed_account(state, &current, &refreshed)?;
     Ok(refreshed.access_token)
 }
 
@@ -630,7 +641,7 @@ fn persist_refreshed_account(
         }
     }
 
-    std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).map_err(|e| e.to_string())?;
+    super::super::atomic_write_json(&path, &value)?;
 
     let mut accounts = state.gemini_accounts.lock().unwrap();
     if let Some(current) = accounts

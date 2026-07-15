@@ -4,11 +4,20 @@
   "proxy_api_key": "your-shared-proxy-key",
   "tokens": [],
   "auth_dir": "./auths",
+  "max_request_body_bytes": 16777216,
+  "max_concurrent_requests": 128,
+  "upstream_connect_timeout_seconds": 10,
+  "upstream_read_timeout_seconds": 120,
+  "upstream_first_event_timeout_seconds": 45,
+  "history_retention_days": 30,
+  "history_max_entries": 200000,
+  "trusted_proxy": false,
   "admin_auth": {
     "enabled": true,
     "api_key": "your-admin-api-key",
     "totp_secret": "PASTE_BASE32_SECRET_FROM_GOOGLE_AUTHENTICATOR_SETUP",
-    "session_ttl_seconds": 43200
+    "session_ttl_seconds": 43200,
+    "secure_cookies": false
   },
   "oauth": {
     "providers": {

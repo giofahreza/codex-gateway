@@ -315,11 +315,7 @@ pub fn save_auth(
         "models": models,
         "saved_at": chrono::Utc::now().to_rfc3339(),
     });
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&out).map_err(|err| err.to_string())?,
-    )
-    .map_err(|err| err.to_string())?;
+    super::super::atomic_write_json(&path, &out)?;
 
     super::accounts::reload_state(state);
     Ok(path.to_string_lossy().to_string())
@@ -363,11 +359,7 @@ fn persist_copilot_token(
             serde_json::json!(chrono::Utc::now().to_rfc3339()),
         );
     }
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&value).map_err(|err| err.to_string())?,
-    )
-    .map_err(|err| err.to_string())?;
+    super::super::atomic_write_json(&path, &value)?;
 
     {
         let mut accounts = state.copilot_accounts.lock().unwrap();

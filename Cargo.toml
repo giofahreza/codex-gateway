@@ -5,7 +5,8 @@ edition = "2021"
 
 [dependencies]
 axum = { version = "0.7", features = ["http1", "http2"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tower = { version = "0.5", features = ["limit"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -28,3 +29,4 @@ hmac = "0.12"
 sha1 = "0.10"
 data-encoding = "2.9"
 argon2 = "0.5"
+rusqlite = { version = "0.31", features = ["bundled"] }

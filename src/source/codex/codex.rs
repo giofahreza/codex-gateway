@@ -13,7 +13,9 @@ pub fn convert(
     body: Bytes,
 ) -> RoutedRequest {
     let query = uri.query().unwrap_or("").to_string();
-    let upstream_body = if upstream_path == "responses" && *method == Method::POST {
+    let upstream_body = if matches!(upstream_path.as_str(), "responses" | "responses/compact")
+        && *method == Method::POST
+    {
         sanitize_native_codex_responses_body(
             crate::source::v1::provider::strip_provider_prefix_from_body(body),
         )

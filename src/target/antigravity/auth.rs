@@ -298,7 +298,7 @@ pub fn save_auth(
         "project_id": project_id,
         "last_refresh": Utc::now().to_rfc3339()
     });
-    std::fs::write(&path, serde_json::to_vec_pretty(&out).unwrap()).map_err(|e| e.to_string())?;
+    atomic_write_json(&path, &out)?;
     super::accounts::reload_state(state);
     Ok(path.to_string_lossy().to_string())
 }
@@ -307,8 +307,23 @@ pub async fn ensure_access_token(
     state: &crate::AppState,
     account: &AntigravityAccount,
 ) -> Result<String, String> {
-    if let Some(access_token) = account.access_token.as_ref() {
-        let still_valid = account
+    let account_key = account
+        .file_name
+        .as_deref()
+        .unwrap_or(account.label.as_str());
+    let refresh_lock = crate::account_refresh_lock(state, "antigravity", account_key);
+    let _guard = refresh_lock.lock().await;
+    let current = state
+        .agw_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate.file_name.as_deref() == account.file_name.as_deref())
+        .cloned()
+        .unwrap_or_else(|| account.clone());
+
+    if let Some(access_token) = current.access_token.as_ref() {
+        let still_valid = current
             .access_token_expires_at
             .as_deref()
             .and_then(parse_rfc3339)
@@ -319,8 +334,8 @@ pub async fn ensure_access_token(
         }
     }
 
-    let refreshed = refresh_access_token(&state.client, &account.refresh_token).await?;
-    persist_refreshed_account(state, account, &refreshed)?;
+    let refreshed = refresh_access_token(&state.client, &current.refresh_token).await?;
+    persist_refreshed_account(state, &current, &refreshed)?;
     Ok(refreshed.access_token)
 }
 
@@ -365,7 +380,7 @@ fn persist_refreshed_account(
         }
     }
 
-    std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).map_err(|e| e.to_string())?;
+    atomic_write_json_value(&path, &value)?;
 
     let mut accounts = state.agw_accounts.lock().unwrap();
     if let Some(current) = accounts
@@ -380,6 +395,17 @@ fn persist_refreshed_account(
     }
 
     Ok(())
+}
+
+fn atomic_write_json(path: &std::path::Path, value: &serde_json::Value) -> Result<(), String> {
+    super::super::atomic_write_json(path, value)
+}
+
+fn atomic_write_json_value(
+    path: &std::path::Path,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    super::super::atomic_write_json(path, value)
 }
 
 pub fn antigravity_user_agent() -> String {

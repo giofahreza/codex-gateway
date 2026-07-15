@@ -65,7 +65,7 @@ pub async fn login_start(State(state): State<crate::AppState>) -> impl IntoRespo
         .gemini_oauth_pending
         .lock()
         .unwrap()
-        .insert(state_token.clone());
+        .insert(state_token.clone(), std::time::Instant::now());
     axum::Json(serde_json::json!({ "url": url, "state": state_token })).into_response()
 }
 
@@ -98,7 +98,8 @@ pub async fn login_submit(
         .gemini_oauth_pending
         .lock()
         .unwrap()
-        .remove(&state_token);
+        .remove(&state_token)
+        .is_some();
     if !removed {
         return axum::Json(serde_json::json!({
             "ok": false,

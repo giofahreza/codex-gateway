@@ -428,6 +428,7 @@ pub(super) async fn stream_chat_completions(
     let usage_context = context.clone();
     let model = model.to_string();
     let stream = async_stream::stream! {
+        let mut lifecycle = crate::StreamRequestGuard::new(&usage_state, &usage_context);
         let mut upstream = resp.bytes_stream();
         let mut parser = MiniMaxSseParser::default();
         let mut accumulator = MiniMaxStreamAccumulator::new(model.clone());
@@ -442,6 +443,7 @@ pub(super) async fn stream_chat_completions(
                 Err(err) => {
                     let message = format!("MiniMax stream body read failed: {}", err);
                     crate::record_minimax_error(&usage_state, &usage_context, &message);
+                    lifecycle.finish();
                     yield Ok(response_sse_event(&json!({
                         "type": "response.failed",
                         "error": {
@@ -466,6 +468,7 @@ pub(super) async fn stream_chat_completions(
         let response = accumulator.to_response();
         let metrics = crate::usage_metrics_from_response_value(&response);
         crate::record_minimax_success(&usage_state, &usage_context, &metrics);
+        lifecycle.finish();
         for event in response_output_events(&response) {
             yield Ok(event);
         }

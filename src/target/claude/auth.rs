@@ -454,17 +454,28 @@ pub async fn ensure_access_token(
     state: &crate::AppState,
     account: &super::accounts::ClaudeAccount,
 ) -> Result<String, String> {
-    if !access_token_needs_refresh(account.expires_at.as_deref()) {
-        return Ok(account.access_token.clone());
+    let account_key = crate::claude_stats_key(account);
+    let refresh_lock = crate::account_refresh_lock(state, "claude", &account_key);
+    let _guard = refresh_lock.lock().await;
+    let current = state
+        .claude_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate.file_name == account.file_name)
+        .cloned()
+        .unwrap_or_else(|| account.clone());
+    if !access_token_needs_refresh(current.expires_at.as_deref()) {
+        return Ok(current.access_token.clone());
     }
-    let refresh_token = account
+    let refresh_token = current
         .refresh_token
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "Claude account token expired and no refresh_token is saved".to_string())?;
     let mut token =
-        refresh_access_token(&state.client, refresh_token, Some(&account.scopes)).await?;
+        refresh_access_token(&state.client, refresh_token, Some(&current.scopes)).await?;
     if token
         .refresh_token
         .as_deref()
@@ -474,7 +485,7 @@ pub async fn ensure_access_token(
     {
         token.refresh_token = Some(refresh_token.to_string());
     }
-    persist_refreshed_token(state, account, &token)?;
+    persist_refreshed_token(state, &current, &token)?;
     Ok(token.access_token)
 }
 
@@ -831,8 +842,7 @@ pub fn save_auth(
         "created_at": now,
         "updated_at": now
     });
-    std::fs::write(&path, serde_json::to_vec_pretty(&out).unwrap())
-        .map_err(|err| err.to_string())?;
+    super::super::atomic_write_json(&path, &out)?;
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -892,8 +902,7 @@ fn persist_refreshed_token(
         "updated_at".to_string(),
         serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
     );
-    std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap())
-        .map_err(|err| err.to_string())?;
+    super::super::atomic_write_json(&path, &value)?;
     super::accounts::reload_state(state);
     Ok(())
 }

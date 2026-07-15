@@ -31,7 +31,7 @@ pub fn resolve(path: &str, method: &Method) -> Result<String, RouteError> {
             })
         };
     }
-    if upstream_path == "responses" {
+    if upstream_path == "responses" || upstream_path == "responses/compact" {
         return if *method == Method::POST {
             Ok(upstream_path)
         } else {

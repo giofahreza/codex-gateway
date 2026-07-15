@@ -89,22 +89,10 @@ pub(crate) fn load(cfg: &crate::Config) -> ApiKeyStore {
 
 pub(crate) fn save(cfg: &crate::Config, store: &ApiKeyStore) -> Result<(), String> {
     let path = api_keys_path(cfg);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create API keys dir: {}", err))?;
-    }
     let data = serde_json::to_vec_pretty(store)
         .map_err(|err| format!("failed to serialize API keys: {}", err))?;
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, data).map_err(|err| format!("failed to write API keys: {}", err))?;
-    std::fs::rename(&tmp_path, &path)
-        .map_err(|err| format!("failed to finalize API keys file: {}", err))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    crate::target::atomic_write(&path, &data, true)
+        .map_err(|err| format!("failed to save API keys: {}", err))
 }
 
 pub(crate) fn bootstrap_legacy_key(
@@ -132,6 +120,32 @@ pub(crate) fn bootstrap_legacy_key(
 
 pub(crate) fn verify_token(store: &ApiKeyStore, raw_key: &str) -> Option<String> {
     find_matching_index(store, raw_key, false).map(|index| store.keys[index].id.clone())
+}
+
+pub(crate) fn token_lookup_hash(raw_key: &str) -> String {
+    lookup_hash(raw_key.trim())
+}
+
+pub(crate) fn verification_candidates(store: &ApiKeyStore, raw_key: &str) -> Vec<ApiKeyRecord> {
+    let raw_key = raw_key.trim();
+    if raw_key.is_empty() {
+        return Vec::new();
+    }
+    let candidate_lookup_hash = lookup_hash(raw_key);
+    store
+        .keys
+        .iter()
+        .filter(|record| {
+            record.revoked_at.is_none()
+                && (record.lookup_hash.trim().is_empty()
+                    || record.lookup_hash == candidate_lookup_hash)
+        })
+        .cloned()
+        .collect()
+}
+
+pub(crate) fn verify_record(record: &ApiKeyRecord, raw_key: &str) -> bool {
+    record.revoked_at.is_none() && verify_hash(record, raw_key.trim())
 }
 
 pub(crate) fn touch_last_used(store: &mut ApiKeyStore, id: &str, now: &str) -> bool {
@@ -306,6 +320,15 @@ mod tests {
             disabled_files: None,
             admin_auth: crate::admin_auth::AdminAuthConfig::default(),
             oauth: crate::target::oauth::OAuthConfig::default(),
+            max_request_body_bytes: crate::default_max_request_body_bytes(),
+            max_concurrent_requests: crate::default_max_concurrent_requests(),
+            trusted_proxy: false,
+            history_retention_days: crate::default_history_retention_days(),
+            history_max_entries: crate::default_history_max_entries(),
+            upstream_connect_timeout_seconds: crate::default_upstream_connect_timeout_seconds(),
+            upstream_read_timeout_seconds: crate::default_upstream_read_timeout_seconds(),
+            upstream_first_event_timeout_seconds:
+                crate::default_upstream_first_event_timeout_seconds(),
         }
     }
 

@@ -113,10 +113,10 @@ pub async fn delete_credential(
     Form(form): Form<DeleteForm>,
 ) -> impl IntoResponse {
     let file_name = form.file_name.trim();
-    if file_name.is_empty() {
+    if !is_safe_credential_filename(file_name) {
         return axum::Json(serde_json::json!({
             "ok": false,
-            "message": "file_name is required"
+            "message": "file_name must be a credential filename without path separators"
         }))
         .into_response();
     }
@@ -157,10 +157,10 @@ pub async fn toggle_credential(
     Form(form): Form<ToggleForm>,
 ) -> impl IntoResponse {
     let file_name = form.file_name.trim();
-    if file_name.is_empty() {
+    if !is_safe_credential_filename(file_name) {
         return axum::Json(serde_json::json!({
             "ok": false,
-            "message": "file_name is required"
+            "message": "file_name must be a credential filename without path separators"
         }))
         .into_response();
     }
@@ -214,7 +214,16 @@ fn persist_disabled_list(disabled: &Arc<Mutex<HashSet<String>>>) -> Result<(), S
             map.insert("disabled_files".to_string(), serde_json::json!(list));
         }
     }
-    std::fs::write("config.json", serde_json::to_vec_pretty(&v).unwrap())
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    let data = serde_json::to_vec_pretty(&v).map_err(|e| e.to_string())?;
+    super::super::atomic_write(std::path::Path::new("config.json"), &data, true)
+}
+
+fn is_safe_credential_filename(file_name: &str) -> bool {
+    let path = std::path::Path::new(file_name);
+    !file_name.is_empty()
+        && path.components().count() == 1
+        && matches!(
+            path.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
 }

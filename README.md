@@ -90,11 +90,20 @@ API docs: `http://127.0.0.1:8319/docs/`
   "tokens": [],
   "auth_dir": "./auths",
   "disabled_files": [],
+  "max_request_body_bytes": 16777216,
+  "max_concurrent_requests": 128,
+  "upstream_connect_timeout_seconds": 10,
+  "upstream_read_timeout_seconds": 120,
+  "upstream_first_event_timeout_seconds": 45,
+  "history_retention_days": 30,
+  "history_max_entries": 200000,
+  "trusted_proxy": false,
   "admin_auth": {
     "enabled": true,
     "api_key": "your-admin-api-key",
     "totp_secret": "BASE32_SECRET",
-    "session_ttl_seconds": 43200
+    "session_ttl_seconds": 43200,
+    "secure_cookies": false
   },
   "oauth": {
     "providers": {
@@ -129,6 +138,11 @@ API docs: `http://127.0.0.1:8319/docs/`
 - `disabled_files` lists credential filenames that should be loaded but kept disabled at startup.
 - `admin_auth.api_key` falls back to `proxy_api_key` when omitted; a separate key is safer.
 - `admin_auth.session_ttl_seconds` defaults to 43200 (12 hours), min 300, max 604800 (7 days).
+- Set `admin_auth.secure_cookies` to `true` when the dashboard is served over HTTPS.
+- Set `trusted_proxy` only when a configured reverse proxy sanitizes forwarded IP headers.
+- Request bodies default to 16 MiB and concurrent requests default to 128.
+- Upstream connect, per-read/stream-idle, and first SSE event timeouts default to 10, 120, and 45 seconds.
+- Usage history is stored in SQLite WAL mode. Existing `gateway-usage-history.jsonl` data is imported once, then bounded by the configured retention and entry limits.
 - OAuth provider configs are optional; built-in defaults are used when omitted.
 
 ### Environment variable overrides
@@ -140,6 +154,7 @@ ADMIN_AUTH_ENABLED=true
 ADMIN_AUTH_API_KEY=your-admin-key
 ADMIN_AUTH_TOTP_SECRET=BASE32_SECRET
 ADMIN_AUTH_SESSION_TTL_SECONDS=43200
+ADMIN_AUTH_SECURE_COOKIES=true
 ```
 
 Antigravity / Gemini Google OAuth:
@@ -209,6 +224,7 @@ All client requests use `Authorization: Bearer <CODEX_GATEWAY_KEY>`.
 | Endpoint | Description |
 |---|---|
 | `GET /health` | Health check — returns `ok` |
+| `GET /ready` | Readiness check — requires at least one enabled upstream account |
 | `GET /dashboard.json` | Full dashboard data JSON |
 | `GET /quota.json` | Codex account quota data |
 | `POST /codex/rate-limit-reset-credit/consume` | Redeem an available Codex usage-limit reset credit |

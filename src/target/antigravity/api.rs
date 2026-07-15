@@ -144,6 +144,19 @@ pub async fn responses(
         }
     };
 
+    if let Err(err) = validate_request_history(&request_value) {
+        return (
+            StatusCode::BAD_REQUEST,
+            [("Content-Type", "application/json")],
+            crate::source::v1::response::openai_error_body(
+                &format!("Invalid request history: {}", err),
+                "invalid_request_error",
+                None,
+            ),
+        )
+            .into_response();
+    }
+
     let accounts = super::accounts::candidate_accounts(&state);
     if accounts.is_empty() {
         return (
@@ -174,6 +187,11 @@ pub async fn responses(
             match build_google_payload(&request_value, &model, account.project_id.as_deref()) {
                 Ok(payload) => payload,
                 Err(err) => {
+                    crate::router_reservation_cancelled(
+                        &state,
+                        context.provider_name,
+                        &context.key,
+                    );
                     return (
                         StatusCode::BAD_REQUEST,
                         [("Content-Type", "application/json")],
@@ -264,6 +282,88 @@ pub async fn responses(
             "server_error",
             None,
         ),
+    )
+        .into_response()
+}
+
+/// Handle Codex's `responses/compact` request shape for Antigravity-backed
+/// models. Google has no equivalent endpoint, so reuse the normal generation
+/// translator and return the generated response items in the compact
+/// endpoint's `{ "output": [...] }` envelope.
+pub async fn compact(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let mut request = match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [("Content-Type", "application/json")],
+                crate::source::v1::response::openai_error_body(
+                    "Invalid request body",
+                    "invalid_request_error",
+                    None,
+                ),
+            )
+                .into_response();
+        }
+    };
+    if let Some(object) = request.as_object_mut() {
+        object.insert("stream".to_string(), serde_json::Value::Bool(false));
+    }
+    let response = responses(
+        State(state.clone()),
+        headers,
+        Bytes::from(serde_json::to_vec(&request).unwrap_or_default()),
+    )
+    .await
+    .into_response();
+    let status = response.status();
+    let response_headers = response.headers().clone();
+    let response_body =
+        match axum::body::to_bytes(response.into_body(), state.cfg.max_request_body_bytes).await {
+            Ok(body) => body,
+            Err(err) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    [("Content-Type", "application/json")],
+                    crate::source::v1::response::openai_error_body(
+                        &format!("failed to read compaction response: {}", err),
+                        "server_error",
+                        None,
+                    ),
+                )
+                    .into_response();
+            }
+        };
+    if !status.is_success() {
+        return (status, response_headers, response_body).into_response();
+    }
+    let value = match serde_json::from_slice::<serde_json::Value>(&response_body) {
+        Ok(value) => value,
+        Err(err) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                [("Content-Type", "application/json")],
+                crate::source::v1::response::openai_error_body(
+                    &format!("invalid compaction response: {}", err),
+                    "server_error",
+                    None,
+                ),
+            )
+                .into_response();
+        }
+    };
+    let output = value
+        .get("output")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    (
+        StatusCode::OK,
+        [("Content-Type", "application/json")],
+        serde_json::to_vec(&serde_json::json!({"output": output})).unwrap_or_default(),
     )
         .into_response()
 }
@@ -369,6 +469,13 @@ async fn send_generate_request(
         };
 
         let status = resp.status();
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
         let text = match resp.text().await {
             Ok(text) => text,
             Err(err) => {
@@ -377,7 +484,18 @@ async fn send_generate_request(
             }
         };
         if !status.is_success() {
-            last_error = format!("generateContent returned {}: {}", status, text);
+            last_error = match retry_after {
+                Some(retry_after) => format!(
+                    "generateContent returned {}: {}; retry-after={}",
+                    status, text, retry_after
+                ),
+                None => format!("generateContent returned {}: {}", status, text),
+            };
+            // A malformed transcript is deterministic. The second Google
+            // endpoint and every other account will reject the same body.
+            if status == StatusCode::BAD_REQUEST {
+                return Err((StatusCode::BAD_REQUEST, last_error));
+            }
             continue;
         }
 
@@ -600,15 +718,20 @@ fn append_chat_message(entries: &mut Vec<(String, Vec<Value>)>, message: &Value)
         .and_then(|value| value.as_str())
         .unwrap_or("user");
 
-    if role == "tool" {
+    if role == "tool" || role == "function" {
         let call_id = message
             .get("tool_call_id")
             .and_then(|value| value.as_str())
             .unwrap_or("");
-        let name = lookup_function_name(entries, call_id).unwrap_or_else(|| "tool".to_string());
+        let name = message
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| lookup_function_name(entries, call_id))
+            .unwrap_or_else(|| "tool".to_string());
         let output = message_content_text(message.get("content")).unwrap_or_default();
         entries.push((
-            "function".to_string(),
+            "user".to_string(),
             vec![json!({
                 "functionResponse": {
                     "name": name,
@@ -637,6 +760,27 @@ fn append_chat_message(entries: &mut Vec<(String, Vec<Value>)>, message: &Value)
                 parts.push(part);
             }
         }
+    }
+    if let Some(function_call) = message.get("function_call") {
+        let Some(name) = function_call.get("name").and_then(|value| value.as_str()) else {
+            return;
+        };
+        let arguments = function_call
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let args_value = if let Some(arguments) = arguments.as_str() {
+            serde_json::from_str::<Value>(arguments).unwrap_or_else(|_| json!({ "raw": arguments }))
+        } else {
+            arguments
+        };
+        let synthetic_call_id = format!("legacy_call_{}", entries.len());
+        parts.push(function_call_part(
+            name,
+            args_value,
+            &synthetic_call_id,
+            thought_signature_from_value(function_call),
+        ));
     }
     if !parts.is_empty() {
         entries.push((role.to_string(), parts));
@@ -690,7 +834,7 @@ fn append_input_item(entries: &mut Vec<(String, Vec<Value>)>, item: &Value) {
             // can't find it, fall back to "tool".
             let name = lookup_function_name(entries, call_id).unwrap_or_else(|| "tool".to_string());
             entries.push((
-                "function".to_string(),
+                "user".to_string(),
                 vec![json!({
                     "functionResponse": {
                         "name": name,
@@ -705,7 +849,7 @@ fn append_input_item(entries: &mut Vec<(String, Vec<Value>)>, item: &Value) {
                 "system" | "developer" => return,
                 "assistant" => "model",
                 "user" | "" => "user",
-                "tool" => "user",
+                "tool" | "function" => "user",
                 other => other,
             };
             let mut parts: Vec<Value> = Vec::new();
@@ -729,7 +873,9 @@ fn lookup_function_name(entries: &[(String, Vec<Value>)], call_id: &str) -> Opti
     }
     for (_role, parts) in entries.iter().rev() {
         for part in parts.iter().rev() {
-            let fc = part.get("functionCall")?;
+            let Some(fc) = part.get("functionCall") else {
+                continue;
+            };
             if part.get("_call_id").and_then(|v| v.as_str()) == Some(call_id) {
                 if let Some(name) = fc.get("name").and_then(|v| v.as_str()) {
                     return Some(name.to_string());
@@ -738,6 +884,176 @@ fn lookup_function_name(entries: &[(String, Vec<Value>)], call_id: &str) -> Opti
         }
     }
     None
+}
+
+/// Validate the ordered Codex transcript before converting it to Google's
+/// stricter function-call history format. In particular, do not silently
+/// invent a tool name for an orphaned output or send an unanswered call.
+fn validate_request_history(request_value: &Value) -> Result<(), String> {
+    use std::collections::HashMap;
+
+    let mut calls: HashMap<String, String> = HashMap::new();
+    let mut outputs: HashMap<String, ()> = HashMap::new();
+    let mut legacy_calls: HashMap<String, usize> = HashMap::new();
+
+    if let Some(items) = request_value.get("input").and_then(Value::as_array) {
+        for item in items {
+            match item.get("type").and_then(Value::as_str).unwrap_or("") {
+                "function_call" => {
+                    let call_id = item
+                        .get("call_id")
+                        .or_else(|| item.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+                    register_function_call(&mut calls, call_id, name)?;
+                }
+                "function_call_output" => {
+                    let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or("");
+                    register_function_output(&calls, &mut outputs, call_id)?;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(messages) = request_value.get("messages").and_then(Value::as_array) {
+        for message in messages {
+            let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+            if role == "assistant" {
+                if let Some(function_call) = message.get("function_call") {
+                    let name = function_call
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    if name.is_empty() {
+                        return Err("function_call is missing name".to_string());
+                    }
+                    *legacy_calls.entry(name.to_string()).or_default() += 1;
+                }
+            }
+            if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+                for tool_call in tool_calls {
+                    let call_id = tool_call.get("id").and_then(Value::as_str).unwrap_or("");
+                    let function = tool_call.get("function");
+                    let name = function
+                        .and_then(|value| value.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    register_function_call(&mut calls, call_id, name)?;
+                }
+            }
+            if role == "tool" {
+                let call_id = message
+                    .get("tool_call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                register_function_output(&calls, &mut outputs, call_id)?;
+            }
+            if role == "function" {
+                let name = message
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                if name.is_empty() {
+                    return Err("function message is missing name".to_string());
+                }
+                if let Some(count) = legacy_calls.get_mut(name) {
+                    if *count > 0 {
+                        *count -= 1;
+                        continue;
+                    }
+                }
+                let call_id = message
+                    .get("tool_call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if !call_id.is_empty() {
+                    register_function_output(&calls, &mut outputs, call_id)?;
+                } else {
+                    register_function_output_by_name(&calls, &mut outputs, name)?;
+                }
+            }
+        }
+    }
+
+    if let Some((name, _count)) = legacy_calls.iter().find(|(_, count)| **count > 0) {
+        return Err(format!("function_call '{}' has no matching output", name));
+    }
+
+    if let Some((call_id, _)) = calls
+        .iter()
+        .find(|(call_id, _)| !outputs.contains_key(*call_id))
+    {
+        return Err(format!(
+            "function_call '{}' has no matching output",
+            call_id
+        ));
+    }
+    Ok(())
+}
+
+fn register_function_call(
+    calls: &mut std::collections::HashMap<String, String>,
+    call_id: &str,
+    name: &str,
+) -> Result<(), String> {
+    let call_id = call_id.trim();
+    let name = name.trim();
+    if call_id.is_empty() {
+        return Err("function_call is missing call_id".to_string());
+    }
+    if name.is_empty() {
+        return Err(format!("function_call '{}' is missing name", call_id));
+    }
+    if calls
+        .insert(call_id.to_string(), name.to_string())
+        .is_some()
+    {
+        return Err(format!("duplicate function_call '{}/call_id'", call_id));
+    }
+    Ok(())
+}
+
+fn register_function_output(
+    calls: &std::collections::HashMap<String, String>,
+    outputs: &mut std::collections::HashMap<String, ()>,
+    call_id: &str,
+) -> Result<(), String> {
+    let call_id = call_id.trim();
+    if call_id.is_empty() {
+        return Err("function_call_output is missing call_id".to_string());
+    }
+    if !calls.contains_key(call_id) {
+        return Err(format!(
+            "function_call_output '{}' has no matching function_call",
+            call_id
+        ));
+    }
+    if outputs.insert(call_id.to_string(), ()).is_some() {
+        return Err(format!("duplicate function_call_output '{}'", call_id));
+    }
+    Ok(())
+}
+
+fn register_function_output_by_name(
+    calls: &std::collections::HashMap<String, String>,
+    outputs: &mut std::collections::HashMap<String, ()>,
+    name: &str,
+) -> Result<(), String> {
+    let Some(call_id) = calls
+        .iter()
+        .find(|(call_id, call_name)| call_name == &name && !outputs.contains_key(*call_id))
+        .map(|(call_id, _)| call_id.as_str())
+    else {
+        return Err(format!(
+            "function message '{}' has no matching function_call",
+            name
+        ));
+    };
+    register_function_output(calls, outputs, call_id)
 }
 
 fn message_content_text(content: Option<&Value>) -> Option<String> {
@@ -1446,7 +1762,7 @@ mod tests {
             "httrack https://example.com -O ."
         );
         assert!(contents[1]["parts"][0].get("_call_id").is_none());
-        assert_eq!(contents[2]["role"], "function");
+        assert_eq!(contents[2]["role"], "user");
         assert_eq!(
             contents[2]["parts"][0]["functionResponse"]["name"],
             "exec_command"
@@ -1455,6 +1771,85 @@ mod tests {
             contents[2]["parts"][0]["functionResponse"]["response"]["result"],
             "Process running with session ID 76254"
         );
+    }
+
+    #[test]
+    fn legacy_function_message_becomes_user_function_response() {
+        let request = json!({
+            "model": "gemini-pro-agent",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_legacy",
+                        "type": "function",
+                        "function": {"name": "exec_command", "arguments": "{\"cmd\":\"pwd\"}"}
+                    }]
+                },
+                {
+                    "role": "function",
+                    "name": "exec_command",
+                    "content": "..."
+                }
+            ]
+        });
+        let payload = build_google_payload(&request, "gemini-pro-agent", Some("proj-1")).unwrap();
+        let contents = payload["request"]["contents"].as_array().unwrap();
+        assert_eq!(contents[1]["role"], "user");
+        assert!(contents.iter().all(|entry| entry["role"] != "function"));
+        assert_eq!(
+            contents[1]["parts"][0]["functionResponse"]["name"],
+            "exec_command"
+        );
+    }
+
+    #[test]
+    fn legacy_function_history_is_validated_by_function_name() {
+        let request = json!({
+            "model": "gemini-pro-agent",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "function_call": {
+                        "name": "exec_command",
+                        "arguments": "{\"cmd\":\"pwd\"}"
+                    }
+                },
+                {
+                    "role": "function",
+                    "name": "exec_command",
+                    "content": "ok"
+                }
+            ]
+        });
+
+        assert!(validate_request_history(&request).is_ok());
+        let payload = build_google_payload(&request, "gemini-pro-agent", Some("proj-1")).unwrap();
+        let contents = payload["request"]["contents"].as_array().unwrap();
+        assert_eq!(contents[0]["role"], "model");
+        assert_eq!(
+            contents[0]["parts"][0]["functionCall"]["name"],
+            "exec_command"
+        );
+        assert_eq!(contents[1]["role"], "user");
+        assert_eq!(
+            contents[1]["parts"][0]["functionResponse"]["name"],
+            "exec_command"
+        );
+    }
+
+    #[test]
+    fn rejects_unanswered_legacy_function_call() {
+        let request = json!({
+            "model": "gemini-pro-agent",
+            "messages": [{
+                "role": "assistant",
+                "function_call": {"name": "exec_command", "arguments": "{}"}
+            }]
+        });
+
+        let error = validate_request_history(&request).unwrap_err();
+        assert!(error.contains("has no matching output"));
     }
 
     #[test]
@@ -1494,6 +1889,47 @@ mod tests {
             payload["request"]["toolConfig"]["functionCallingConfig"]["mode"],
             "AUTO"
         );
+    }
+
+    #[test]
+    fn rejects_orphaned_function_output_before_conversion() {
+        let request = json!({
+            "model": "gemini-pro-agent",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_missing",
+                "output": "done"
+            }]
+        });
+        let error = validate_request_history(&request).unwrap_err();
+        assert!(error.contains("has no matching function_call"));
+    }
+
+    #[test]
+    fn rejects_unanswered_function_call_before_conversion() {
+        let request = json!({
+            "model": "gemini-pro-agent",
+            "input": [{
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "exec_command",
+                "arguments": "{}"
+            }]
+        });
+        let error = validate_request_history(&request).unwrap_err();
+        assert!(error.contains("has no matching output"));
+    }
+
+    #[test]
+    fn accepts_ordered_function_call_history() {
+        let request = json!({
+            "model": "gemini-pro-agent",
+            "input": [
+                { "type": "function_call", "call_id": "call_1", "name": "shell" },
+                { "type": "function_call_output", "call_id": "call_1", "output": "ok" }
+            ]
+        });
+        assert!(validate_request_history(&request).is_ok());
     }
 
     #[test]

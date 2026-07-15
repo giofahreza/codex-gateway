@@ -1479,6 +1479,7 @@ async fn stream_chat_completions_as_responses(
     let usage_state = state.clone();
     let usage_context = context.clone();
     let stream = async_stream::stream! {
+        let mut lifecycle = crate::StreamRequestGuard::new(&usage_state, &usage_context);
         let mut upstream = resp.bytes_stream();
         let mut parser = ChatCompletionsSseAccumulator::default();
         while let Some(chunk) = upstream.next().await {
@@ -1487,6 +1488,7 @@ async fn stream_chat_completions_as_responses(
                 Err(err) => {
                     let message = format!("Copilot chat stream read failed: {}", err);
                     crate::record_copilot_error(&usage_state, &usage_context, &message);
+                    lifecycle.finish();
                     yield Err::<Bytes, std::io::Error>(std::io::Error::new(std::io::ErrorKind::Other, "stream"));
                     return;
                 }
@@ -1499,6 +1501,7 @@ async fn stream_chat_completions_as_responses(
         for event in response_stream_events(&response) {
             yield Ok::<Bytes, std::io::Error>(event);
         }
+        lifecycle.finish();
     };
 
     (
@@ -1834,6 +1837,7 @@ async fn stream_native_responses(
     let usage_state = state.clone();
     let usage_context = context.clone();
     let stream = async_stream::stream! {
+        let mut lifecycle = crate::StreamRequestGuard::new(&usage_state, &usage_context);
         let mut upstream = resp.bytes_stream();
         let mut parser = NativeResponsesSseUsageTracker::default();
         while let Some(chunk) = upstream.next().await {
@@ -1845,6 +1849,7 @@ async fn stream_native_responses(
                 Err(err) => {
                     let message = format!("Copilot stream read failed: {}", err);
                     crate::record_copilot_error(&usage_state, &usage_context, &message);
+                    lifecycle.finish();
                     yield Err(std::io::Error::new(std::io::ErrorKind::Other, "stream"));
                     return;
                 }
@@ -1856,6 +1861,7 @@ async fn stream_native_responses(
         } else {
             crate::record_copilot_success(&usage_state, &usage_context, &crate::UsageMetrics::default());
         }
+        lifecycle.finish();
     };
 
     (

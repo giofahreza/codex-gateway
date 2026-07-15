@@ -288,8 +288,19 @@ pub async fn ensure_access_token(
     state: &crate::AppState,
     account: &QwenAccount,
 ) -> Result<String, String> {
-    if let Some(access_token) = account.access_token.as_ref() {
-        let still_valid = account
+    let account_key = crate::qwen_stats_key(account);
+    let refresh_lock = crate::account_refresh_lock(state, "qwen", &account_key);
+    let _guard = refresh_lock.lock().await;
+    let current = state
+        .qwen_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate.file_name == account.file_name)
+        .cloned()
+        .unwrap_or_else(|| account.clone());
+    if let Some(access_token) = current.access_token.as_ref() {
+        let still_valid = current
             .expired_at
             .as_deref()
             .and_then(parse_rfc3339)
@@ -300,8 +311,8 @@ pub async fn ensure_access_token(
         }
     }
 
-    let refreshed = refresh_access_token(&state.client, &state.cfg, &account.refresh_token).await?;
-    persist_refreshed_account(state, account, &refreshed)?;
+    let refreshed = refresh_access_token(&state.client, &state.cfg, &current.refresh_token).await?;
+    persist_refreshed_account(state, &current, &refreshed)?;
     Ok(refreshed.access_token)
 }
 
@@ -505,7 +516,7 @@ fn save_validated_session(
     });
 
     std::fs::create_dir_all(&auth_dir).map_err(|e| e.to_string())?;
-    std::fs::write(&path, serde_json::to_vec_pretty(&out).unwrap()).map_err(|e| e.to_string())?;
+    super::super::atomic_write_json(&path, &out)?;
     super::accounts::reload_state(state);
     Ok((path.to_string_lossy().to_string(), identity.label))
 }
@@ -804,7 +815,7 @@ fn persist_refreshed_account(
         );
     }
 
-    std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).map_err(|e| e.to_string())?;
+    super::super::atomic_write_json(&path, &value)?;
 
     let mut accounts = state.qwen_accounts.lock().unwrap();
     if let Some(current) = accounts
@@ -1355,6 +1366,15 @@ mod tests {
                 auth_dir: Some(auth_dir.to_string_lossy().to_string()),
                 disabled_files: None,
                 admin_auth: crate::admin_auth::AdminAuthConfig::default(),
+                max_request_body_bytes: crate::default_max_request_body_bytes(),
+                max_concurrent_requests: crate::default_max_concurrent_requests(),
+                trusted_proxy: false,
+                history_retention_days: crate::default_history_retention_days(),
+                history_max_entries: crate::default_history_max_entries(),
+                upstream_connect_timeout_seconds: crate::default_upstream_connect_timeout_seconds(),
+                upstream_read_timeout_seconds: crate::default_upstream_read_timeout_seconds(),
+                upstream_first_event_timeout_seconds:
+                    crate::default_upstream_first_event_timeout_seconds(),
                 oauth: super::super::super::oauth::OAuthConfig {
                     providers: super::super::super::oauth::OAuthProvidersConfig {
                         qwen: super::super::super::oauth::OAuthProviderOverride {
@@ -1414,9 +1434,10 @@ mod tests {
                 deepseek_quota_cache: Arc::new(Mutex::new(HashMap::new())),
                 claude_quota_cache: Arc::new(Mutex::new(HashMap::new())),
                 glm_quota_cache: Arc::new(Mutex::new(HashMap::new())),
+                quota_snapshots: Arc::new(Mutex::new(HashMap::new())),
                 oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 agw_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
-                gemini_oauth_pending: Arc::new(Mutex::new(HashSet::new())),
+                gemini_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 qwen_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 grok_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
                 copilot_oauth_pending: Arc::new(Mutex::new(HashMap::new())),
@@ -1424,12 +1445,16 @@ mod tests {
                 admin_sessions: Arc::new(Mutex::new(HashMap::new())),
                 admin_login_attempts: Arc::new(Mutex::new(HashMap::new())),
                 api_keys: Arc::new(Mutex::new(crate::api_keys::ApiKeyStore::default())),
+                api_key_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+                api_key_last_used: Arc::new(Mutex::new(HashMap::new())),
                 internal_proxy_secret: Arc::new("test-internal-proxy-secret".to_string()),
                 notification_settings: Arc::new(Mutex::new(
                     crate::notifications::NotificationSettings::default(),
                 )),
                 disabled: Arc::new(Mutex::new(HashSet::new())),
-                usage_history_lock: Arc::new(Mutex::new(())),
+                persistence_tx: std::sync::mpsc::channel().0,
+                account_router: Arc::new(Mutex::new(HashMap::new())),
+                account_refresh_locks: Arc::new(Mutex::new(HashMap::new())),
             };
 
             Self { auth_dir, state }

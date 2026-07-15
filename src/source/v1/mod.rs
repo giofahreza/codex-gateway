@@ -28,7 +28,9 @@ pub fn route_to_target(
         ));
     }
 
-    if upstream_path == "responses" && *method == Method::POST {
+    if matches!(upstream_path.as_str(), "responses" | "responses/compact")
+        && *method == Method::POST
+    {
         provider::validate_provider_prefix_in_body(&body)?;
         let target =
             provider::target_from_request_body(&body).unwrap_or(crate::source::TargetModel::Codex);
