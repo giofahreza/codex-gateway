@@ -115,7 +115,7 @@ pub async fn get_quota_summaries(state: &crate::AppState) -> Vec<serde_json::Val
             cache.get(idx).cloned().flatten()
         };
         let entry = if let Some(c) = cached {
-            if now.duration_since(c.fetched_at).as_secs() < 60 {
+            if crate::quota_cache_entry_is_fresh(now, c.fetched_at, &c.summary) {
                 c
             } else {
                 let fetched = fetch_codex_quota(state, token).await;

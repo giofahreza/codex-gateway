@@ -53,6 +53,8 @@ type CodexModelCache = Option<(std::time::Instant, Bytes)>;
 static CODEX_MODEL_CACHE: OnceLock<tokio::sync::Mutex<CodexModelCache>> = OnceLock::new();
 const MODEL_CACHE_TTL_SECONDS: u64 = 10 * 60;
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(3);
+const QUOTA_REFRESH_SECONDS: u64 = 60;
+const EXHAUSTED_QUOTA_REFRESH_SECONDS: u64 = 60 * 60;
 const MODEL_PROVIDER_PREFIXES: [&str; 10] = [
     "cod", "agw", "gem", "qwn", "dsk", "grk", "min", "cop", "cld", "glm",
 ];
@@ -754,6 +756,206 @@ fn quota_snapshot(state: &AppState, provider: &str) -> Vec<serde_json::Value> {
         .get(provider)
         .cloned()
         .unwrap_or_default()
+}
+
+pub(crate) fn quota_cache_entry_is_fresh<T: Serialize>(
+    now: std::time::Instant,
+    fetched_at: std::time::Instant,
+    summary: &T,
+) -> bool {
+    let snapshot = serde_json::to_value(summary).unwrap_or(serde_json::Value::Null);
+    now.duration_since(fetched_at) < quota_refresh_interval_for_snapshot(&snapshot)
+}
+
+fn quota_refresh_interval_for_snapshot(snapshot: &serde_json::Value) -> Duration {
+    if quota_snapshot_is_exhausted(snapshot) {
+        Duration::from_secs(EXHAUSTED_QUOTA_REFRESH_SECONDS)
+    } else {
+        Duration::from_secs(QUOTA_REFRESH_SECONDS)
+    }
+}
+
+fn quota_snapshot_is_exhausted(snapshot: &serde_json::Value) -> bool {
+    match snapshot {
+        serde_json::Value::Object(map) => {
+            if map
+                .get("used_percent")
+                .and_then(|value| value.as_f64())
+                .is_some_and(|value| value >= 100.0)
+            {
+                return true;
+            }
+            if map
+                .get("remaining_percent")
+                .and_then(|value| value.as_f64())
+                .is_some_and(|value| value <= 0.0)
+            {
+                return true;
+            }
+            map.values().any(quota_snapshot_is_exhausted)
+        }
+        serde_json::Value::Array(values) => values.iter().any(quota_snapshot_is_exhausted),
+        _ => false,
+    }
+}
+
+async fn refresh_quota_snapshots_now(
+    state: &AppState,
+    provider: Option<&'static str>,
+    file_name: Option<&str>,
+) -> usize {
+    invalidate_quota_cache_for_provider(state, provider, file_name);
+    let providers = provider
+        .map(|provider| vec![provider])
+        .unwrap_or_else(|| MODEL_PROVIDER_PREFIXES.to_vec());
+    let results = futures_util::future::join_all(
+        providers
+            .into_iter()
+            .map(|provider| refresh_quota_snapshot_for_provider(state, provider)),
+    )
+    .await;
+
+    let mut refreshed = 0usize;
+    for outcome in results.into_iter().flatten() {
+        refreshed += outcome.accounts.len();
+        state
+            .quota_snapshots
+            .lock()
+            .unwrap()
+            .insert(outcome.snapshot_key.to_string(), outcome.accounts.clone());
+        notifications::notify_model_quota_transitions(
+            state,
+            outcome.notify_provider,
+            outcome.label,
+            &outcome.accounts,
+            notification_account_options(state),
+            &now_rfc3339(),
+        );
+    }
+    refreshed
+}
+
+struct QuotaRefreshOutcome {
+    snapshot_key: &'static str,
+    notify_provider: &'static str,
+    label: &'static str,
+    accounts: Vec<serde_json::Value>,
+}
+
+async fn refresh_quota_snapshot_for_provider(
+    state: &AppState,
+    provider: &'static str,
+) -> Option<QuotaRefreshOutcome> {
+    let outcome = match provider {
+        "cod" => QuotaRefreshOutcome {
+            snapshot_key: "codex",
+            notify_provider: "codex",
+            label: "Codex",
+            accounts: target::codex::quota::get_quota_summaries(state).await,
+        },
+        "agw" => QuotaRefreshOutcome {
+            snapshot_key: "antigravity",
+            notify_provider: "antigravity",
+            label: "Antigravity",
+            accounts: target::antigravity::quota::get_quota_summaries(state).await,
+        },
+        "gem" => QuotaRefreshOutcome {
+            snapshot_key: "gemini",
+            notify_provider: "gemini",
+            label: "Gemini",
+            accounts: target::gemini::quota::get_quota_summaries(state).await,
+        },
+        "qwn" => QuotaRefreshOutcome {
+            snapshot_key: "qwen",
+            notify_provider: "qwen",
+            label: "Qwen",
+            accounts: target::qwen::quota::get_quota_summaries(state).await,
+        },
+        "dsk" => QuotaRefreshOutcome {
+            snapshot_key: "deepseek",
+            notify_provider: "deepseek",
+            label: "DeepSeek",
+            accounts: target::deepseek::quota::get_quota_summaries(state).await,
+        },
+        "min" => QuotaRefreshOutcome {
+            snapshot_key: "minimax",
+            notify_provider: "minimax",
+            label: "MiniMax",
+            accounts: target::minimax::quota::get_quota_summaries(state).await,
+        },
+        "cop" => QuotaRefreshOutcome {
+            snapshot_key: "copilot",
+            notify_provider: "copilot",
+            label: "GitHub Copilot",
+            accounts: target::copilot::admin::quota_accounts(state).await,
+        },
+        "cld" => QuotaRefreshOutcome {
+            snapshot_key: "claude",
+            notify_provider: "claude",
+            label: "Claude",
+            accounts: target::claude::quota::get_quota_summaries(state).await,
+        },
+        "glm" => QuotaRefreshOutcome {
+            snapshot_key: "glm",
+            notify_provider: "glm",
+            label: "GLM",
+            accounts: target::glm::quota::get_quota_summaries(state).await,
+        },
+        // Grok quota is populated from real request headers. Do not issue
+        // paid probes from manual or background dashboard refresh.
+        "grk" => return None,
+        _ => return None,
+    };
+    Some(outcome)
+}
+
+fn invalidate_quota_cache_for_provider(
+    state: &AppState,
+    provider: Option<&'static str>,
+    file_name: Option<&str>,
+) {
+    let providers = provider
+        .map(|provider| vec![provider])
+        .unwrap_or_else(|| MODEL_PROVIDER_PREFIXES.to_vec());
+    for provider in providers {
+        match provider {
+            "cod" => {
+                let mut cache = state.quota_cache.lock().unwrap();
+                if let Some(file_name) = file_name {
+                    let tokens = state.tokens.lock().unwrap();
+                    for (idx, token) in tokens.iter().enumerate() {
+                        if token.file_name.as_deref() == Some(file_name) && idx < cache.len() {
+                            cache[idx] = None;
+                        }
+                    }
+                } else {
+                    cache.clear();
+                }
+            }
+            "agw" => invalidate_named_quota_cache(&state.agw_quota_cache, file_name),
+            "gem" => invalidate_named_quota_cache(&state.gemini_quota_cache, file_name),
+            "qwn" => invalidate_named_quota_cache(&state.qwen_quota_cache, file_name),
+            "dsk" => invalidate_named_quota_cache(&state.deepseek_quota_cache, file_name),
+            "min" => invalidate_named_quota_cache(&state.minimax_quota_cache, file_name),
+            "cop" => target::copilot::admin::invalidate_quota_cache(file_name),
+            "cld" => invalidate_named_quota_cache(&state.claude_quota_cache, file_name),
+            "glm" => invalidate_named_quota_cache(&state.glm_quota_cache, file_name),
+            "grk" => {}
+            _ => {}
+        }
+    }
+}
+
+fn invalidate_named_quota_cache<T>(
+    cache: &Arc<Mutex<HashMap<String, T>>>,
+    file_name: Option<&str>,
+) {
+    let mut cache = cache.lock().unwrap();
+    if let Some(file_name) = file_name {
+        cache.remove(file_name);
+    } else {
+        cache.clear();
+    }
 }
 
 async fn background_maintenance(state: AppState) {
@@ -2807,7 +3009,7 @@ async fn dashboard() -> impl IntoResponse {
             <span id="codexProviderTitle">Codex</span>
             <span class="provider-badge-count" id="codexBadgeCount">0 accounts</span>
           </span>
-          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Codex models" aria-label="Refresh Codex models" onclick="refreshModelCatalog('codex')">&#8635;</button>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Codex models and quota" aria-label="Refresh Codex models and quota" onclick="refreshModelCatalog('codex')">&#8635;</button>
         </div>
         <div id="codexCards" class="provider-cards"></div>
       </section>
@@ -2817,7 +3019,7 @@ async fn dashboard() -> impl IntoResponse {
             <span id="agwProviderTitle">Antigravity</span>
             <span class="provider-badge-count" id="agwBadgeCount">0 accounts</span>
           </span>
-          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Antigravity models" aria-label="Refresh Antigravity models" onclick="refreshModelCatalog('agw')">&#8635;</button>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Antigravity models and quota" aria-label="Refresh Antigravity models and quota" onclick="refreshModelCatalog('agw')">&#8635;</button>
         </div>
         <div id="agwCards" class="provider-cards"></div>
       </section>
@@ -2827,7 +3029,7 @@ async fn dashboard() -> impl IntoResponse {
             <span id="geminiProviderTitle">Gemini</span>
             <span class="provider-badge-count" id="geminiBadgeCount">0 accounts</span>
           </span>
-          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Gemini models" aria-label="Refresh Gemini models" onclick="refreshModelCatalog('gemini')">&#8635;</button>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Gemini models and quota" aria-label="Refresh Gemini models and quota" onclick="refreshModelCatalog('gemini')">&#8635;</button>
         </div>
         <div id="geminiCards" class="provider-cards"></div>
       </section>
@@ -2837,7 +3039,7 @@ async fn dashboard() -> impl IntoResponse {
             <span id="qwenProviderTitle">Qwen</span>
             <span class="provider-badge-count" id="qwenBadgeCount">0 accounts</span>
           </span>
-          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Qwen models" aria-label="Refresh Qwen models" onclick="refreshModelCatalog('qwen')">&#8635;</button>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Qwen models and quota" aria-label="Refresh Qwen models and quota" onclick="refreshModelCatalog('qwen')">&#8635;</button>
         </div>
         <div id="qwenCards" class="provider-cards"></div>
       </section>
@@ -2847,7 +3049,7 @@ async fn dashboard() -> impl IntoResponse {
             <span id="deepseekProviderTitle">DeepSeek</span>
             <span class="provider-badge-count" id="deepseekBadgeCount">0 accounts</span>
           </span>
-          <button type="button" class="mini-btn provider-refresh-button" title="Refresh DeepSeek models" aria-label="Refresh DeepSeek models" onclick="refreshModelCatalog('deepseek')">&#8635;</button>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh DeepSeek models and quota" aria-label="Refresh DeepSeek models and quota" onclick="refreshModelCatalog('deepseek')">&#8635;</button>
         </div>
         <div id="deepseekCards" class="provider-cards"></div>
       </section>
@@ -2857,7 +3059,7 @@ async fn dashboard() -> impl IntoResponse {
             <span id="minimaxProviderTitle">MiniMax</span>
             <span class="provider-badge-count" id="minimaxBadgeCount">0 accounts</span>
           </span>
-          <button type="button" class="mini-btn provider-refresh-button" title="Refresh MiniMax models" aria-label="Refresh MiniMax models" onclick="refreshModelCatalog('minimax')">&#8635;</button>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh MiniMax models and quota" aria-label="Refresh MiniMax models and quota" onclick="refreshModelCatalog('minimax')">&#8635;</button>
         </div>
         <div id="minimaxCards" class="provider-cards"></div>
       </section>
@@ -2867,7 +3069,7 @@ async fn dashboard() -> impl IntoResponse {
             <span id="grokProviderTitle">Grok (xAI)</span>
             <span class="provider-badge-count" id="grokBadgeCount">— accounts</span>
           </span>
-          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Grok models" aria-label="Refresh Grok models" onclick="refreshModelCatalog('grok')">&#8635;</button>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Grok models and quota" aria-label="Refresh Grok models and quota" onclick="refreshModelCatalog('grok')">&#8635;</button>
         </div>
         <div id="grokCards" class="provider-cards"></div>
       </section>
@@ -2877,7 +3079,7 @@ async fn dashboard() -> impl IntoResponse {
             <span id="copilotProviderTitle">GitHub Copilot</span>
             <span class="provider-badge-count" id="copilotBadgeCount">0 accounts</span>
           </span>
-          <button type="button" class="mini-btn provider-refresh-button" title="Refresh GitHub Copilot models" aria-label="Refresh GitHub Copilot models" onclick="refreshModelCatalog('copilot')">&#8635;</button>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh GitHub Copilot models and quota" aria-label="Refresh GitHub Copilot models and quota" onclick="refreshModelCatalog('copilot')">&#8635;</button>
         </div>
         <div id="copilotCards" class="provider-cards"></div>
       </section>
@@ -2887,7 +3089,7 @@ async fn dashboard() -> impl IntoResponse {
             <span id="claudeProviderTitle">Claude</span>
             <span class="provider-badge-count" id="claudeBadgeCount">0 accounts</span>
           </span>
-          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Claude models" aria-label="Refresh Claude models" onclick="refreshModelCatalog('claude')">&#8635;</button>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh Claude models and quota" aria-label="Refresh Claude models and quota" onclick="refreshModelCatalog('claude')">&#8635;</button>
         </div>
         <div id="claudeCards" class="provider-cards"></div>
       </section>
@@ -2897,7 +3099,7 @@ async fn dashboard() -> impl IntoResponse {
             <span id="glmProviderTitle">GLM (Z.AI)</span>
             <span class="provider-badge-count" id="glmBadgeCount">0 accounts</span>
           </span>
-          <button type="button" class="mini-btn provider-refresh-button" title="Refresh GLM models" aria-label="Refresh GLM models" onclick="refreshModelCatalog('glm')">&#8635;</button>
+          <button type="button" class="mini-btn provider-refresh-button" title="Refresh GLM models and quota" aria-label="Refresh GLM models and quota" onclick="refreshModelCatalog('glm')">&#8635;</button>
         </div>
         <div id="glmCards" class="provider-cards"></div>
       </section>
@@ -4485,7 +4687,7 @@ async fn dashboard() -> impl IntoResponse {
         return '<span class="account-menu-wrap">'
           + '<button type="button" class="mini-btn account-menu-button" aria-label="' + escapeHtml('Open actions for ' + label) + '" aria-haspopup="menu" aria-expanded="false" aria-controls="' + escapeHtml(menuId) + '" onclick="toggleAccountActionMenu(event, ' + menuArg + ')">&#8942;</button>'
           + '<span id="' + escapeHtml(menuId) + '" class="account-action-menu" role="menu" hidden onclick="event.stopPropagation()">'
-          + '<button type="button" role="menuitem" aria-label="' + escapeHtml('Refresh models for ' + label) + '" onclick="refreshModelCatalog(' + providerArg + ', ' + fileArg + ')" class="mini-btn action-btn">Refresh models</button>'
+          + '<button type="button" role="menuitem" aria-label="' + escapeHtml('Refresh models and quota for ' + label) + '" onclick="refreshModelCatalog(' + providerArg + ', ' + fileArg + ')" class="mini-btn action-btn">Refresh models + quota</button>'
           + forceEnableAction
           + '<button type="button" role="menuitem" aria-label="' + escapeHtml(toggleLabel + ' ' + label) + '" onclick="toggleCred(' + fileArg + ', ' + (isEnabled ? 'false' : 'true') + ', ' + labelArg + ')" class="mini-btn action-btn ' + toggleClass + '">' + toggleLabel + '</button>'
           + '<button type="button" role="menuitem" aria-label="' + escapeHtml('Delete ' + label) + '" onclick="deleteCred(' + fileArg + ', ' + labelArg + ')" class="mini-btn action-btn danger">Delete</button>'
@@ -7461,7 +7663,7 @@ async fn dashboard() -> impl IntoResponse {
         var body = new URLSearchParams();
         if (provider) body.set('provider', provider);
         if (fileName) body.set('file_name', fileName);
-        notify('Refreshing model catalog...');
+        notify('Refreshing models and quota...');
         const res = await adminFetch('/models/refresh', {
           method: 'POST',
           headers: {
@@ -7471,7 +7673,10 @@ async fn dashboard() -> impl IntoResponse {
         });
         if (!res) return;
         const data = await res.json();
-        notify(data.message || 'Model catalog refreshed', data.ok === false ? 'error' : '');
+        notify(data.message || 'Models and quota refreshed', data.ok === false ? 'error' : '');
+        invalidateDashboardSnapshot();
+        const snapshot = await refreshDashboardSnapshot(true);
+        if (snapshot) renderDashboardSnapshot();
         refreshCustomModels();
       }
       function redeemCodexReset(fileName, label, accountId, creditId, creditTitle) {
@@ -8181,12 +8386,14 @@ async fn model_catalog_refresh_route(
 
     let model_headers = internal_proxy_api_headers(&state);
     let outcome = refresh_unified_model_cache_now(&state, &model_headers, provider).await;
+    let quota_count =
+        refresh_quota_snapshots_now(&state, provider, form.file_name.as_deref()).await;
     let provider_label = provider.unwrap_or("all");
     let message = if outcome.started {
-        format!("Model catalog refreshed for {}", provider_label)
+        format!("Models and quota refreshed for {}", provider_label)
     } else {
         format!(
-            "Model catalog refresh already running; returned current catalog for {}",
+            "Model catalog refresh already running; quota refreshed for {}",
             provider_label
         )
     };
@@ -8195,6 +8402,7 @@ async fn model_catalog_refresh_route(
         "ok": true,
         "provider": provider_label,
         "model_count": outcome.models.len(),
+        "quota_account_count": quota_count,
         "message": message
     }))
     .into_response()
@@ -12857,8 +13065,9 @@ fn is_supported_provider_prefix(prefix: &str) -> bool {
 mod unified_model_catalog_tests {
     use super::{
         is_safe_credential_file_name, model_entry_matches_id, normalize_model_catalog_provider,
-        provider_prefixed_model, read_sse_prelude, split_provider_prefixed_model_id,
-        sse_error_message, ReqwestByteStream, MODEL_CACHE_TTL_SECONDS,
+        provider_prefixed_model, quota_refresh_interval_for_snapshot, read_sse_prelude,
+        split_provider_prefixed_model_id, sse_error_message, ReqwestByteStream,
+        EXHAUSTED_QUOTA_REFRESH_SECONDS, MODEL_CACHE_TTL_SECONDS, QUOTA_REFRESH_SECONDS,
     };
     use std::time::Duration;
 
@@ -12887,6 +13096,34 @@ mod unified_model_catalog_tests {
         assert!(!is_safe_credential_file_name(""));
         assert!(!is_safe_credential_file_name("../codex-account.json"));
         assert!(!is_safe_credential_file_name("nested/codex-account.json"));
+    }
+
+    #[test]
+    fn quota_refresh_interval_is_hourly_for_exhausted_snapshots() {
+        let exhausted = serde_json::json!({
+            "label": "account",
+            "code_generation": {
+                "five_hour": { "used_percent": 100.0, "reset_label": "1h" }
+            }
+        });
+        assert_eq!(
+            quota_refresh_interval_for_snapshot(&exhausted),
+            Duration::from_secs(EXHAUSTED_QUOTA_REFRESH_SECONDS)
+        );
+    }
+
+    #[test]
+    fn quota_refresh_interval_stays_fast_for_available_snapshots() {
+        let available = serde_json::json!({
+            "label": "account",
+            "code_generation": {
+                "five_hour": { "used_percent": 99.9, "reset_label": "1m" }
+            }
+        });
+        assert_eq!(
+            quota_refresh_interval_for_snapshot(&available),
+            Duration::from_secs(QUOTA_REFRESH_SECONDS)
+        );
     }
 
     #[test]

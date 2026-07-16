@@ -5,6 +5,32 @@ use axum::{
     response::{Html, IntoResponse},
 };
 use serde::Deserialize;
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+};
+
+#[derive(Clone)]
+struct CopilotQuotaCacheEntry {
+    fetched_at: std::time::Instant,
+    payload: serde_json::Value,
+}
+
+static COPILOT_QUOTA_CACHE: OnceLock<Mutex<HashMap<String, CopilotQuotaCacheEntry>>> =
+    OnceLock::new();
+
+fn copilot_quota_cache() -> &'static Mutex<HashMap<String, CopilotQuotaCacheEntry>> {
+    COPILOT_QUOTA_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn invalidate_quota_cache(file_name: Option<&str>) {
+    let mut cache = copilot_quota_cache().lock().unwrap();
+    if let Some(file_name) = file_name {
+        cache.remove(file_name);
+    } else {
+        cache.clear();
+    }
+}
 
 #[derive(Deserialize)]
 struct LoginStartRequest {
@@ -83,8 +109,23 @@ pub async fn accounts_json(State(state): State<crate::AppState>) -> impl IntoRes
 
 pub async fn quota_accounts(state: &crate::AppState) -> Vec<serde_json::Value> {
     let accounts = state.copilot_accounts.lock().unwrap().clone();
+    let now = std::time::Instant::now();
     let mut out = Vec::with_capacity(accounts.len());
     for account in accounts {
+        let key = copilot_quota_cache_key(&account);
+        if account.enabled {
+            let cached = {
+                let cache = copilot_quota_cache().lock().unwrap();
+                cache.get(&key).cloned()
+            };
+            if let Some(cached) = cached {
+                if crate::quota_cache_entry_is_fresh(now, cached.fetched_at, &cached.payload) {
+                    out.push(cached.payload);
+                    continue;
+                }
+            }
+        }
+
         let mut status = Vec::new();
         let mut models = model_entries(&account.models);
         let mut limits = Vec::new();
@@ -144,7 +185,7 @@ pub async fn quota_accounts(state: &crate::AppState) -> Vec<serde_json::Value> {
             status.push("Account is disabled".to_string());
         }
 
-        out.push(serde_json::json!({
+        let payload = serde_json::json!({
             "label": account.label,
             "login": account.login,
             "file_name": account.file_name,
@@ -162,9 +203,26 @@ pub async fn quota_accounts(state: &crate::AppState) -> Vec<serde_json::Value> {
             "access_type_sku": access_type_sku,
             "quota_reset_date": quota_reset_date,
             "raw_usage": raw_usage
-        }));
+        });
+        if account.enabled {
+            copilot_quota_cache().lock().unwrap().insert(
+                key,
+                CopilotQuotaCacheEntry {
+                    fetched_at: std::time::Instant::now(),
+                    payload: payload.clone(),
+                },
+            );
+        }
+        out.push(payload);
     }
     out
+}
+
+fn copilot_quota_cache_key(account: &super::accounts::CopilotAccount) -> String {
+    account
+        .file_name
+        .clone()
+        .unwrap_or_else(|| account.label.clone())
 }
 
 fn model_entries(models: &[super::accounts::CopilotModelInfo]) -> Vec<serde_json::Value> {

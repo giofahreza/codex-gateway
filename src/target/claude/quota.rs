@@ -10,7 +10,6 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::time::Duration;
 
-const CACHE_TTL_SECS: u64 = 60;
 const REQUEST_TIMEOUT_SECS: u64 = 20;
 const USAGE_PATH: &str = "/api/oauth/usage";
 const OAUTH_USAGE_BETA: &str = "oauth-2025-04-20";
@@ -96,7 +95,7 @@ pub async fn get_quota_summaries(state: &crate::AppState) -> Vec<Value> {
         };
 
         let entry = if let Some(cached) = cached {
-            if now.duration_since(cached.fetched_at).as_secs() < CACHE_TTL_SECS {
+            if crate::quota_cache_entry_is_fresh(now, cached.fetched_at, &cached.summary) {
                 cached
             } else {
                 let fetched = fetch_account_quota(state, account).await;

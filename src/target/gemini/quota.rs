@@ -67,7 +67,7 @@ pub async fn get_quota_summaries(state: &crate::AppState) -> Vec<serde_json::Val
         };
 
         let entry = if let Some(cached) = cached {
-            if now.duration_since(cached.fetched_at).as_secs() < 60 {
+            if crate::quota_cache_entry_is_fresh(now, cached.fetched_at, &cached.summary) {
                 cached
             } else {
                 let fetched = fetch_account_quota(state, account).await;
