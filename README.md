@@ -224,7 +224,9 @@ Sessions are persisted to disk and survive server restarts. Session duration is 
 - Enable / disable / delete controls
 - Re-auth flow for providers with expiring tokens
 
-**Settings modal** — notification channel (Telegram or Google Chat) configuration and per-account alert subscriptions.
+**Settings modal** — API-key management, notification channel (Telegram or Google Chat) configuration, and per-account alert subscriptions.
+
+Managed API keys can be unrestricted or limited to one or more providers. Each allowed provider can grant access to every account for that provider or only selected accounts. Access rules are enforced before provider dispatch and account load balancing, including requests routed through custom models. Existing and legacy keys remain unrestricted until their access is edited.
 
 **Theme toggle** — dark / light, persisted to localStorage.
 
@@ -259,6 +261,10 @@ All client requests use `Authorization: Bearer <CODEX_GATEWAY_KEY>`.
 | `POST /codex/rate-limit-reset-credit/consume` | Redeem an available Codex usage-limit reset credit |
 | `POST /credentials/delete` | Delete a credential file |
 | `POST /credentials/toggle` | Enable or disable a credential |
+| `GET /admin/api-keys` | List managed API keys and selectable provider accounts |
+| `POST /admin/api-keys/create` | Create an API key with optional provider/account access rules |
+| `POST /admin/api-keys/access` | Replace an API key's provider/account access rules |
+| `POST /admin/api-keys/revoke` | Revoke an API key |
 | `GET/POST /notifications/settings` | Read or update notification settings |
 | `POST /notifications/test` | Send a test notification |
 | `GET /usage/summary.json` | Aggregate usage summary |
@@ -1123,6 +1129,7 @@ Set `ANTIGRAVITY_GOOGLE_CLIENT_ID`, `ANTIGRAVITY_GOOGLE_CLIENT_SECRET`, `GEMINI_
 | `auths/usage-history.json` | Per-request token history for charts |
 | `auths/notification-settings.json` | Notification channel and watched accounts |
 | `auths/admin-sessions.json` | Active admin sessions (survives restarts) |
+| `auths/api-keys.json` | Hashed API keys, metadata, and provider/account access rules |
 | `ecosystem.config.cjs` | PM2 process config |
 | `src/main.rs` | Main gateway source (~12k lines, includes embedded dashboard HTML/JS/CSS) |
 

@@ -118,8 +118,14 @@ struct AppState {
 
 #[derive(Clone)]
 enum ApiKeyCacheEntry {
-    Verified(String),
+    Verified(AuthenticatedApiKey),
     Rejected(std::time::Instant),
+}
+
+#[derive(Clone)]
+struct AuthenticatedApiKey {
+    id: Option<String>,
+    access: api_keys::ApiKeyAccess,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -196,11 +202,19 @@ fn default_upstream_first_event_timeout_seconds() -> u64 {
 #[derive(Debug, Deserialize)]
 struct ApiKeyCreateRequest {
     label: Option<String>,
+    #[serde(default)]
+    access: api_keys::ApiKeyAccess,
 }
 
 #[derive(Debug, Deserialize)]
 struct ApiKeyRevokeRequest {
     id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiKeyAccessUpdateRequest {
+    id: String,
+    access: api_keys::ApiKeyAccess,
 }
 
 #[derive(Debug, Deserialize)]
@@ -503,6 +517,7 @@ async fn main() {
         .route("/admin/logout", any(admin_logout_route))
         .route("/admin/api-keys", any(admin_api_keys_route))
         .route("/admin/api-keys/create", any(admin_api_keys_create_route))
+        .route("/admin/api-keys/access", any(admin_api_keys_access_route))
         .route("/admin/api-keys/revoke", any(admin_api_keys_revoke_route))
         .route("/dashboard.json", any(dashboard_json))
         .route("/dashboard/snapshot.json", any(dashboard_snapshot_route))
@@ -1386,6 +1401,53 @@ async fn dashboard() -> impl IntoResponse {
         gap: 8px;
         align-items: center;
       }
+      .api-key-create-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .api-key-access-editor {
+        display: grid;
+        gap: 8px;
+        margin-top: 10px;
+      }
+      .api-key-access-groups {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .api-key-access-provider {
+        min-width: 0;
+        padding: 9px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-alt);
+      }
+      .api-key-access-provider > .check-row {
+        font-weight: 700;
+      }
+      .api-key-access-accounts {
+        display: grid;
+        gap: 6px;
+        margin-top: 8px;
+        padding-left: 22px;
+      }
+      .api-key-access-account {
+        min-width: 0;
+        align-items: flex-start;
+      }
+      .api-key-access-account span {
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .api-key-access-account small {
+        display: block;
+        color: var(--muted);
+        font-weight: 400;
+      }
+      .api-key-access-summary {
+        color: var(--text);
+      }
       .api-key-list {
         display: grid;
         gap: 8px;
@@ -1429,6 +1491,8 @@ async fn dashboard() -> impl IntoResponse {
         display: flex;
         align-items: center;
         justify-content: flex-end;
+        gap: 6px;
+        flex-wrap: wrap;
       }
       .api-key-reveal {
         display: grid;
@@ -2791,6 +2855,9 @@ async fn dashboard() -> impl IntoResponse {
         .api-key-row {
           grid-template-columns: 1fr;
         }
+        .api-key-access-groups {
+          grid-template-columns: 1fr;
+        }
         .api-key-reveal-header,
         .provider-settings-actions,
         .api-key-actions {
@@ -3199,6 +3266,8 @@ async fn dashboard() -> impl IntoResponse {
         providerSettings: readProviderDashboardSettings(),
         notificationSettings: null,
         apiKeys: [],
+        apiKeyAccounts: [],
+        apiKeyEditingId: '',
         quotas: {
           codex: new Map(),
           agw: new Map(),
@@ -3616,6 +3685,146 @@ async fn dashboard() -> impl IntoResponse {
       function apiKeySourceLabel(source) {
         return source === 'legacy_config' ? 'Legacy config' : 'Managed';
       }
+      function normalizeApiKeyAccess(access) {
+        if (!access || access.all !== false) return { all: true, providers: [] };
+        var providers = Array.isArray(access.providers) ? access.providers : [];
+        return {
+          all: false,
+          providers: providers.map(function(rule) {
+            return {
+              provider: String(rule && rule.provider || ''),
+              accounts: Array.isArray(rule && rule.accounts) ? rule.accounts.map(String) : []
+            };
+          }).filter(function(rule) { return !!rule.provider; })
+        };
+      }
+      function apiKeyAccessRule(access, provider) {
+        return normalizeApiKeyAccess(access).providers.find(function(rule) {
+          return rule.provider === provider;
+        }) || null;
+      }
+      function apiKeyAccessSummary(access) {
+        access = normalizeApiKeyAccess(access);
+        if (access.all) return 'All providers and accounts';
+        if (!access.providers.length) return 'No access';
+        return access.providers.map(function(rule) {
+          var label = providerLabels[rule.provider] || rule.provider;
+          return rule.accounts.length
+            ? label + ' (' + rule.accounts.length + ' account' + (rule.accounts.length === 1 ? '' : 's') + ')'
+            : label + ' (all accounts)';
+        }).join(', ');
+      }
+      function renderApiKeyAccessEditor(access) {
+        access = normalizeApiKeyAccess(access);
+        var mode = document.getElementById('apiKeyAccessModeInput');
+        var groups = document.getElementById('apiKeyAccessGroups');
+        if (!mode || !groups) return;
+        mode.value = access.all ? 'all' : 'restricted';
+        var accounts = Array.isArray(dashboardState.apiKeyAccounts) ? dashboardState.apiKeyAccounts : [];
+        var grouped = {};
+        accounts.forEach(function(account) {
+          var provider = String(account && account.provider || '');
+          if (!provider) return;
+          if (!grouped[provider]) grouped[provider] = [];
+          grouped[provider].push(account);
+        });
+        groups.innerHTML = dashboardProviderKeys.map(function(provider) {
+          var rule = apiKeyAccessRule(access, provider);
+          var allAccounts = !!rule && rule.accounts.length === 0;
+          var allowed = new Set(rule ? rule.accounts : []);
+          var providerValue = escapeHtml(provider);
+          var providerAccounts = grouped[provider] || [];
+          var seenKeys = new Set(providerAccounts.map(function(account) { return String(account.key || ''); }));
+          var items = providerAccounts.map(function(account) {
+            var key = String(account.key || '');
+            if (!key) return '';
+            var title = account.label || account.account_id || key;
+            var meta = [account.account_id, account.credential_file].filter(Boolean).join(' - ');
+            return '<label class="check-row api-key-access-account">'
+              + '<input type="checkbox" data-api-key-access-account data-provider="' + providerValue + '" value="' + escapeHtml(key) + '"'
+              + (allowed.has(key) ? ' checked' : '') + (allAccounts ? ' disabled' : '') + '> '
+              + '<span>' + escapeHtml(title) + (meta ? '<small>' + escapeHtml(meta) + '</small>' : '') + '</span>'
+              + '</label>';
+          }).join('');
+          if (rule && rule.accounts.length) {
+            items += rule.accounts.filter(function(key) { return !seenKeys.has(key); }).map(function(key) {
+              return '<label class="check-row api-key-access-account">'
+                + '<input type="checkbox" data-api-key-access-account data-provider="' + providerValue + '" value="' + escapeHtml(key) + '" checked> '
+                + '<span>Unavailable account<small>' + escapeHtml(key) + '</small></span>'
+                + '</label>';
+            }).join('');
+          }
+          return '<div class="api-key-access-provider">'
+            + '<label class="check-row">'
+            + '<input type="checkbox" data-api-key-access-provider data-provider="' + providerValue + '"'
+            + (allAccounts ? ' checked' : '') + ' onchange="syncApiKeyAccessProvider(this)"> '
+            + '<span>All ' + escapeHtml(providerLabels[provider] || provider) + ' accounts</span>'
+            + '</label>'
+            + '<div class="api-key-access-accounts">'
+            + (items || '<span class="muted">No accounts configured</span>')
+            + '</div>'
+            + '</div>';
+        }).join('');
+        groups.hidden = access.all;
+      }
+      function syncApiKeyAccessProvider(input) {
+        var provider = input && input.getAttribute('data-provider');
+        document.querySelectorAll('[data-api-key-access-account][data-provider="' + provider + '"]').forEach(function(accountInput) {
+          accountInput.disabled = !!input.checked;
+        });
+      }
+      function updateApiKeyAccessMode() {
+        var mode = document.getElementById('apiKeyAccessModeInput');
+        var groups = document.getElementById('apiKeyAccessGroups');
+        if (mode && groups) groups.hidden = mode.value !== 'restricted';
+      }
+      function apiKeyAccessFromDom() {
+        var mode = document.getElementById('apiKeyAccessModeInput');
+        if (!mode || mode.value !== 'restricted') return { all: true, providers: [] };
+        var providers = [];
+        dashboardProviderKeys.forEach(function(provider) {
+          var allInput = document.querySelector('[data-api-key-access-provider][data-provider="' + provider + '"]');
+          if (allInput && allInput.checked) {
+            providers.push({ provider: provider, accounts: [] });
+            return;
+          }
+          var accounts = Array.from(document.querySelectorAll('[data-api-key-access-account][data-provider="' + provider + '"]:checked'))
+            .map(function(input) { return input.value; })
+            .filter(Boolean);
+          if (accounts.length) providers.push({ provider: provider, accounts: accounts });
+        });
+        if (!providers.length) return null;
+        return { all: false, providers: providers };
+      }
+      function resetApiKeyEditor() {
+        dashboardState.apiKeyEditingId = '';
+        var label = document.getElementById('apiKeyLabelInput');
+        if (label) {
+          label.value = '';
+          label.disabled = false;
+        }
+        setText('apiKeyEditorLabel', 'Create API key');
+        setText('createApiKeyBtn', 'Create API Key');
+        var cancel = document.getElementById('cancelApiKeyEditBtn');
+        if (cancel) cancel.hidden = true;
+        renderApiKeyAccessEditor({ all: true, providers: [] });
+      }
+      function editApiKeyAccess(id) {
+        var key = (dashboardState.apiKeys || []).find(function(item) { return item.id === id; });
+        if (!key || key.revoked_at) return;
+        dashboardState.apiKeyEditingId = id;
+        var label = document.getElementById('apiKeyLabelInput');
+        if (label) {
+          label.value = key.label || '';
+          label.disabled = true;
+        }
+        setText('apiKeyEditorLabel', 'Edit access for ' + (key.label || 'API key'));
+        setText('createApiKeyBtn', 'Save Access');
+        var cancel = document.getElementById('cancelApiKeyEditBtn');
+        if (cancel) cancel.hidden = false;
+        renderApiKeyAccessEditor(key.access);
+        document.getElementById('apiKeyAccessModeInput')?.focus();
+      }
       function updateApiKeyStatusText(message) {
         if (message) {
           setText('apiKeyStatus', message);
@@ -3642,9 +3851,11 @@ async fn dashboard() -> impl IntoResponse {
         }
         list.innerHTML = keys.map(function(key) {
           var revoked = !!key.revoked_at;
-          var revokeButton = revoked
+          var keyArg = escapeHtml(jsString(key.id || ''));
+          var actions = revoked
             ? '<span class="account-state disabled">Revoked</span>'
-            : '<button type="button" class="mini-btn secondary-button" onclick="revokeApiKey(' + escapeHtml(jsString(key.id || '')) + ')">Revoke</button>';
+            : '<button type="button" class="mini-btn secondary-button" onclick="editApiKeyAccess(' + keyArg + ')">Edit access</button>'
+              + '<button type="button" class="mini-btn secondary-button" onclick="revokeApiKey(' + keyArg + ')">Revoke</button>';
           return '<div class="api-key-row' + (revoked ? ' is-revoked' : '') + '">'
             + '<div class="api-key-main">'
             + '<div class="api-key-title-row">'
@@ -3657,8 +3868,9 @@ async fn dashboard() -> impl IntoResponse {
             + ' · Last used ' + escapeHtml(formatSettingsDateTime(key.last_used_at, 'Never'))
             + (revoked ? ' · Revoked ' + escapeHtml(formatSettingsDateTime(key.revoked_at, 'Unknown')) : '')
             + '</div>'
+            + '<div class="api-key-meta api-key-access-summary">Access: ' + escapeHtml(apiKeyAccessSummary(key.access)) + '</div>'
             + '</div>'
-            + '<div class="api-key-actions">' + revokeButton + '</div>'
+            + '<div class="api-key-actions">' + actions + '</div>'
             + '</div>';
         }).join('');
         updateApiKeyStatusText();
@@ -3669,16 +3881,26 @@ async fn dashboard() -> impl IntoResponse {
         if (!res) return;
         const data = await res.json();
         dashboardState.apiKeys = Array.isArray(data.keys) ? data.keys : [];
+        dashboardState.apiKeyAccounts = Array.isArray(data.accounts) ? data.accounts : [];
+        if (!dashboardState.apiKeyEditingId) renderApiKeyAccessEditor({ all: true, providers: [] });
         renderApiKeys();
       }
       async function createApiKey() {
         var labelInput = document.getElementById('apiKeyLabelInput');
         var label = labelInput ? labelInput.value.trim() : '';
-        setText('apiKeyStatus', 'Creating API key...');
-        const res = await adminFetch('/admin/api-keys/create', {
+        var access = apiKeyAccessFromDom();
+        if (!access) {
+          updateApiKeyStatusText('Select at least one provider or account for restricted access.');
+          return;
+        }
+        var editingId = dashboardState.apiKeyEditingId;
+        setText('apiKeyStatus', editingId ? 'Saving API key access...' : 'Creating API key...');
+        const res = await adminFetch(editingId ? '/admin/api-keys/access' : '/admin/api-keys/create', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ label: label || undefined })
+          body: JSON.stringify(editingId
+            ? { id: editingId, access: access }
+            : { label: label || undefined, access: access })
         });
         if (!res) return;
         const data = await res.json();
@@ -3687,10 +3909,13 @@ async fn dashboard() -> impl IntoResponse {
           return;
         }
         dashboardState.apiKeys = Array.isArray(data.keys) ? data.keys : dashboardState.apiKeys;
-        if (labelInput) labelInput.value = '';
-        setApiKeyReveal(data.plain_text_key || '');
+        dashboardState.apiKeyAccounts = Array.isArray(data.accounts) ? data.accounts : dashboardState.apiKeyAccounts;
+        if (!editingId) setApiKeyReveal(data.plain_text_key || '');
+        resetApiKeyEditor();
         renderApiKeys();
-        updateApiKeyStatusText('New API key created. Copy it now; it will not be shown again.');
+        updateApiKeyStatusText(editingId
+          ? 'API key access updated'
+          : 'New API key created. Copy it now; it will not be shown again.');
       }
       async function revokeApiKey(id) {
         if (!id) return;
@@ -3707,6 +3932,8 @@ async fn dashboard() -> impl IntoResponse {
           return;
         }
         dashboardState.apiKeys = Array.isArray(data.keys) ? data.keys : dashboardState.apiKeys;
+        dashboardState.apiKeyAccounts = Array.isArray(data.accounts) ? data.accounts : dashboardState.apiKeyAccounts;
+        if (dashboardState.apiKeyEditingId === id) resetApiKeyEditor();
         renderApiKeys();
         updateApiKeyStatusText('API key revoked');
       }
@@ -3723,6 +3950,7 @@ async fn dashboard() -> impl IntoResponse {
       function openAppSettingsModal() {
         setAppSettingsTab('dashboard');
         setApiKeyReveal('');
+        resetApiKeyEditor();
         renderProviderSettingsList();
         loadNotificationSettings();
         loadApiKeys();
@@ -6766,10 +6994,21 @@ async fn dashboard() -> impl IntoResponse {
         <div id="settingsApiKeysPanel" class="settings-panel" role="tabpanel" data-settings-panel="api-keys" hidden>
           <div class="settings-block">
             <div class="custom-model-form-row">
-              <label for="apiKeyLabelInput">Create API key</label>
+              <label id="apiKeyEditorLabel" for="apiKeyLabelInput">Create API key</label>
               <div class="api-key-create-row">
                 <input id="apiKeyLabelInput" autocomplete="off" placeholder="optional label">
-                <button type="button" id="createApiKeyBtn">Create API Key</button>
+                <div class="api-key-create-actions">
+                  <button type="button" id="createApiKeyBtn">Create API Key</button>
+                  <button type="button" id="cancelApiKeyEditBtn" class="secondary-button" hidden>Cancel</button>
+                </div>
+              </div>
+              <div class="api-key-access-editor">
+                <label for="apiKeyAccessModeInput">Access</label>
+                <select id="apiKeyAccessModeInput">
+                  <option value="all">All providers and accounts</option>
+                  <option value="restricted">Selected providers and accounts</option>
+                </select>
+                <div id="apiKeyAccessGroups" class="api-key-access-groups" hidden></div>
               </div>
               <div class="settings-help">API keys are for proxy API access only. Dashboard access uses OTP login.</div>
             </div>
@@ -6949,6 +7188,8 @@ async fn dashboard() -> impl IntoResponse {
         });
       });
       document.getElementById('createApiKeyBtn').addEventListener('click', createApiKey);
+      document.getElementById('cancelApiKeyEditBtn').addEventListener('click', resetApiKeyEditor);
+      document.getElementById('apiKeyAccessModeInput').addEventListener('change', updateApiKeyAccessMode);
       document.getElementById('copyApiKeyRevealBtn').addEventListener('click', copyApiKeyReveal);
       document.getElementById('notificationChannelInput').addEventListener('change', updateNotificationChannelUi);
       document.getElementById('saveNotificationSettingsBtn').addEventListener('click', saveNotificationSettings);
@@ -7922,7 +8163,8 @@ async fn admin_api_keys_route(
     };
     axum::Json(serde_json::json!({
         "ok": true,
-        "keys": keys
+        "keys": keys,
+        "accounts": notification_account_options(&state)
     }))
     .into_response()
 }
@@ -7939,7 +8181,7 @@ async fn admin_api_keys_create_route(
     let now = now_rfc3339();
     let (created, snapshot) = {
         let mut store = state.api_keys.lock().unwrap();
-        match api_keys::create_key(&mut store, label, &now) {
+        match api_keys::create_key(&mut store, label, &payload.access, &now) {
             Ok(created) => (created, store.clone()),
             Err(err) => {
                 return (
@@ -7969,7 +8211,52 @@ async fn admin_api_keys_create_route(
         "ok": true,
         "key": created.key,
         "plain_text_key": created.plain_text_key,
-        "keys": api_keys::public_records(&snapshot)
+        "keys": api_keys::public_records(&snapshot),
+        "accounts": notification_account_options(&state)
+    }))
+    .into_response()
+}
+
+async fn admin_api_keys_access_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ApiKeyAccessUpdateRequest>,
+) -> impl IntoResponse {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    let snapshot = {
+        let mut store = state.api_keys.lock().unwrap();
+        match api_keys::update_access(&mut store, payload.id.trim(), &payload.access) {
+            Ok(_) => store.clone(),
+            Err(err) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({
+                        "ok": false,
+                        "message": err
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    };
+    if let Err(err) = api_keys::save(state.cfg.as_ref(), &snapshot) {
+        error!("failed to save API key access: {}", err);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "message": "failed to save API key access"
+            })),
+        )
+            .into_response();
+    }
+    state.api_key_cache.write().unwrap().clear();
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "keys": api_keys::public_records(&snapshot),
+        "accounts": notification_account_options(&state)
     }))
     .into_response()
 }
@@ -8015,7 +8302,8 @@ async fn admin_api_keys_revoke_route(
     }
     axum::Json(serde_json::json!({
         "ok": true,
-        "keys": api_keys::public_records(&snapshot)
+        "keys": api_keys::public_records(&snapshot),
+        "accounts": notification_account_options(&state)
     }))
     .into_response()
 }
@@ -10318,7 +10606,7 @@ async fn proxy(
     let raw_path = uri.path().to_string();
     let source_api = detect_source_api(&raw_path);
 
-    if !check_api_key(&state, &headers) {
+    let Some(authenticated) = authenticate_api_key(&state, &headers) else {
         return if matches!(source_api, SourceApi::V1) {
             (
                 StatusCode::UNAUTHORIZED,
@@ -10336,7 +10624,7 @@ async fn proxy(
         } else {
             (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
         };
-    }
+    };
 
     // Read full body (small/simple proxy)
     let body_bytes = match axum::body::to_bytes(body, state.cfg.max_request_body_bytes).await {
@@ -10376,23 +10664,61 @@ async fn proxy(
             };
         }
     };
+    if let Some(provider) = target_provider_access_key(routed.target) {
+        if !authenticated.access.allows_provider(provider) {
+            return if matches!(source_api, SourceApi::V1) {
+                (
+                    StatusCode::FORBIDDEN,
+                    [(
+                        axum::http::header::CONTENT_TYPE.as_str(),
+                        "application/json",
+                    )],
+                    openai_error_body(
+                        &format!("API key does not have access to {}", provider),
+                        "permission_error",
+                        None,
+                    ),
+                )
+                    .into_response()
+            } else {
+                (StatusCode::FORBIDDEN, "API key provider access denied").into_response()
+            };
+        }
+    }
     match routed.target {
         TargetModel::CodexModels => {
+            let state = scoped_state_for_api_key_access(
+                state,
+                &authenticated.access,
+                Some(TargetModel::Codex),
+            );
             return codex_models_response(state, headers).await;
         }
         TargetModel::UnifiedV1Models => {
-            return unified_v1_models_response(state, headers, &routed.upstream_path).await;
+            return unified_v1_models_response(
+                state,
+                headers,
+                &routed.upstream_path,
+                &authenticated.access,
+            )
+            .await;
         }
         TargetModel::Custom => {
+            let state = scoped_state_for_api_key_access(state, &authenticated.access, None);
             return custom_model_response(
                 state,
                 headers,
                 &routed.upstream_path,
                 routed.upstream_body,
                 routed.response_mode,
+                &authenticated.access,
             )
             .await;
         }
+        _ => {}
+    }
+    let state = scoped_state_for_api_key_access(state, &authenticated.access, Some(routed.target));
+    match routed.target {
         TargetModel::Antigravity => {
             return match routed.upstream_path.as_str() {
                 "responses/compact" => {
@@ -10503,6 +10829,9 @@ async fn proxy(
             };
         }
         TargetModel::Codex => {}
+        TargetModel::Custom | TargetModel::CodexModels | TargetModel::UnifiedV1Models => {
+            unreachable!("special targets return before provider dispatch")
+        }
     }
     let upstream = match routed.target {
         TargetModel::Codex => target::codex::gateway::build_upstream_url(
@@ -11052,6 +11381,7 @@ async fn custom_model_response(
     upstream_path: &str,
     body: Bytes,
     response_mode: ResponseMode,
+    access: &api_keys::ApiKeyAccess,
 ) -> axum::response::Response {
     if upstream_path != "responses" {
         return (
@@ -11120,14 +11450,23 @@ async fn custom_model_response(
             .into_response();
     }
 
-    let candidates = custom_model_candidate_order(&state, &custom_model);
+    let candidates = custom_model_candidate_order(&state, &custom_model)
+        .into_iter()
+        .filter(|candidate| {
+            target_provider_access_key(source::v1::provider::target_from_model(&candidate.model))
+                .is_some_and(|provider| access.allows_provider(provider))
+        })
+        .collect::<Vec<_>>();
     if candidates.is_empty() {
         return (
-            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::FORBIDDEN,
             [("Content-Type", "application/json")],
             openai_error_body(
-                &format!("The custom model '{}' has no enabled targets", alias),
-                "server_error",
+                &format!(
+                    "API key does not have access to any target for custom model '{}'",
+                    alias
+                ),
+                "permission_error",
                 None,
             ),
         )
@@ -11787,6 +12126,212 @@ fn glm_account_matches(account: &target::glm::accounts::GlmAccount, filter: &str
             account.file_name.clone().unwrap_or_default(),
         ],
     )
+}
+
+fn target_provider_access_key(target: TargetModel) -> Option<&'static str> {
+    match target {
+        TargetModel::Codex | TargetModel::CodexModels => Some("codex"),
+        TargetModel::Antigravity => Some("agw"),
+        TargetModel::Gemini => Some("gemini"),
+        TargetModel::Qwen => Some("qwen"),
+        TargetModel::DeepSeek => Some("deepseek"),
+        TargetModel::Grok => Some("grok"),
+        TargetModel::MiniMax => Some("minimax"),
+        TargetModel::Copilot => Some("copilot"),
+        TargetModel::Claude => Some("claude"),
+        TargetModel::Glm => Some("glm"),
+        TargetModel::Custom | TargetModel::UnifiedV1Models => None,
+    }
+}
+
+fn api_key_rule_allows_account<F>(
+    access: &api_keys::ApiKeyAccess,
+    provider: &str,
+    mut matches: F,
+) -> bool
+where
+    F: FnMut(&str) -> bool,
+{
+    if access.all {
+        return true;
+    }
+    access.provider_rule(provider).is_some_and(|rule| {
+        rule.accounts.is_empty() || rule.accounts.iter().any(|account| matches(account))
+    })
+}
+
+fn scoped_state_for_api_key_access(
+    state: AppState,
+    access: &api_keys::ApiKeyAccess,
+    target: Option<TargetModel>,
+) -> AppState {
+    if access.all {
+        return state;
+    }
+
+    let mut scoped = state.clone();
+    let all_providers = target.is_none();
+    if all_providers || target == Some(TargetModel::Codex) {
+        scoped.tokens = Arc::new(Mutex::new(
+            state
+                .tokens
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|token| {
+                    api_key_rule_allows_account(access, "codex", |account| {
+                        codex_token_matches_account(token, account)
+                    })
+                })
+                .cloned()
+                .collect(),
+        ));
+    }
+    if all_providers || target == Some(TargetModel::Antigravity) {
+        scoped.agw_accounts = Arc::new(Mutex::new(
+            state
+                .agw_accounts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|account| {
+                    api_key_rule_allows_account(access, "agw", |filter| {
+                        antigravity_account_matches(account, filter)
+                    })
+                })
+                .cloned()
+                .collect(),
+        ));
+    }
+    if all_providers || target == Some(TargetModel::Gemini) {
+        scoped.gemini_accounts = Arc::new(Mutex::new(
+            state
+                .gemini_accounts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|account| {
+                    api_key_rule_allows_account(access, "gemini", |filter| {
+                        gemini_account_matches(account, filter)
+                    })
+                })
+                .cloned()
+                .collect(),
+        ));
+    }
+    if all_providers || target == Some(TargetModel::Qwen) {
+        scoped.qwen_accounts = Arc::new(Mutex::new(
+            state
+                .qwen_accounts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|account| {
+                    api_key_rule_allows_account(access, "qwen", |filter| {
+                        qwen_account_matches(account, filter)
+                    })
+                })
+                .cloned()
+                .collect(),
+        ));
+    }
+    if all_providers || target == Some(TargetModel::DeepSeek) {
+        scoped.deepseek_accounts = Arc::new(Mutex::new(
+            state
+                .deepseek_accounts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|account| {
+                    api_key_rule_allows_account(access, "deepseek", |filter| {
+                        deepseek_account_matches(account, filter)
+                    })
+                })
+                .cloned()
+                .collect(),
+        ));
+    }
+    if all_providers || target == Some(TargetModel::Grok) {
+        scoped.grok_accounts = Arc::new(Mutex::new(
+            state
+                .grok_accounts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|account| {
+                    api_key_rule_allows_account(access, "grok", |filter| {
+                        grok_account_matches(account, filter)
+                    })
+                })
+                .cloned()
+                .collect(),
+        ));
+    }
+    if all_providers || target == Some(TargetModel::MiniMax) {
+        scoped.minimax_accounts = Arc::new(Mutex::new(
+            state
+                .minimax_accounts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|account| {
+                    api_key_rule_allows_account(access, "minimax", |filter| {
+                        minimax_account_matches(account, filter)
+                    })
+                })
+                .cloned()
+                .collect(),
+        ));
+    }
+    if all_providers || target == Some(TargetModel::Copilot) {
+        scoped.copilot_accounts = Arc::new(Mutex::new(
+            state
+                .copilot_accounts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|account| {
+                    api_key_rule_allows_account(access, "copilot", |filter| {
+                        copilot_account_matches(account, filter)
+                    })
+                })
+                .cloned()
+                .collect(),
+        ));
+    }
+    if all_providers || target == Some(TargetModel::Claude) {
+        scoped.claude_accounts = Arc::new(Mutex::new(
+            state
+                .claude_accounts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|account| {
+                    api_key_rule_allows_account(access, "claude", |filter| {
+                        claude_account_matches(account, filter)
+                    })
+                })
+                .cloned()
+                .collect(),
+        ));
+    }
+    if all_providers || target == Some(TargetModel::Glm) {
+        scoped.glm_accounts = Arc::new(Mutex::new(
+            state
+                .glm_accounts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|account| {
+                    api_key_rule_allows_account(access, "glm", |filter| {
+                        glm_account_matches(account, filter)
+                    })
+                })
+                .cloned()
+                .collect(),
+        ));
+    }
+    scoped
 }
 
 fn scoped_state_for_custom_target_account(
@@ -12464,8 +13009,10 @@ async fn unified_v1_models_response(
     state: AppState,
     headers: HeaderMap,
     upstream_path: &str,
+    access: &api_keys::ApiKeyAccess,
 ) -> axum::response::Response {
     let mut models = collect_unified_v1_models(&state, &headers).await;
+    models.retain(|model| model_entry_allowed_for_api_key(model, &state, access));
     if models.is_empty() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -12521,6 +13068,70 @@ async fn unified_v1_models_response(
             ),
         )
             .into_response(),
+    }
+}
+
+fn model_entry_allowed_for_api_key(
+    model: &serde_json::Value,
+    state: &AppState,
+    access: &api_keys::ApiKeyAccess,
+) -> bool {
+    if access.all {
+        return true;
+    }
+    let prefix = model
+        .get("provider_prefix")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            model
+                .get("id")
+                .and_then(|value| value.as_str())
+                .and_then(|id| id.split_once(':').map(|(prefix, _)| prefix))
+        })
+        .unwrap_or_default();
+    if prefix.eq_ignore_ascii_case("ctm") {
+        let Some(alias) = model
+            .get("upstream_model")
+            .and_then(|value| value.as_str())
+            .or_else(|| {
+                model
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .and_then(|id| id.split_once(':').map(|(_, alias)| alias))
+            })
+        else {
+            return false;
+        };
+        return find_custom_model(state, alias).is_some_and(|custom_model| {
+            custom_model.routes.iter().any(|group| {
+                group.targets.iter().any(|target| {
+                    target.enabled
+                        && target_provider_access_key(source::v1::provider::target_from_model(
+                            &target.model,
+                        ))
+                        .is_some_and(|provider| access.allows_provider(provider))
+                })
+            })
+        });
+    }
+    normalize_model_catalog_provider(prefix)
+        .and_then(model_catalog_prefix_to_access_provider)
+        .is_some_and(|provider| access.allows_provider(provider))
+}
+
+fn model_catalog_prefix_to_access_provider(prefix: &str) -> Option<&'static str> {
+    match prefix {
+        "cod" => Some("codex"),
+        "agw" => Some("agw"),
+        "gem" => Some("gemini"),
+        "qwn" => Some("qwen"),
+        "dsk" => Some("deepseek"),
+        "grk" => Some("grok"),
+        "min" => Some("minimax"),
+        "cop" => Some("copilot"),
+        "cld" => Some("claude"),
+        "glm" => Some("glm"),
+        _ => None,
     }
 }
 
@@ -15656,16 +16267,23 @@ fn persist_stats_store(state: &AppState) {
     }
 }
 
-fn check_api_key(state: &AppState, headers: &HeaderMap) -> bool {
+pub(crate) fn check_api_key(state: &AppState, headers: &HeaderMap) -> bool {
+    authenticate_api_key(state, headers).is_some()
+}
+
+fn authenticate_api_key(state: &AppState, headers: &HeaderMap) -> Option<AuthenticatedApiKey> {
     if headers
         .get("x-internal-proxy-key")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.trim() == state.internal_proxy_secret.as_str())
     {
-        return true;
+        return Some(AuthenticatedApiKey {
+            id: None,
+            access: api_keys::ApiKeyAccess::default(),
+        });
     }
     let Some(token) = extract_api_key(headers) else {
-        return false;
+        return None;
     };
     let now = now_rfc3339();
     let lookup_hash = api_keys::token_lookup_hash(token);
@@ -15675,39 +16293,43 @@ fn check_api_key(state: &AppState, headers: &HeaderMap) -> bool {
         .unwrap()
         .get(&lookup_hash)
         .cloned();
-    let key_id = if let Some(ApiKeyCacheEntry::Verified(key_id)) = cached {
+    let authenticated = if let Some(ApiKeyCacheEntry::Verified(authenticated)) = cached {
         // Administrative mutations invalidate the whole cache before they
         // become visible. A cache hit therefore needs no API-key store lock.
-        Some(key_id)
+        Some(authenticated)
     } else if let Some(ApiKeyCacheEntry::Rejected(rejected_at)) = cached {
         if rejected_at.elapsed() < Duration::from_secs(5) {
-            return false;
+            return None;
         }
         state.api_key_cache.write().unwrap().remove(&lookup_hash);
         verify_api_key_cache_miss(state, token, &lookup_hash)
     } else {
         verify_api_key_cache_miss(state, token, &lookup_hash)
     };
-    let Some(key_id) = key_id else {
-        return false;
+    let Some(authenticated) = authenticated else {
+        return None;
     };
 
     // Last-used metadata is throttled to one update per minute and flushed
     // by the persistence worker, so it does not add a disk write per request.
-    let should_touch = {
+    let should_touch = authenticated.id.as_ref().is_some_and(|key_id| {
         let mut touched = state.api_key_last_used.lock().unwrap();
         let bucket = now.get(..16).unwrap_or(&now).to_string();
-        if touched.get(&key_id) == Some(&bucket) {
+        if touched.get(key_id) == Some(&bucket) {
             false
         } else {
             touched.insert(key_id.clone(), bucket);
             true
         }
-    };
+    });
     if should_touch {
         let snapshot = {
             let mut store = state.api_keys.lock().unwrap();
-            if api_keys::touch_last_used(&mut store, &key_id, &now) {
+            if api_keys::touch_last_used(
+                &mut store,
+                authenticated.id.as_deref().unwrap_or_default(),
+                &now,
+            ) {
                 Some(store.clone())
             } else {
                 None
@@ -15719,10 +16341,14 @@ fn check_api_key(state: &AppState, headers: &HeaderMap) -> bool {
                 .send(PersistenceEvent::ApiKeys(snapshot));
         }
     }
-    true
+    Some(authenticated)
 }
 
-fn verify_api_key_cache_miss(state: &AppState, token: &str, lookup_hash: &str) -> Option<String> {
+fn verify_api_key_cache_miss(
+    state: &AppState,
+    token: &str,
+    lookup_hash: &str,
+) -> Option<AuthenticatedApiKey> {
     // Clone only the lookup candidates while holding the short-lived mutex.
     // Argon2 verification runs after the mutex is released.
     let candidates = {
@@ -15732,10 +16358,13 @@ fn verify_api_key_cache_miss(state: &AppState, token: &str, lookup_hash: &str) -
     let verified = candidates
         .iter()
         .find(|record| api_keys::verify_record(record, token))
-        .map(|record| record.id.clone());
+        .map(|record| AuthenticatedApiKey {
+            id: Some(record.id.clone()),
+            access: record.access.clone(),
+        });
     let cache_entry = verified
         .as_ref()
-        .map(|key_id| ApiKeyCacheEntry::Verified(key_id.clone()))
+        .map(|authenticated| ApiKeyCacheEntry::Verified(authenticated.clone()))
         .unwrap_or_else(|| ApiKeyCacheEntry::Rejected(std::time::Instant::now()));
     state
         .api_key_cache
@@ -16741,10 +17370,13 @@ mod codex_provider_model_tests {
 #[cfg(test)]
 mod account_selection_tests {
     use super::{
-        account_runtime_status, apply_router_failure, codex_error_affects_account_health,
-        parse_retry_after_seconds, select_ordered_account_indices, AccountRuntimeState,
-        AccountRuntimeStatus, AccountSelectionScore,
+        account_runtime_status, api_key_rule_allows_account, apply_router_failure,
+        codex_error_affects_account_health, codex_token_matches_account, parse_retry_after_seconds,
+        select_ordered_account_indices, AccountRuntimeState, AccountRuntimeStatus,
+        AccountSelectionScore,
     };
+    use crate::api_keys::{ApiKeyAccess, ApiKeyProviderAccess};
+    use crate::target::codex::tokens::UpstreamToken;
     use std::collections::VecDeque;
     use std::time::{Duration, Instant};
 
@@ -16858,6 +17490,42 @@ mod account_selection_tests {
             .next()
             .expect("picked account");
         assert_eq!(picked, 1);
+    }
+
+    #[test]
+    fn api_key_account_rule_matches_any_selected_account_alias() {
+        let access = ApiKeyAccess {
+            all: false,
+            providers: vec![ApiKeyProviderAccess {
+                provider: "codex".to_string(),
+                accounts: vec!["first.json".to_string(), "second.json".to_string()],
+            }],
+        };
+
+        let selected = UpstreamToken {
+            token: "token-b".to_string(),
+            account_id: Some("account-b".to_string()),
+            label: "Second".to_string(),
+            file_name: Some("second.json".to_string()),
+            enabled: true,
+            expired_at: None,
+        };
+        let excluded = UpstreamToken {
+            token: "token-c".to_string(),
+            account_id: Some("account-c".to_string()),
+            label: "Third".to_string(),
+            file_name: Some("third.json".to_string()),
+            enabled: true,
+            expired_at: None,
+        };
+
+        assert!(api_key_rule_allows_account(&access, "codex", |allowed| {
+            codex_token_matches_account(&selected, allowed)
+        }));
+        assert!(!api_key_rule_allows_account(&access, "codex", |allowed| {
+            codex_token_matches_account(&excluded, allowed)
+        }));
+        assert!(!api_key_rule_allows_account(&access, "gemini", |_| true));
     }
 
     #[test]

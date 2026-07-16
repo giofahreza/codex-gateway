@@ -28,6 +28,7 @@ pub(crate) struct ApiKeyRecord {
     pub last_used_at: Option<String>,
     pub revoked_at: Option<String>,
     pub source: ApiKeySource,
+    pub access: ApiKeyAccess,
 }
 
 impl Default for ApiKeyRecord {
@@ -42,7 +43,113 @@ impl Default for ApiKeyRecord {
             last_used_at: None,
             revoked_at: None,
             source: ApiKeySource::Managed,
+            access: ApiKeyAccess::default(),
         }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ApiKeyAccess {
+    pub all: bool,
+    pub providers: Vec<ApiKeyProviderAccess>,
+}
+
+impl Default for ApiKeyAccess {
+    fn default() -> Self {
+        Self {
+            all: true,
+            providers: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ApiKeyProviderAccess {
+    pub provider: String,
+    /// Empty means every account for this provider.
+    pub accounts: Vec<String>,
+}
+
+impl ApiKeyAccess {
+    pub(crate) fn allows_provider(&self, provider: &str) -> bool {
+        self.all || self.provider_rule(provider).is_some()
+    }
+
+    pub(crate) fn provider_rule(&self, provider: &str) -> Option<&ApiKeyProviderAccess> {
+        let provider = normalize_provider(provider)?;
+        self.providers.iter().find(|rule| rule.provider == provider)
+    }
+
+    pub(crate) fn normalized(&self) -> Result<Self, String> {
+        if self.all {
+            return Ok(Self::default());
+        }
+
+        let mut providers: Vec<ApiKeyProviderAccess> = Vec::new();
+        for incoming in &self.providers {
+            let provider = normalize_provider(&incoming.provider)
+                .ok_or_else(|| format!("Unknown provider '{}'", incoming.provider.trim()))?;
+            let mut accounts = Vec::new();
+            for account in &incoming.accounts {
+                let account = account.trim();
+                if account.is_empty()
+                    || accounts
+                        .iter()
+                        .any(|existing: &String| existing.eq_ignore_ascii_case(account))
+                {
+                    continue;
+                }
+                accounts.push(account.to_string());
+            }
+
+            if let Some(existing) = providers.iter_mut().find(|rule| rule.provider == provider) {
+                if existing.accounts.is_empty() || accounts.is_empty() {
+                    existing.accounts.clear();
+                } else {
+                    for account in accounts {
+                        if !existing
+                            .accounts
+                            .iter()
+                            .any(|value| value.eq_ignore_ascii_case(&account))
+                        {
+                            existing.accounts.push(account);
+                        }
+                    }
+                }
+            } else {
+                providers.push(ApiKeyProviderAccess {
+                    provider: provider.to_string(),
+                    accounts,
+                });
+            }
+        }
+
+        if providers.is_empty() {
+            return Err("Restricted access requires at least one provider or account".to_string());
+        }
+        providers.sort_by(|left, right| left.provider.cmp(&right.provider));
+        Ok(Self {
+            all: false,
+            providers,
+        })
+    }
+}
+
+fn normalize_provider(provider: &str) -> Option<&'static str> {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "cod" | "codex" => Some("codex"),
+        "agw" | "antigravity" | "anti-gravity" => Some("agw"),
+        "gem" | "gemini" => Some("gemini"),
+        "qwn" | "qwen" => Some("qwen"),
+        "dsk" | "deepseek" | "deep-seek" => Some("deepseek"),
+        "grk" | "grok" | "xai" | "x-ai" => Some("grok"),
+        "min" | "minimax" | "mini-max" => Some("minimax"),
+        "cop" | "copilot" | "github-copilot" => Some("copilot"),
+        "cld" | "claude" | "anthropic" => Some("claude"),
+        "glm" | "zai" | "z-ai" => Some("glm"),
+        _ => None,
     }
 }
 
@@ -63,6 +170,7 @@ pub(crate) struct PublicApiKeyRecord {
     pub last_used_at: Option<String>,
     pub revoked_at: Option<String>,
     pub source: ApiKeySource,
+    pub access: ApiKeyAccess,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -114,6 +222,7 @@ pub(crate) fn bootstrap_legacy_key(
         last_used_at: None,
         revoked_at: None,
         source: ApiKeySource::LegacyConfig,
+        access: ApiKeyAccess::default(),
     });
     Ok(true)
 }
@@ -162,9 +271,11 @@ pub(crate) fn touch_last_used(store: &mut ApiKeyStore, id: &str, now: &str) -> b
 pub(crate) fn create_key(
     store: &mut ApiKeyStore,
     label: &str,
+    access: &ApiKeyAccess,
     now: &str,
 ) -> Result<CreatedApiKey, String> {
     let normalized_label = normalize_label(label);
+    let access = access.normalized()?;
     let plain_text_key = generate_api_key();
     let record = ApiKeyRecord {
         id: Uuid::new_v4().simple().to_string(),
@@ -176,6 +287,7 @@ pub(crate) fn create_key(
         last_used_at: None,
         revoked_at: None,
         source: ApiKeySource::Managed,
+        access,
     };
     let public = public_record(&record);
     store.keys.push(record);
@@ -183,6 +295,25 @@ pub(crate) fn create_key(
         key: public,
         plain_text_key,
     })
+}
+
+pub(crate) fn update_access(
+    store: &mut ApiKeyStore,
+    id: &str,
+    access: &ApiKeyAccess,
+) -> Result<bool, String> {
+    let access = access.normalized()?;
+    let Some(record) = store.keys.iter_mut().find(|record| record.id == id) else {
+        return Err("API key not found".to_string());
+    };
+    if record.revoked_at.is_some() {
+        return Err("Revoked API key access cannot be changed".to_string());
+    }
+    if record.access == access {
+        return Ok(false);
+    }
+    record.access = access;
+    Ok(true)
 }
 
 pub(crate) fn revoke_key(store: &mut ApiKeyStore, id: &str, now: &str) -> Result<bool, String> {
@@ -221,6 +352,7 @@ fn public_record(record: &ApiKeyRecord) -> PublicApiKeyRecord {
         last_used_at: record.last_used_at.clone(),
         revoked_at: record.revoked_at.clone(),
         source: record.source,
+        access: record.access.clone(),
     }
 }
 
@@ -335,7 +467,13 @@ mod tests {
     #[test]
     fn create_verify_and_revoke_api_key() {
         let mut store = ApiKeyStore::default();
-        let created = create_key(&mut store, "Primary", "2026-07-11T00:00:00Z").unwrap();
+        let created = create_key(
+            &mut store,
+            "Primary",
+            &ApiKeyAccess::default(),
+            "2026-07-11T00:00:00Z",
+        )
+        .unwrap();
         let key_id = verify_token(&store, &created.plain_text_key);
         assert_eq!(key_id.as_deref(), Some(created.key.id.as_str()));
 
@@ -369,7 +507,13 @@ mod tests {
         cfg.auth_dir = Some(dir.to_string_lossy().to_string());
 
         let mut store = ApiKeyStore::default();
-        let created = create_key(&mut store, "Persisted", "2026-07-11T00:00:00Z").unwrap();
+        let created = create_key(
+            &mut store,
+            "Persisted",
+            &ApiKeyAccess::default(),
+            "2026-07-11T00:00:00Z",
+        )
+        .unwrap();
         save(&cfg, &store).unwrap();
 
         let loaded = load(&cfg);
@@ -379,6 +523,44 @@ mod tests {
             Some(loaded.keys[0].id.as_str())
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn normalizes_and_enforces_restricted_provider_accounts() {
+        let access = ApiKeyAccess {
+            all: false,
+            providers: vec![
+                ApiKeyProviderAccess {
+                    provider: "cod".to_string(),
+                    accounts: vec!["account-a".to_string(), "account-a".to_string()],
+                },
+                ApiKeyProviderAccess {
+                    provider: "claude".to_string(),
+                    accounts: Vec::new(),
+                },
+            ],
+        }
+        .normalized()
+        .unwrap();
+
+        assert!(access.allows_provider("codex"));
+        assert_eq!(
+            access.provider_rule("codex").unwrap().accounts,
+            vec!["account-a"]
+        );
+        assert!(access.provider_rule("cld").unwrap().accounts.is_empty());
+        assert!(!access.allows_provider("gemini"));
+    }
+
+    #[test]
+    fn restricted_access_requires_a_selection() {
+        let err = ApiKeyAccess {
+            all: false,
+            providers: Vec::new(),
+        }
+        .normalized()
+        .unwrap_err();
+        assert!(err.contains("at least one provider"));
     }
 
     fn tempfile_dir() -> PathBuf {
