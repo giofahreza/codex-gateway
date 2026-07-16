@@ -78,6 +78,35 @@ API docs: `http://127.0.0.1:8319/docs/`
 
 ---
 
+## CI/CD Deployment
+
+GitHub Actions builds, tests, and deploys this app on pushes to `master` or `main`.
+
+Required GitHub repository secret:
+
+| Secret | Description |
+|---|---|
+| `DEPLOY_SSH_KEY` | Private SSH key that can connect to `DEPLOY_USER@DEPLOY_HOST` |
+
+The workflow uses the current production layout:
+
+| Setting | Value |
+|---|---|
+| Server | `DEPLOY_USER@DEPLOY_HOST` |
+| Remote checkout | `DEPLOY_REMOTE_STAGE_DIR/codex-gateway` |
+| Live binary | `/opt/gpt-gateway/gpt-gateway` |
+| Systemd service | `gpt-gateway.service` |
+| Health checks | `http://127.0.0.1:8319/health`, `http://127.0.0.1:8319/ready` |
+
+Deployment flow:
+
+1. Run `cargo fmt --check`, dashboard JavaScript syntax check, `cargo test --locked`, and `cargo build --release --locked`.
+2. Upload the release binary to `DEPLOY_REMOTE_STAGE_DIR/gpt-gateway.<commit>`.
+3. Fast-forward the server checkout to the pushed commit.
+4. Back up the current live binary, install the new binary, restart `gpt-gateway.service`, and verify health/readiness.
+
+---
+
 ## Configuration
 
 ### config.json
