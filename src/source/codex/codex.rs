@@ -75,12 +75,40 @@ fn sanitize_native_codex_responses_body(body: Bytes) -> Bytes {
     }
 
     if model_rejects_token_limit_params(&model) {
-        // ChatGPT-plan codex models hard-reject max_output_tokens and
-        // max_tokens. Drop both before forwarding so the CLI default
-        // request shape still routes correctly.
-        let had_max_output = object.remove("max_output_tokens").is_some();
-        let had_max = object.remove("max_tokens").is_some();
-        changed = changed || had_max_output || had_max;
+        // ChatGPT-plan codex models hard-reject several OpenAI Responses
+        // parameters that the CLI sends by default. Drop them before
+        // forwarding so the request reaches the upstream.
+        //
+        // The list was assembled from real responses proxied through
+        // the gateway:
+        //   - max_output_tokens / max_tokens: explicit token-limit params
+        //   - prompt_cache_retention: 24h storage is not available on
+        //     ChatGPT plans
+        //   - background: async tasks are not exposed by ChatGPT codex
+        //   - truncation: ChatGPT owns truncation
+        //   - metadata / safety_identifier: only honored on API-tier
+        //   - service_tier="auto": rejected; other values are accepted
+        for key in [
+            "max_output_tokens",
+            "max_tokens",
+            "prompt_cache_retention",
+            "background",
+            "truncation",
+            "metadata",
+            "safety_identifier",
+        ] {
+            if object.remove(key).is_some() {
+                changed = true;
+            }
+        }
+        // service_tier is accepted but only specific values like
+        // "priority". The CLI default "auto" is rejected, so drop it.
+        if let Some(value) = object.get("service_tier").and_then(|v| v.as_str()) {
+            if value != "priority" && value != "default" {
+                object.remove("service_tier");
+                changed = true;
+            }
+        }
     }
 
     if changed {
@@ -154,6 +182,59 @@ mod tests {
             assert_eq!(v["model"], model);
             assert_eq!(v["stream"], true);
         }
+    }
+
+    #[test]
+    fn chatgpt_plan_models_drop_other_unsupported_params() {
+        // Each of these individually returns HTTP 400 from
+        // chatgpt.com/backend-api/codex/responses on a ChatGPT-plan
+        // account. The sanitizer must drop them all so the CLI default
+        // request shape still reaches the upstream successfully.
+        let body = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "input": [{"role": "user", "content": "hi"}],
+            "max_output_tokens": 64,
+            "prompt_cache_retention": "24h",
+            "background": true,
+            "truncation": "auto",
+            "metadata": {"trace_id": "x"},
+            "safety_identifier": "user-test",
+            "service_tier": "auto",
+            "stream": true
+        })
+        .to_string();
+        let sanitized = sanitize_native_codex_responses_body(Bytes::from(body));
+        let v: Value = serde_json::from_slice(&sanitized).unwrap();
+        for key in [
+            "max_output_tokens",
+            "prompt_cache_retention",
+            "background",
+            "truncation",
+            "metadata",
+            "safety_identifier",
+            "service_tier",
+        ] {
+            assert!(v.get(key).is_none(), "{key} should be stripped");
+        }
+        assert_eq!(v["stream"], true);
+        assert_eq!(v["model"], "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn chatgpt_plan_models_keep_priority_service_tier() {
+        // "priority" (the fast lane on ChatGPT Plus/Pro) is accepted
+        // upstream; the sanitizer should not touch it.
+        let body = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "input": [{"role": "user", "content": "hi"}],
+            "service_tier": "priority",
+            "max_output_tokens": 64
+        })
+        .to_string();
+        let sanitized = sanitize_native_codex_responses_body(Bytes::from(body));
+        let v: Value = serde_json::from_slice(&sanitized).unwrap();
+        assert_eq!(v["service_tier"], "priority");
+        assert!(v.get("max_output_tokens").is_none());
     }
 
     #[test]
