@@ -40,19 +40,30 @@ async fn main() {
                     let parsed: Option<Value> = serde_json::from_str(&body).ok();
                     let hint = match &parsed {
                         Some(v) if v.get("success").and_then(|x| x.as_bool()) == Some(false) => {
-                            format!(" [error: {} {}]",
+                            format!(
+                                " [error: {} {}]",
                                 v.get("code").map(|x| x.to_string()).unwrap_or_default(),
-                                v.get("msg").and_then(|x| x.as_str()).unwrap_or(""))
+                                v.get("msg").and_then(|x| x.as_str()).unwrap_or("")
+                            )
                         }
-                        Some(v) if parsed.as_ref().and_then(|p| p.get("balance_infos")).is_some() => {
+                        Some(v)
+                            if parsed
+                                .as_ref()
+                                .and_then(|p| p.get("balance_infos"))
+                                .is_some() =>
+                        {
                             " [BALANCE FOUND]".to_string()
                         }
                         _ => String::new(),
                     };
-                    println!("{} {}{}\n    status={} body={}",
+                    println!(
+                        "{} {}{}\n    status={} body={}",
                         if status.is_success() { "OK" } else { "  " },
-                        url, hint, status,
-                        body.chars().take(200).collect::<String>());
+                        url,
+                        hint,
+                        status,
+                        body.chars().take(200).collect::<String>()
+                    );
                 }
                 Err(e) => println!("ERR {}: {}", url, e),
             }
