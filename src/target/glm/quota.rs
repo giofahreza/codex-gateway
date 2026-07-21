@@ -80,14 +80,24 @@ pub async fn get_quota_summaries(state: &crate::AppState) -> Vec<Value> {
                 "error": err
             }));
         } else {
-            results.push(json!({
+            let mut payload = json!({
                 "label": entry.summary.label,
                 "file_name": entry.summary.file_name,
                 "account_type": entry.summary.account_type,
                 "status_msg": entry.summary.status_msg,
                 "available_models": entry.summary.available_models,
+                "balances": entry.summary.balances,
                 "raw": entry.summary.raw,
-            }));
+            });
+            if let Some(note) = entry.summary.balance_note.as_ref() {
+                if let serde_json::Value::Object(map) = &mut payload {
+                    map.insert(
+                        "balance_note".to_string(),
+                        serde_json::Value::String(note.clone()),
+                    );
+                }
+            }
+            results.push(payload);
         }
     }
 
