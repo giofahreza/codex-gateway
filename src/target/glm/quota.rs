@@ -122,26 +122,27 @@ async fn fetch_account_quota(
         Err(err) => (Vec::new(), Value::Null, Some(err)),
     };
 
-    let (balances, balance_note, balance_status) = if is_api_usage {
+    let (balances, user_note, diagnostic) = if is_api_usage {
         match fetch_balance(client, account).await {
-            Ok(BalanceResult::Found(entries)) => (
-                entries,
-                None,
-                Some("Live balance from Z.AI billing endpoint".to_string()),
-            ),
-            Ok(BalanceResult::NotAvailable(reason)) => (Vec::new(), Some(reason.clone()), None),
-            Err(err) => (Vec::new(), Some(err.clone()), None),
+            Ok(BalanceResult::Found(entries)) => (entries, Some(BALANCE_NOTE_LIVE), None),
+            Ok(BalanceResult::NotAvailable {
+                user_note,
+                diagnostic,
+            }) => (Vec::new(), Some(user_note), Some(diagnostic)),
+            Err(_) => (Vec::new(), Some(BALANCE_NOTE_NO_PUBLIC_ENDPOINT), None),
         }
     } else {
-        (Vec::new(), None, None)
+        (Vec::new(), Some(BALANCE_NOTE_SUBSCRIPTION), None)
     };
 
-    let status_msg = balance_status.unwrap_or_else(|| {
-        let note = balance_note.as_deref().unwrap_or(
-            "This key is a GLM Coding Plan subscription; balance is not applicable here.",
-        );
-        format!("{note} The card shows the live model catalog and gateway-recorded usage.")
-    });
+    // The dashboard surfaces only `user_note` (clean, actionable copy).
+    // The detailed probe reason lands in the raw payload for operators.
+    let status_msg = match balances.is_empty() {
+        false => "Live balance from Z.AI billing endpoint".to_string(),
+        true => user_note
+            .unwrap_or(BALANCE_NOTE_NO_PUBLIC_ENDPOINT)
+            .to_string(),
+    };
 
     let summary = QuotaSummary {
         label: account.label.clone(),
@@ -150,8 +151,12 @@ async fn fetch_account_quota(
         status_msg,
         available_models: models,
         balances,
-        balance_note: if is_api_usage { balance_note } else { None },
-        raw,
+        balance_note: if is_api_usage {
+            user_note.map(str::to_string)
+        } else {
+            None
+        },
+        raw: enrich_raw_with_balance_diagnostic(raw, account, diagnostic.as_deref()),
     };
 
     QuotaCacheEntry {
@@ -215,8 +220,18 @@ fn models_url(base_url: &str) -> String {
 /// no balance data.
 enum BalanceResult {
     Found(Vec<BalanceEntry>),
-    NotAvailable(String),
+    /// Z.AI does not currently expose a public balance endpoint reachable
+    /// with this account's Bearer API key. The static str is the
+    /// user-facing copy; the String is the diagnostic reason kept for the
+    /// raw payload (operator-only).
+    NotAvailable {
+        user_note: &'static str,
+        diagnostic: String,
+    },
 }
+
+/// User-facing copy for the dashboard when balance IS available live.
+const BALANCE_NOTE_LIVE: &str = "Live balance from Z.AI billing endpoint";
 
 const BALANCE_PATHS: &[&str] = &[
     "/api/finance/balance",
@@ -224,6 +239,15 @@ const BALANCE_PATHS: &[&str] = &[
     "/api/billing/balance",
     "/api/balance",
 ];
+
+/// User-facing copy for the dashboard when no balance endpoint is reachable.
+/// User-facing copy for subscription (Coding Plan) accounts that have no
+/// numeric balance to display.
+const BALANCE_NOTE_SUBSCRIPTION: &str =
+    "This GLM Coding Plan subscription does not draw from a numeric balance;      check Z.AI's coding plan dashboard for usage detail.";
+
+const BALANCE_NOTE_NO_PUBLIC_ENDPOINT: &str =
+    "Z.AI does not currently expose a public balance endpoint for this API key.      Check the Z.AI account dashboard for live usage and remaining credits; this      card surfaces only the live model catalog and gateway-recorded usage.";
 
 async fn fetch_balance(
     client: &reqwest::Client,
@@ -241,7 +265,13 @@ async fn fetch_balance(
     hosts.push("open.bigmodel.cn".to_string());
     hosts.dedup();
 
-    let mut last_reason = String::new();
+    // Tracks the most recent diagnostic for the dashboard's raw payload so
+    // operators can still trace which path failed. We never surface this in
+    // the user-facing copy.
+    let mut diagnostic: Option<String> = None;
+    let mut auth_failure = false;
+    let mut transport_failure = false;
+
     for host in &hosts {
         for path in BALANCE_PATHS {
             let url = format!("https://{}{}", host, path);
@@ -257,77 +287,74 @@ async fn fetch_balance(
                 .await
             {
                 Ok(resp) => resp,
-                Err(err) => {
-                    last_reason = format!("request to https://{}{} failed: {}", host, path, err);
+                Err(_err) => {
+                    diagnostic = Some(format!("request to {} failed", url));
+                    transport_failure = true;
                     continue;
                 }
             };
             let status = resp.status();
             if status == reqwest::StatusCode::NOT_FOUND {
-                last_reason = format!(
-                    "https://{}{} returned 404 (no public balance endpoint)",
-                    host, path
-                );
+                diagnostic = Some(format!("{} returned 404", url));
                 continue;
             }
             if status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::FORBIDDEN
             {
-                last_reason = format!(
-                    "https://{}{} rejected the key ({}); check that the API key has billing read access",
-                    host, path, status
-                );
-                // The endpoint exists; stop probing and surface the auth error.
-                return Ok(BalanceResult::NotAvailable(last_reason));
+                diagnostic = Some(format!("{} rejected the key ({})", url, status));
+                auth_failure = true;
+                continue;
             }
             let text = match resp.text().await {
                 Ok(text) => text,
-                Err(err) => {
-                    last_reason = format!("https://{}{} body read failed: {}", host, path, err);
+                Err(_err) => {
+                    diagnostic = Some(format!("{} body read failed", url));
+                    transport_failure = true;
                     continue;
                 }
             };
             if !status.is_success() {
-                last_reason = format!(
-                    "https://{}{} returned {}: {}",
-                    host,
-                    path,
+                diagnostic = Some(format!(
+                    "{} returned {}: {}",
+                    url,
                     status,
                     truncate(&text, 120)
-                );
+                ));
                 continue;
             }
             let value: Value = match serde_json::from_str(&text) {
                 Ok(value) => value,
-                Err(err) => {
-                    last_reason =
-                        format!("https://{}{} returned invalid JSON: {}", host, path, err);
+                Err(_err) => {
+                    diagnostic = Some(format!("{} returned invalid JSON", url));
                     continue;
                 }
             };
             // Spring gateway sometimes wraps 404 in a 200 with
             // {"success":false,"msg":"404 NOT_FOUND"}; treat that as missing.
             if looks_like_zai_not_found(&value) {
-                last_reason = format!(
-                    "https://{}{} reached Z.AI but reported 404 NOT_FOUND",
-                    host, path
-                );
+                diagnostic = Some(format!("{} reached Z.AI but reported 404 NOT_FOUND", url));
                 continue;
             }
             let entries = parse_balance_response(&value);
             if entries.is_empty() {
-                last_reason = format!(
-                    "https://{}{} returned 200 but no balance entries could be parsed ({} bytes)",
-                    host,
-                    path,
+                diagnostic = Some(format!(
+                    "{} returned 200 but no balance entries could be parsed ({} bytes)",
+                    url,
                     text.len()
-                );
+                ));
                 continue;
             }
             return Ok(BalanceResult::Found(entries));
         }
     }
-    Ok(BalanceResult::NotAvailable(last_reason))
+    let _ = (auth_failure, transport_failure);
+    let diagnostic_note = diagnostic.unwrap_or_else(|| {
+        "Z.AI balance endpoints did not respond with a recognized balance payload.".to_string()
+    });
+    Ok(BalanceResult::NotAvailable {
+        user_note: BALANCE_NOTE_NO_PUBLIC_ENDPOINT,
+        diagnostic: diagnostic_note,
+    })
 }
 
 fn looks_like_zai_not_found(value: &Value) -> bool {
@@ -352,6 +379,38 @@ fn looks_like_zai_not_found(value: &Value) -> bool {
         }
     }
     false
+}
+
+/// Decorate the raw payload with the operator-only balance diagnostic so
+/// the dashboard JSON still records which probe path failed without
+/// leaking the URL onto the user-facing card.
+fn enrich_raw_with_balance_diagnostic(
+    raw: Value,
+    account: &super::accounts::GlmAccount,
+    diagnostic: Option<&str>,
+) -> Value {
+    let Some(diagnostic) = diagnostic else {
+        return raw;
+    };
+    let mut payload = match raw {
+        Value::Object(map) => Value::Object(map),
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("value".to_string(), other);
+            Value::Object(map)
+        }
+    };
+    if let Value::Object(map) = &mut payload {
+        map.insert(
+            "balance_diagnostic".to_string(),
+            Value::String(diagnostic.to_string()),
+        );
+        map.insert(
+            "balance_account_type".to_string(),
+            Value::String(account.normalized_account_type()),
+        );
+    }
+    payload
 }
 
 fn primary_host(base_url: &str) -> Option<String> {
@@ -592,5 +651,52 @@ mod tests {
         );
         assert_eq!(primary_host("https://z.ai"), Some("z.ai".to_string()));
         assert_eq!(primary_host("not-a-url"), Some("not-a-url".to_string()));
+    }
+
+    #[test]
+    fn user_note_does_not_leak_probe_url() {
+        // The user-facing copy must never mention an upstream URL or
+        // endpoint name. Operators get the probe diagnostic via the
+        // `balance_diagnostic` field in the raw payload instead.
+        for note in [
+            BALANCE_NOTE_LIVE,
+            BALANCE_NOTE_NO_PUBLIC_ENDPOINT,
+            BALANCE_NOTE_SUBSCRIPTION,
+        ] {
+            assert!(
+                !note.contains("http") && !note.contains("/api"),
+                "user note leaked an upstream URL: {note:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn enrich_raw_attaches_balance_diagnostic_and_account_type() {
+        use serde_json::json;
+        let account = super::super::accounts::GlmAccount {
+            account_id: "id".to_string(),
+            label: "lbl".to_string(),
+            account_type: "api_usage".to_string(),
+            api_key: "k".to_string(),
+            base_url: None,
+            anthropic_base_url: None,
+            file_name: None,
+            enabled: true,
+        };
+        let raw = json!({"data": []});
+        let out = enrich_raw_with_balance_diagnostic(
+            raw,
+            &account,
+            Some("https://api.z.ai/api/finance/balance returned 401"),
+        );
+        assert_eq!(
+            out["balance_diagnostic"],
+            "https://api.z.ai/api/finance/balance returned 401"
+        );
+        assert_eq!(out["balance_account_type"], "api_usage");
+        assert!(out["data"].is_array());
+
+        let out2 = enrich_raw_with_balance_diagnostic(json!({"k":"v"}), &account, None);
+        assert!(out2.get("balance_diagnostic").is_none());
     }
 }
