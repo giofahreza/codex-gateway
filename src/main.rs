@@ -2458,6 +2458,39 @@ async fn dashboard() -> impl IntoResponse {
         flex-basis: 100%;
         margin-top: -2px;
       }
+      .glm-balance-tone {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 12px;
+      }
+      .glm-balance-tone.success {
+        color: #22c55e;
+        background: rgba(34, 197, 94, 0.08);
+      }
+      .glm-balance-tone.warn {
+        color: #f59e0b;
+        background: rgba(245, 158, 11, 0.08);
+      }
+      .glm-balance-tone.info {
+        color: #94a3b8;
+        background: rgba(148, 163, 184, 0.08);
+      }
+      .glm-balance-tone.muted {
+        color: #94a3b8;
+      }
+      .glm-balance-list {
+        list-style: disc inside;
+        margin: 6px 0 0 0;
+        padding: 0;
+        font-size: 12px;
+        color: #cbd5e1;
+      }
+      .glm-balance-list code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
       .quota-balance-block {
         flex-basis: 100%;
         display: flex;
@@ -6899,7 +6932,8 @@ async fn dashboard() -> impl IntoResponse {
     <div id="addGlmModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addGlmTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
         <h2 id="addGlmTitle" style="margin-top:0;">Add GLM Account</h2>
-        <p>Paste a Z.AI GLM API key and choose whether it is a normal API-usage key or a Coding Plan subscription key.</p>
+        <p>Paste a Z.AI GLM API key. Pick the account type that matches your billing. The gateway probes the upstream balance endpoint on save and surfaces live balances when Z.AI exposes them.</p>
+        <p class="muted" style="margin-top:4px;">Tip: pasting an OpenAI/Codex base URL with <code>/coding/</code> auto-selects <code>subscription</code>; <code>/paas/</code> auto-selects <code>api_usage</code>.</p>
         <div class="modal-actions" style="margin-top:8px;">
           <button type="button" onclick="window.open('/login/glm/start', '_blank', 'noopener')">Open Helper</button>
         </div>
@@ -7444,7 +7478,33 @@ async fn dashboard() -> impl IntoResponse {
         });
         if (!res) return;
         const data = await res.json();
-        document.getElementById('glmStatus').textContent = data.message || 'Failed to save GLM key';
+        const statusEl = document.getElementById('glmStatus');
+        let html = escapeHtml(data.message || 'Failed to save GLM key');
+        if (data.balance_status) {
+          const status = String(data.balance_status);
+          let tone = 'muted';
+          let icon = '\u2022';
+          if (status === 'live') { tone = 'success'; icon = '\u2705'; }
+          else if (status === 'unreachable') { tone = 'warn'; icon = '\u26a0\ufe0f'; }
+          else if (status === 'probe_error') { tone = 'warn'; icon = '\u26a0\ufe0f'; }
+          else if (status === 'subscription') { tone = 'info'; icon = '\u2139\ufe0f'; }
+          html += '<br><span class="glm-balance-tone ' + tone + '">' + icon + ' Balance ' +
+            status + ': ' + escapeHtml(data.balance_message || '') + '</span>';
+          if (Array.isArray(data.balances) && data.balances.length) {
+            html += '<ul class="glm-balance-list">';
+            data.balances.forEach(function(b) {
+              html += '<li><code>' + escapeHtml((b.total_balance || '?') + ' ' + (b.currency || '')) + '</code>';
+              if (b.granted_balance && b.granted_balance !== '0.00') {
+                html += ' (granted ' + escapeHtml(b.granted_balance) + ')';
+              } else if (b.topped_up_balance && b.topped_up_balance !== '0.00') {
+                html += ' (topped up ' + escapeHtml(b.topped_up_balance) + ')';
+              }
+              html += '</li>';
+            });
+            html += '</ul>';
+          }
+        }
+        statusEl.innerHTML = html;
         if (!data.ok) {
           return;
         }
@@ -7455,6 +7515,43 @@ async fn dashboard() -> impl IntoResponse {
         document.getElementById('glmAnthropicBaseUrlInput').value = '';
         refreshGlmQuota();
         refreshGlmAccounts();
+      }
+
+      function detectGlmAccountTypeFromUrl(value) {
+        var v = String(value || '').toLowerCase();
+        if (!v) return null;
+        if (v.indexOf('/api/coding/') !== -1 || v.indexOf('/coding/') !== -1) return 'subscription';
+        if (v.indexOf('/api/paas/') !== -1 || v.indexOf('/paas/') !== -1) return 'api_usage';
+        if (v.indexOf('/api/anthropic') !== -1 || v.indexOf('anthropic') !== -1) return 'subscription';
+        return null;
+      }
+      var glmOpenAiBaseInput = document.getElementById('glmOpenAiBaseUrlInput');
+      if (glmOpenAiBaseInput) {
+        glmOpenAiBaseInput.addEventListener('input', function() {
+          var detected = detectGlmAccountTypeFromUrl(glmOpenAiBaseInput.value);
+          var select = document.getElementById('glmAccountTypeInput');
+          if (!select || !detected) return;
+          if (!select.dataset.userTouched) {
+            select.value = detected;
+            var preview = document.getElementById('glmAnthropicBaseUrlInput');
+            if (detected === 'subscription' && preview && !preview.value) {
+              preview.placeholder = 'Subscription default: https://api.z.ai/api/anthropic';
+            }
+          }
+        });
+        glmOpenAiBaseInput.addEventListener('blur', function() {
+          var detected = detectGlmAccountTypeFromUrl(glmOpenAiBaseInput.value);
+          var select = document.getElementById('glmAccountTypeInput');
+          if (select && detected && !select.dataset.userTouched) {
+            select.value = detected;
+          }
+        });
+      }
+      var glmAccountTypeSelect = document.getElementById('glmAccountTypeInput');
+      if (glmAccountTypeSelect) {
+        glmAccountTypeSelect.addEventListener('change', function() {
+          glmAccountTypeSelect.dataset.userTouched = '1';
+        });
       }
       document.getElementById('closeGlmModalBtn').addEventListener('click', () => {
         closeGlmModal();

@@ -218,7 +218,7 @@ fn models_url(base_url: &str) -> String {
 /// precise reason on the dashboard card so it is obvious whether the gateway
 /// reached Z.AI and got rejected, or whether the endpoint exists but returned
 /// no balance data.
-enum BalanceResult {
+pub enum BalanceResult {
     Found(Vec<BalanceEntry>),
     /// Z.AI does not currently expose a public balance endpoint reachable
     /// with this account's Bearer API key. The static str is the
@@ -249,7 +249,7 @@ const BALANCE_NOTE_SUBSCRIPTION: &str =
 const BALANCE_NOTE_NO_PUBLIC_ENDPOINT: &str =
     "Z.AI does not currently expose a public balance endpoint for this API key.      Check the Z.AI account dashboard for live usage and remaining credits; this      card surfaces only the live model catalog and gateway-recorded usage.";
 
-async fn fetch_balance(
+pub async fn fetch_balance(
     client: &reqwest::Client,
     account: &super::accounts::GlmAccount,
 ) -> Result<BalanceResult, String> {
@@ -698,5 +698,32 @@ mod tests {
 
         let out2 = enrich_raw_with_balance_diagnostic(json!({"k":"v"}), &account, None);
         assert!(out2.get("balance_diagnostic").is_none());
+    }
+
+    #[test]
+    fn balance_result_variants_are_distinguishable() {
+        // The GLM admin login uses balance_status to drive the modal UX;
+        // make sure the variants are spelled stably so the front-end contract
+        // stays predictable.
+        use super::BalanceResult;
+        let found = BalanceResult::Found(Vec::new());
+        let missing: BalanceResult = BalanceResult::NotAvailable {
+            user_note: "x",
+            diagnostic: "y".to_string(),
+        };
+        match found {
+            BalanceResult::Found(_) => {}
+            _ => panic!("expected Found variant"),
+        }
+        match missing {
+            BalanceResult::NotAvailable {
+                user_note,
+                diagnostic,
+            } => {
+                assert_eq!(user_note, "x");
+                assert_eq!(diagnostic, "y");
+            }
+            _ => panic!("expected NotAvailable variant"),
+        }
     }
 }

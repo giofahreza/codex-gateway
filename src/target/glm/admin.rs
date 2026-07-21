@@ -5,6 +5,7 @@ use axum::{
     response::{Html, IntoResponse},
 };
 use serde::Deserialize;
+use serde_json::{json, Value};
 
 #[derive(Deserialize)]
 struct LoginStartRequest {
@@ -184,12 +185,133 @@ async fn save_account(state: &crate::AppState, body: &Bytes) -> axum::response::
     }
 
     super::accounts::reload_state(state);
-    axum::Json(serde_json::json!({
+
+    // Probe the upstream balance endpoint for api_usage keys so the dashboard
+    // can show users immediately whether their saved key is a Z.AI billing
+    // credential (which exposes /api/finance/balance) or a chat-only key.
+    // Subscription (Coding Plan) accounts do not have a numeric balance to
+    // probe; we surface a plain "subscription" status for that.
+    let balance_probe = probe_balance_after_save(state, &out, &account_type).await;
+
+    let mut response = json!({
         "ok": true,
         "message": format!("saved GLM credentials to {}", path.to_string_lossy()),
-        "saved_path": path.to_string_lossy()
-    }))
-    .into_response()
+        "saved_path": path.to_string_lossy(),
+        "account_type": account_type,
+    });
+    if let Some(probe) = balance_probe {
+        if let Value::Object(map) = &mut response {
+            map.insert("balance_status".to_string(), Value::String(probe.status));
+            map.insert("balance_message".to_string(), Value::String(probe.message));
+            if let Some(balances) = probe.balances {
+                map.insert("balances".to_string(), Value::Array(balances));
+            }
+        }
+    }
+    axum::Json(response).into_response()
+}
+
+#[derive(Default)]
+struct BalanceProbeResult {
+    status: String,
+    message: String,
+    balances: Option<Vec<Value>>,
+}
+
+async fn probe_balance_after_save(
+    state: &crate::AppState,
+    saved_account: &Value,
+    account_type: &str,
+) -> Option<BalanceProbeResult> {
+    if account_type == super::accounts::ACCOUNT_TYPE_SUBSCRIPTION {
+        return Some(BalanceProbeResult {
+            status: "subscription".to_string(),
+            message: "Coding Plan subscription; no numeric balance is exposed.".to_string(),
+            balances: None,
+        });
+    }
+    let account = super::accounts::GlmAccount {
+        account_id: saved_account
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        label: saved_account
+            .get("label")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        account_type: account_type.to_string(),
+        api_key: saved_account
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        base_url: saved_account
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        anthropic_base_url: saved_account
+            .get("anthropic_base_url")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        file_name: saved_account
+            .get("file_name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        enabled: true,
+    };
+    match super::quota::fetch_balance(&state.client, &account).await {
+        Ok(super::quota::BalanceResult::Found(entries)) => {
+            let balances: Vec<Value> = entries
+                .into_iter()
+                .map(|entry| {
+                    json!({
+                        "currency": entry.currency,
+                        "total_balance": entry.total_balance,
+                        "granted_balance": entry.granted_balance,
+                        "topped_up_balance": entry.topped_up_balance,
+                    })
+                })
+                .collect();
+            let human = human_balance_summary(&balances);
+            Some(BalanceProbeResult {
+                status: "live".to_string(),
+                message: format!("Live balance: {human}"),
+                balances: Some(balances),
+            })
+        }
+        Ok(super::quota::BalanceResult::NotAvailable { user_note, .. }) => {
+            Some(BalanceProbeResult {
+                status: "unreachable".to_string(),
+                message: user_note.to_string(),
+                balances: None,
+            })
+        }
+        Err(err) => Some(BalanceProbeResult {
+            status: "probe_error".to_string(),
+            message: format!("Could not probe balance endpoint: {err}"),
+            balances: None,
+        }),
+    }
+}
+
+fn human_balance_summary(balances: &[Value]) -> String {
+    if balances.is_empty() {
+        return "no balance entries".to_string();
+    }
+    let parts: Vec<String> = balances
+        .iter()
+        .map(|b| {
+            let cur = b.get("currency").and_then(|v| v.as_str()).unwrap_or("");
+            let total = b
+                .get("total_balance")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            format!("{total} {cur}")
+        })
+        .collect();
+    parts.join(", ")
 }
 
 fn sanitize_label(value: &str) -> String {
