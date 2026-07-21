@@ -2458,6 +2458,23 @@ async fn dashboard() -> impl IntoResponse {
         flex-basis: 100%;
         margin-top: -2px;
       }
+      .quota-balance-block {
+        flex-basis: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        padding: 6px 8px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface-raised);
+      }
+      .quota-balance-label {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
       .model-limit-toggle {
         flex-basis: 100%;
         margin-top: 2px;
@@ -4775,22 +4792,47 @@ async fn dashboard() -> impl IntoResponse {
             + ' used \u00b7 resets in ' + (wk.reset_label || '\u2014');
           bars += renderProgressBar('Weekly window', wkHint, wkPct);
         }
-        // DeepSeek balances: show total + topped-up in USD. The
-        // gateway pulls this from /user/balance.
-        if (quota.balances && quota.balances.length) {
-          quota.balances.forEach(function(b) {
-            if (b.total_balance == null) return;
-            var label = 'Balance ' + (b.currency || 'USD');
-            var detail = b.total_balance + ' ' + (b.currency || 'USD');
-            if (b.topped_up_balance && b.topped_up_balance !== '0.00' && b.topped_up_balance !== '0') {
-              detail += ' (topped up ' + b.topped_up_balance + ')';
-            } else if (b.granted_balance && b.granted_balance !== '0.00' && b.granted_balance !== '0') {
-              detail += ' (granted ' + b.granted_balance + ')';
-            }
-            bars += renderProgressBar(label, detail, 100, 'low');
-          });
+        // Balance tile: providers expose a balances list when they have a
+        // balance endpoint (DeepSeek, GLM api_usage when Z.AI exposes one).
+        // When balances is empty but a balance_note is present, we still
+        // render a tile so the dashboard surfaces the precise reason
+        // (e.g. Z.AI does not expose a public balance endpoint for
+        // pay-as-you-go keys) instead of leaving the account looking
+        // identical to providers that don't track balance at all.
+        var hasBalances = quota.balances && quota.balances.length;
+        var hasBalanceNote = !!quota.balance_note;
+        if (hasBalances || hasBalanceNote) {
+          var accountType = options && options.provider ? String(options.provider).toLowerCase() : '';
+          var balanceHtml = '';
+          if (hasBalances) {
+            quota.balances.forEach(function(b) {
+              if (b.total_balance == null) return;
+              var label = 'Balance ' + (b.currency || 'USD');
+              var detail = b.total_balance + ' ' + (b.currency || 'USD');
+              if (b.topped_up_balance && b.topped_up_balance !== '0.00' && b.topped_up_balance !== '0') {
+                detail += ' (topped up ' + b.topped_up_balance + ')';
+              } else if (b.granted_balance && b.granted_balance !== '0.00' && b.granted_balance !== '0') {
+                detail += ' (granted ' + b.granted_balance + ')';
+              }
+              balanceHtml += renderProgressBar(label, detail, 100, 'low');
+            });
+          }
+          if (hasBalanceNote) {
+            balanceHtml += '<div class="muted quota-status">'
+              + escapeHtml(quota.balance_note)
+              + '</div>';
+          }
+          if (balanceHtml) {
+            var tileLabel = hasBalances
+              ? 'Balance'
+              : ('Balance (' + (accountType === 'glm' ? 'api_usage' : accountType || 'account') + ')');
+            bars += '<div class="quota-balance-block">'
+              + '<div class="quota-balance-label">' + escapeHtml(tileLabel) + '</div>'
+              + balanceHtml
+              + '</div>';
+          }
         }
-        if (quota.status_msg && !quota.kinds) {
+        if (quota.status_msg && !quota.kinds && !(hasBalances || hasBalanceNote)) {
           bars += '<div class="muted quota-status">' + escapeHtml(quota.status_msg) + '</div>';
         }
         return bars ? '<div class="card-quota">' + bars + '</div>' : '';
