@@ -114,11 +114,8 @@ pub async fn messages(
     };
     let accounts = super::accounts::candidate_accounts(&state);
     if accounts.is_empty() {
-        return anthropic_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "api_error",
-            "No Claude accounts configured",
-        );
+        let reason = super::accounts::empty_accounts_reason(&state);
+        return anthropic_error(StatusCode::SERVICE_UNAVAILABLE, "api_error", reason);
     }
     let wants_stream = crate::source::wants_stream(&headers, &body);
     let prompt_metrics = crate::prompt_metrics_from_request_value(&raw);
@@ -267,11 +264,8 @@ pub async fn responses(
     let anthropic_body = Bytes::from(serde_json::to_vec(&anthropic_payload).unwrap_or_default());
     let accounts = super::accounts::candidate_accounts(&state);
     if accounts.is_empty() {
-        return openai_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "server_error",
-            "No Claude accounts configured",
-        );
+        let reason = super::accounts::empty_accounts_reason(&state);
+        return openai_error(StatusCode::SERVICE_UNAVAILABLE, "server_error", reason);
     }
     let prompt_metrics = crate::prompt_metrics_from_request_value(&raw);
     let mut last_error: Option<(StatusCode, String)> = None;

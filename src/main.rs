@@ -15098,7 +15098,7 @@ fn provider_name(provider: Provider) -> &'static str {
     }
 }
 
-fn account_router_key(provider: &str, account_key: &str) -> String {
+pub(crate) fn account_router_key(provider: &str, account_key: &str) -> String {
     format!("{}|{}", provider, account_key)
 }
 
@@ -15113,7 +15113,7 @@ pub(crate) fn router_account_eligible(state: &AppState, provider: &str, account_
     )
 }
 
-fn account_runtime_status(
+pub(crate) fn account_runtime_status(
     enabled: bool,
     runtime: &AccountRuntimeState,
     now: std::time::Instant,
@@ -15244,6 +15244,24 @@ fn router_request_finished(
 
 fn apply_router_failure(runtime: &mut AccountRuntimeState, message: &str, now: std::time::Instant) {
     let message = message.to_ascii_lowercase();
+    // An upstream per-model denial ("this model requires paid credits", "model not
+    // available on your plan") is NOT a quota/billing hit on the account. It only
+    // affects the specific model and must not poison the rest of the provider's
+    // account pool. Anthropic surfaces these via `error_code="credits_required"`
+    // or a model-level `disabled_reason`, both of which we detect here. Without
+    // this carve-out, one model access denial blacklists every other model for up
+    // to 30 minutes even when each was working a moment ago.
+    let is_model_access_denied = message.contains("\"error_code\":\"credits_required\"")
+        || message.contains("\"error_code\":\"model_access_denied\"")
+        || message.contains("\"error_code\":\"plan_doesnt_include_model\"")
+        || message.contains("disabled_reason\":\"org_level_disabled\"")
+        || message.contains("requires usage credits");
+    if is_model_access_denied {
+        runtime.consecutive_failures = 0;
+        runtime.cooldown_until = None;
+        runtime.probing = false;
+        return;
+    }
     let is_quota = contains_http_status(&message, 429)
         || message.contains("rate limit")
         || message.contains("ratelimit")
@@ -17631,6 +17649,41 @@ mod account_selection_tests {
         let cooldown = runtime.cooldown_until.expect("quota cooldown");
         assert!(cooldown <= now + Duration::from_secs(30 * 60));
         assert!(cooldown > now);
+    }
+
+    #[test]
+    fn claude_fable_credits_required_error_does_not_poison_router() {
+        let now = Instant::now();
+        let mut runtime = AccountRuntimeState::default();
+        // The exact envelope Anthropic returned for the Fable 5 access denial:
+        // HTTP 429 + rate_limit_error + error_code credits_required + a per-model
+        // disabled_reason. Without the carve-out, this hits the 30-minute quota
+        // cooldown and blacklists every other Claude model on the same account.
+        let body = r#"Claude returned 429 Too Many Requests: {"type":"error","error":{"type":"rate_limit_error","message":"Usage credits are required for this model.","details":{"error_code":"credits_required","model_display_name":"Fable 5","disabled_reason":"org_level_disabled","model":"claude-fable-5"}},"request_id":"req_011CdEZoCbk2HhjhmoyPFvAN"}"#;
+        apply_router_failure(&mut runtime, body, now);
+        assert_eq!(runtime.consecutive_failures, 0);
+        assert!(runtime.cooldown_until.is_none());
+        assert!(!runtime.probing);
+    }
+
+    #[test]
+    fn genuine_429_quota_still_triggers_provider_cooldown() {
+        let now = Instant::now();
+        let mut runtime = AccountRuntimeState::default();
+        let body = r#"Claude returned 429: {"type":"error","error":{"type":"rate_limit_error","message":"You have exceeded the usage limit."}}"#;
+        apply_router_failure(&mut runtime, body, now);
+        let cooldown = runtime.cooldown_until.expect("quota cooldown must be set");
+        assert!(cooldown > now + Duration::from_secs(60));
+    }
+
+    #[test]
+    fn plan_doesnt_include_model_does_not_poison_router() {
+        let now = Instant::now();
+        let mut runtime = AccountRuntimeState::default();
+        let body = r#"Claude returned 402 Payment Required: {"type":"error","error":{"type":"billing_error","details":{"error_code":"plan_doesnt_include_model","model":"claude-opus-4-9"}}}"#;
+        apply_router_failure(&mut runtime, body, now);
+        assert_eq!(runtime.consecutive_failures, 0);
+        assert!(runtime.cooldown_until.is_none());
     }
 }
 

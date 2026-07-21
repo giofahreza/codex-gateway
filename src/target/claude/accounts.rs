@@ -239,3 +239,33 @@ pub fn first_enabled(state: &crate::AppState) -> Option<ClaudeAccount> {
         .find(|account| account.enabled)
         .cloned()
 }
+
+/// Classify the reason `candidate_accounts` returned an empty list, so the
+/// caller can surface a precise error instead of the misleading "no accounts
+/// configured" message.
+pub fn empty_accounts_reason(state: &crate::AppState) -> &'static str {
+    let accounts = state.claude_accounts.lock().unwrap();
+    if accounts.is_empty() {
+        return "No Claude accounts configured";
+    }
+    if !accounts.iter().any(|account| account.enabled) {
+        return "All Claude accounts are disabled";
+    }
+    let now = std::time::Instant::now();
+    let mut in_cooldown = 0usize;
+    for account in accounts.iter().filter(|account| account.enabled) {
+        let key = crate::account_router_key("claude", &crate::claude_stats_key(account));
+        let mut router = state.account_router.lock().unwrap();
+        let runtime = router.entry(key).or_default();
+        if matches!(
+            crate::account_runtime_status(true, runtime, now),
+            crate::AccountRuntimeStatus::Cooldown
+        ) {
+            in_cooldown += 1;
+        }
+    }
+    if in_cooldown == accounts.len() {
+        return "All Claude accounts are temporarily in cooldown";
+    }
+    "No eligible Claude accounts (all disabled or cooling down)"
+}
