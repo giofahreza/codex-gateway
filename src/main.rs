@@ -1266,6 +1266,15 @@ async fn dashboard() -> impl IntoResponse {
         background: var(--surface);
         box-shadow: var(--shadow);
       }
+      .provider-menu-title {
+        display: none;
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
       .provider-menu-item {
         display: block;
         width: 100%;
@@ -1369,11 +1378,12 @@ async fn dashboard() -> impl IntoResponse {
         font-weight: 700;
       }
       .settings-tabs {
-        display: flex;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 8px;
         margin: 10px 0 14px 0;
         border-bottom: 1px solid var(--border);
-        overflow-x: auto;
+        overflow: visible;
       }
       .settings-tab {
         border: 0;
@@ -1381,8 +1391,10 @@ async fn dashboard() -> impl IntoResponse {
         border-radius: 0;
         background: transparent;
         color: var(--muted);
+        min-width: 0;
         padding: 9px 10px;
-        white-space: nowrap;
+        white-space: normal;
+        overflow-wrap: anywhere;
       }
       .settings-tab:hover {
         background: var(--surface-alt);
@@ -1430,20 +1442,28 @@ async fn dashboard() -> impl IntoResponse {
         display: grid;
         gap: 6px;
         margin-top: 8px;
-        padding-left: 22px;
       }
       .api-key-access-account {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
         min-width: 0;
         align-items: flex-start;
       }
+      .account-choice-text,
       .api-key-access-account span {
         min-width: 0;
         overflow-wrap: anywhere;
       }
+      .account-choice-title {
+        display: block;
+        color: var(--text);
+      }
+      .account-choice-meta,
       .api-key-access-account small {
         display: block;
         color: var(--muted);
         font-weight: 400;
+        line-height: 1.35;
       }
       .api-key-access-summary {
         color: var(--text);
@@ -1556,12 +1576,15 @@ async fn dashboard() -> impl IntoResponse {
         justify-content: flex-end;
       }
       .notification-account-row {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 8px;
-        align-items: center;
+        display: block;
         padding: 8px;
         border-bottom: 1px solid var(--border);
+      }
+      .notification-account-row .check-row {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        align-items: flex-start;
+        width: 100%;
       }
       .notification-account-row:last-child {
         border-bottom: 0;
@@ -1663,6 +1686,7 @@ async fn dashboard() -> impl IntoResponse {
         z-index: 1100;
       }
       .modal-card {
+        position: relative;
         background: var(--surface);
         max-width: 720px;
         margin: 8% auto;
@@ -1672,6 +1696,33 @@ async fn dashboard() -> impl IntoResponse {
         overflow: auto;
         border: 1px solid var(--border);
         box-shadow: var(--shadow);
+      }
+      .modal-close-button {
+        position: sticky;
+        top: 0;
+        float: right;
+        z-index: 5;
+        min-width: 42px;
+        width: 42px;
+        min-height: 42px;
+        margin: -6px -6px 4px 8px;
+        padding: 0;
+        border-radius: 8px;
+        background: var(--surface-alt);
+        color: var(--text);
+        font-size: 24px;
+        line-height: 1;
+      }
+      .modal-card > .modal-actions:last-child,
+      .modal-card form > .modal-actions:last-child {
+        position: sticky;
+        bottom: -16px;
+        z-index: 4;
+        margin-right: -16px;
+        margin-left: -16px;
+        padding: 10px 16px 2px;
+        border-top: 1px solid var(--border);
+        background: var(--surface);
       }
       .auth-url {
         display: none;
@@ -1761,8 +1812,26 @@ async fn dashboard() -> impl IntoResponse {
         line-height: 1.2;
       }
       .chart-toggle-hint {
+        display: inline-flex;
+        width: 12px;
+        height: 12px;
+        flex: 0 0 auto;
+        align-items: center;
+        justify-content: center;
         color: var(--muted);
-        font-size: 12px;
+      }
+      .chart-toggle-hint::before {
+        content: "";
+        display: block;
+        width: 7px;
+        height: 7px;
+        border-right: 2px solid currentColor;
+        border-bottom: 2px solid currentColor;
+        transform: rotate(45deg);
+        transition: transform 0.16s ease;
+      }
+      .chart-section:not([open]) .chart-toggle-hint::before {
+        transform: rotate(-45deg);
       }
       .chart-summary {
         color: var(--muted);
@@ -2394,6 +2463,17 @@ async fn dashboard() -> impl IntoResponse {
         font-size: 12px;
         overflow-wrap: anywhere;
       }
+      .reset-credit-id-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-top: 6px;
+      }
+      .reset-credit-id-row code {
+        max-width: 100%;
+        overflow-wrap: anywhere;
+      }
       .reset-credit-empty {
         margin-top: 6px;
       }
@@ -2633,6 +2713,37 @@ async fn dashboard() -> impl IntoResponse {
         overflow-wrap: anywhere;
         word-break: break-word;
       }
+      .meta-raw-details {
+        min-width: 0;
+        padding: 6px 0;
+      }
+      .meta-raw-details summary {
+        cursor: pointer;
+        color: var(--secondary-text);
+        font-weight: 700;
+      }
+      .meta-raw-preview {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted);
+        font-weight: 400;
+        overflow-wrap: anywhere;
+      }
+      .meta-raw-block {
+        margin: 6px 0 0 0;
+        max-height: 220px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        padding: 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-alt);
+        color: var(--text);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        line-height: 1.45;
+      }
       .provider-section {
         min-width: 0;
       }
@@ -2795,6 +2906,9 @@ async fn dashboard() -> impl IntoResponse {
       .toast.error {
         border-color: rgba(239, 68, 68, 0.42);
       }
+      .toast.success {
+        border-color: rgba(34, 197, 94, 0.42);
+      }
       .confirm-modal-card {
         max-width: 460px;
       }
@@ -2895,7 +3009,29 @@ async fn dashboard() -> impl IntoResponse {
         .provider-menu {
           left: 0;
           right: auto;
-          width: min(100%, 260px);
+          width: 100%;
+        }
+        .provider-menu-title {
+          display: block;
+        }
+        .settings-tabs {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 4px;
+          border-bottom: 0;
+        }
+        .settings-tab {
+          min-height: 44px;
+          padding: 8px 6px;
+          border: 1px solid var(--border);
+          border-radius: 8px;
+          background: var(--surface-alt);
+          font-size: 14px;
+          line-height: 1.2;
+          text-align: center;
+        }
+        .settings-tab.is-active {
+          border-color: var(--accent);
+          background: var(--surface);
         }
         .provider-settings-row {
           grid-template-columns: 1fr;
@@ -2918,7 +3054,6 @@ async fn dashboard() -> impl IntoResponse {
         }
         .notification-channel-grid,
         .notification-provider-head,
-        .notification-account-row,
         .custom-model-account-row {
           grid-template-columns: 1fr;
         }
@@ -2983,6 +3118,21 @@ async fn dashboard() -> impl IntoResponse {
           margin: 0 auto;
           max-height: calc(100vh - 24px);
         }
+        .modal-close-button {
+          top: -6px;
+        }
+        .modal-card > .modal-actions:last-child,
+        .modal-card form > .modal-actions:last-child {
+          align-items: stretch;
+          flex-wrap: nowrap;
+        }
+        .modal-card > .modal-actions:last-child > button,
+        .modal-card form > .modal-actions:last-child > button {
+          flex: 1 1 0;
+          min-width: 0;
+          padding-right: 8px;
+          padding-left: 8px;
+        }
         .toast {
           right: 12px;
           bottom: 12px;
@@ -3032,6 +3182,7 @@ async fn dashboard() -> impl IntoResponse {
           <div class="provider-menu-wrap">
             <button type="button" id="addProviderBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="providerMenu">+ Add account</button>
             <div id="providerMenu" class="provider-menu" role="menu" hidden>
+              <div class="provider-menu-title" role="presentation">Choose provider</div>
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="codex">Codex (ChatGPT)</button>
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="antigravity">Antigravity (Google)</button>
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="gemini">Gemini (Google)</button>
@@ -3075,7 +3226,7 @@ async fn dashboard() -> impl IntoResponse {
           <span class="chart-title-row">
             <h2 id="contextChartTitle">Context Usage (24h)</h2>
             <span id="contextUsageSummary" class="chart-summary">Loading usage...</span>
-            <span class="chart-toggle-hint">toggle</span>
+            <span class="chart-toggle-hint" aria-hidden="true"></span>
           </span>
           <div class="chart-legend" id="chartLegend"></div>
         </summary>
@@ -3332,14 +3483,22 @@ async fn dashboard() -> impl IntoResponse {
         }
       };
       const providerLabels = {
+        cod: 'Codex',
         codex: 'Codex',
         agw: 'Antigravity',
+        gem: 'Gemini',
         gemini: 'Gemini',
+        qwn: 'Qwen',
         qwen: 'Qwen',
+        dsk: 'DeepSeek',
         deepseek: 'DeepSeek',
+        min: 'MiniMax',
         minimax: 'MiniMax',
+        grk: 'Grok',
         grok: 'Grok',
+        cop: 'GitHub Copilot',
         copilot: 'GitHub Copilot',
+        cld: 'Claude',
         claude: 'Claude',
         glm: 'GLM (Z.AI)'
       };
@@ -3538,14 +3697,21 @@ async fn dashboard() -> impl IntoResponse {
           : tab === 'api-keys'
             ? 'api-keys'
             : 'dashboard';
+        var activeButton = null;
         document.querySelectorAll('[data-settings-tab]').forEach(function(button) {
           var active = button.getAttribute('data-settings-tab') === target;
           button.classList.toggle('is-active', active);
           button.setAttribute('aria-selected', active ? 'true' : 'false');
+          if (active) activeButton = button;
         });
         document.querySelectorAll('[data-settings-panel]').forEach(function(panel) {
           panel.hidden = panel.getAttribute('data-settings-panel') !== target;
         });
+        if (activeButton && activeButton.scrollIntoView) {
+          setTimeout(function() {
+            activeButton.scrollIntoView({ block: 'nearest', inline: 'center' });
+          }, 0);
+        }
       }
       async function loadNotificationSettings() {
         setText('notificationStatus', 'Loading notification settings...');
@@ -3635,10 +3801,11 @@ async fn dashboard() -> impl IntoResponse {
             return '<div class="notification-account-row' + disabledClass + '" data-notification-provider="' + escapeHtml(provider) + '">'
               + '<label class="check-row">'
               + '<input type="checkbox" data-notification-account value="' + escapeHtml(key) + '" onchange="toggleNotificationAccount(' + keyArg + ', this.checked)"' + checked + '> '
-              + '<span>' + escapeHtml(title) + '</span>'
-              + (meta ? '<span class="notification-account-meta">' + escapeHtml(meta) + '</span>' : '')
+              + '<span class="account-choice-text">'
+              + '<span class="account-choice-title">' + escapeHtml(title) + '</span>'
+              + (meta ? '<span class="notification-account-meta account-choice-meta" title="' + escapeHtml(meta) + '">' + escapeHtml(compactMiddle(meta, 72)) + '</span>' : '')
+              + '</span>'
               + '</label>'
-              + '<span class="provider-settings-key"><code>' + escapeHtml(provider) + '</code></span>'
               + '</div>';
           }).join('');
           return '<div class="notification-provider-group">'
@@ -3793,14 +3960,17 @@ async fn dashboard() -> impl IntoResponse {
             return '<label class="check-row api-key-access-account">'
               + '<input type="checkbox" data-api-key-access-account data-provider="' + providerValue + '" value="' + escapeHtml(key) + '"'
               + (allowed.has(key) ? ' checked' : '') + (allAccounts ? ' disabled' : '') + '> '
-              + '<span>' + escapeHtml(title) + (meta ? '<small>' + escapeHtml(meta) + '</small>' : '') + '</span>'
+              + '<span class="account-choice-text">'
+              + '<span class="account-choice-title">' + escapeHtml(title) + '</span>'
+              + (meta ? '<small title="' + escapeHtml(meta) + '">' + escapeHtml(compactMiddle(meta, 72)) + '</small>' : '')
+              + '</span>'
               + '</label>';
           }).join('');
           if (rule && rule.accounts.length) {
             items += rule.accounts.filter(function(key) { return !seenKeys.has(key); }).map(function(key) {
               return '<label class="check-row api-key-access-account">'
                 + '<input type="checkbox" data-api-key-access-account data-provider="' + providerValue + '" value="' + escapeHtml(key) + '" checked> '
-                + '<span>Unavailable account<small>' + escapeHtml(key) + '</small></span>'
+                + '<span class="account-choice-text"><span class="account-choice-title">Unavailable account</span><small title="' + escapeHtml(key) + '">' + escapeHtml(compactMiddle(key, 72)) + '</small></span>'
                 + '</label>';
             }).join('');
           }
@@ -4019,6 +4189,27 @@ async fn dashboard() -> impl IntoResponse {
       function setText(id, value) {
         const el = document.getElementById(id);
         if (el) el.textContent = value;
+      }
+      function compactMiddle(value, maxLength) {
+        var text = String(value || '');
+        var limit = Math.max(12, Number(maxLength) || 24);
+        if (text.length <= limit) return text;
+        var keep = Math.max(4, Math.floor((limit - 3) / 2));
+        return text.slice(0, keep) + '...' + text.slice(text.length - keep);
+      }
+      function previewText(value, maxLength) {
+        var text = String(value || '').replace(/\s+/g, ' ').trim();
+        var limit = Math.max(24, Number(maxLength) || 120);
+        return text.length > limit ? text.slice(0, limit - 1).trimEnd() + '...' : text;
+      }
+      async function copyTextToClipboard(value, successMessage) {
+        if (!value) return;
+        try {
+          await navigator.clipboard.writeText(String(value));
+          notify(successMessage || 'Copied', 'success');
+        } catch (_) {
+          notify('Copy failed. Use manual copy.', 'error');
+        }
       }
       function accountLabel(a) {
         return (a && (a.name || a.label || a.email || a.account_id)) || 'Account';
@@ -4241,15 +4432,17 @@ async fn dashboard() -> impl IntoResponse {
           : 'No accounts loaded yet');
         applyProviderRowArrangement();
       }
-      function notify(message, tone) {
+      function notify(message, tone, timeoutMs) {
         const toast = document.getElementById('toast');
         if (!toast) return;
         toast.textContent = message || '';
-        toast.className = 'toast show' + (tone === 'error' ? ' error' : '');
+        toast.className = 'toast show'
+          + (tone === 'error' ? ' error' : '')
+          + (tone === 'success' ? ' success' : '');
         clearTimeout(notify.timer);
         notify.timer = setTimeout(function() {
           toast.className = 'toast';
-        }, 3200);
+        }, Number(timeoutMs) || 4200);
       }
       function refreshCredentialViews() {
         invalidateDashboardSnapshot();
@@ -4389,6 +4582,21 @@ async fn dashboard() -> impl IntoResponse {
         const gate = document.getElementById('adminLoginGate');
         return !!gate && gate.style.display !== 'none';
       }
+      function ensureModalCloseButton(id) {
+        if (id === 'confirmActionModal') return;
+        const modal = document.getElementById(id);
+        const card = modal ? modal.querySelector('.modal-card') : null;
+        if (!card || card.querySelector('.modal-close-button')) return;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'modal-close-button secondary-button';
+        button.setAttribute('aria-label', 'Close dialog');
+        button.textContent = '\u00d7';
+        button.addEventListener('click', function() {
+          closeModal(id);
+        });
+        card.insertBefore(button, card.firstChild);
+      }
       function openModal(id) {
         closeProviderMenu();
         modalIds.forEach(function(modalId) {
@@ -4396,11 +4604,12 @@ async fn dashboard() -> impl IntoResponse {
         });
         const modal = document.getElementById(id);
         if (!modal) return;
+        ensureModalCloseButton(id);
         modal.style.display = 'block';
         modal.setAttribute('aria-hidden', 'false');
         setDashboardInactive(true);
         setTimeout(function() {
-          const focusTarget = modal.querySelector('input, textarea, button, [tabindex]:not([tabindex="-1"])');
+          const focusTarget = modal.querySelector('input, textarea, select, button:not(.modal-close-button), [tabindex]:not([tabindex="-1"])');
           if (focusTarget) focusTarget.focus();
         }, 0);
       }
@@ -4626,6 +4835,11 @@ async fn dashboard() -> impl IntoResponse {
         function fmtQ(b, fallback) {
           return b && b.used_percent != null ? b.used_percent.toFixed(1) + '% ' + (b.reset_label || '') : (fallback || '...');
         }
+        function resetHint(label) {
+          var value = String(label || '').trim();
+          if (!value || value === '\u2014') return 'resets in \u2014';
+          return /^resets?\s+in\b/i.test(value) ? value : ('resets in ' + value);
+        }
         function pctValue(value) {
           var pct = Number(value);
           if (!Number.isFinite(pct)) return 0;
@@ -4815,14 +5029,14 @@ async fn dashboard() -> impl IntoResponse {
           var cw = quota.current_window;
           var cwPct = cw.used_percent != null ? cw.used_percent : 0;
           var cwHint = (cw.used_percent != null ? cw.used_percent.toFixed(1) + '%' : '\u2014')
-            + ' used \u00b7 resets in ' + (cw.reset_label || '\u2014');
+            + ' used \u00b7 ' + resetHint(cw.reset_label);
           bars += renderProgressBar('5h window', cwHint, cwPct);
         }
         if (quota.weekly) {
           var wk = quota.weekly;
           var wkPct = wk.used_percent != null ? wk.used_percent : 0;
           var wkHint = (wk.used_percent != null ? wk.used_percent.toFixed(1) + '%' : '\u2014')
-            + ' used \u00b7 resets in ' + (wk.reset_label || '\u2014');
+            + ' used \u00b7 ' + resetHint(wk.reset_label);
           bars += renderProgressBar('Weekly window', wkHint, wkPct);
         }
         // Balance tile: providers expose a balances list when they have a
@@ -4910,9 +5124,16 @@ async fn dashboard() -> impl IntoResponse {
         html += credits.map(function(credit) {
           var title = resetCreditDisplayName(credit);
           var expiry = formatResetCreditExpiry(credit);
-          var meta = expiry + (credit.id ? ' | ' + credit.id : '');
+          var id = String(credit.id || '');
+          var idArg = escapeHtml(jsString(id));
+          var idHtml = id
+            ? '<div class="reset-credit-id-row">'
+              + '<code title="' + escapeHtml(id) + '">' + escapeHtml(compactMiddle(id, 34)) + '</code>'
+              + '<button type="button" class="mini-btn secondary-button" onclick="copyTextToClipboard(' + idArg + ', \'Reset credit ID copied\')">Copy ID</button>'
+              + '</div>'
+            : '';
           return '<div class="reset-credit-item">'
-            + '<div class="reset-credit-main"><div class="reset-credit-title">' + escapeHtml(title) + '</div><div class="reset-credit-meta">' + escapeHtml(meta) + '</div></div>'
+            + '<div class="reset-credit-main"><div class="reset-credit-title">' + escapeHtml(title) + '</div><div class="reset-credit-meta">' + escapeHtml(expiry) + '</div>' + idHtml + '</div>'
             + '<button type="button" class="mini-btn secondary-button" onclick="redeemCodexReset(' + fileArg + ', ' + labelArg + ', ' + accountArg + ', ' + escapeHtml(jsString(credit.id || '')) + ', ' + escapeHtml(jsString(title)) + ')">Reset limit</button>'
             + '</div>';
         }).join('');
@@ -5068,6 +5289,14 @@ async fn dashboard() -> impl IntoResponse {
           + (code ? '<code>' + escapeHtml(value) + '</code>' : escapeHtml(value))
           + '</div>';
       }
+      function renderLongMetaLine(label, value) {
+        if (value == null || value === '') return '';
+        var text = String(value);
+        return '<details class="meta-raw-details">'
+          + '<summary>' + escapeHtml(label) + '<span class="meta-raw-preview">' + escapeHtml(previewText(text, 120)) + '</span></summary>'
+          + '<pre class="meta-raw-block">' + escapeHtml(text) + '</pre>'
+          + '</details>';
+      }
       function firstPresent(object, keys) {
         if (!object) return '';
         for (var i = 0; i < keys.length; i++) {
@@ -5096,7 +5325,7 @@ async fn dashboard() -> impl IntoResponse {
         rows.push(renderMetaLine('copilot token expiry', firstPresent(a, ['copilot_expires_at']), false));
         rows.push(renderMetaLine('last success', firstPresent(a, ['last_success_at']), false));
         rows.push(renderMetaLine('last error', firstPresent(a, ['last_error_at']), false));
-        rows.push(renderMetaLine('last error detail', firstPresent(a, ['last_error_message']), false));
+        rows.push(renderLongMetaLine('last error detail', firstPresent(a, ['last_error_message'])));
         rows.push(renderMetaLine('user id', firstPresent(a, ['user_id']), true));
         rows.push(renderMetaLine('team id', a && a.team_id ? a.team_id + (a.team_blocked ? ' (blocked)' : '') : '', true));
         rows.push(renderMetaLine('zdr', firstPresent(a, ['zdr_status']), true));
@@ -6882,9 +7111,9 @@ async fn dashboard() -> impl IntoResponse {
         <p class="muted" style="margin-top:12px;">Direct fallback: open <code>chat.qwen.ai</code>, copy <code>localStorage.token</code> from the browser console, and paste it here.</p>
         <label for="qwenTokenInput" style="margin-top:12px;">Browser Token</label>
         <textarea id="qwenTokenInput" rows="6" placeholder="Paste chat.qwen.ai token here"></textarea>
-        <button onclick="submitQwenToken()" style="margin-top:12px;">Save Token</button>
         <div id="qwenStatus" class="muted" style="margin-top:8px;"></div>
         <div class="modal-actions" style="margin-top:16px;">
+          <button type="button" onclick="submitQwenToken()">Save Token</button>
           <button type="button" id="closeQwenModalBtn" class="secondary-button">Close</button>
         </div>
       </div>
@@ -6902,9 +7131,9 @@ async fn dashboard() -> impl IntoResponse {
         <input id="deepseekLabelInput" placeholder="optional label">
         <label for="deepseekBaseUrlInput" style="margin-top:12px;">Base URL</label>
         <input id="deepseekBaseUrlInput" placeholder="https://api.deepseek.com">
-        <button onclick="submitDeepSeekKey()" style="margin-top:12px;">Save Key</button>
         <div id="deepseekStatus" class="muted" style="margin-top:8px;"></div>
         <div class="modal-actions" style="margin-top:16px;">
+          <button type="button" onclick="submitDeepSeekKey()">Save Key</button>
           <button type="button" id="closeDeepSeekModalBtn" class="secondary-button">Close</button>
         </div>
       </div>
@@ -6922,9 +7151,9 @@ async fn dashboard() -> impl IntoResponse {
         <input id="minimaxLabelInput" placeholder="optional label">
         <label for="minimaxBaseUrlInput" style="margin-top:12px;">Base URL</label>
         <input id="minimaxBaseUrlInput" placeholder="https://api.minimax.io">
-        <button onclick="submitMiniMaxKey()" style="margin-top:12px;">Save Key</button>
         <div id="minimaxStatus" class="muted" style="margin-top:8px;"></div>
         <div class="modal-actions" style="margin-top:16px;">
+          <button type="button" onclick="submitMiniMaxKey()">Save Key</button>
           <button type="button" id="closeMiniMaxModalBtn" class="secondary-button">Close</button>
         </div>
       </div>
@@ -6950,9 +7179,9 @@ async fn dashboard() -> impl IntoResponse {
         <input id="glmOpenAiBaseUrlInput" placeholder="API usage: https://api.z.ai/api/paas/v4">
         <label for="glmAnthropicBaseUrlInput" style="margin-top:12px;">Claude Code Base URL</label>
         <input id="glmAnthropicBaseUrlInput" placeholder="Subscription only: https://api.z.ai/api/anthropic">
-        <button onclick="submitGlmKey()" style="margin-top:12px;">Save Key</button>
         <div id="glmStatus" class="muted" style="margin-top:8px;"></div>
         <div class="modal-actions" style="margin-top:16px;">
+          <button type="button" onclick="submitGlmKey()">Save Key</button>
           <button type="button" id="closeGlmModalBtn" class="secondary-button">Close</button>
         </div>
       </div>
@@ -6999,8 +7228,8 @@ async fn dashboard() -> impl IntoResponse {
         <p class="muted" style="margin-top:16px;">Direct fallback: paste a GitHub token that can fetch <code>/copilot_internal/v2/token</code>.</p>
         <label for="copilotTokenInput" style="margin-top:12px;">GitHub Token</label>
         <textarea id="copilotTokenInput" rows="5" placeholder="Paste GitHub token here"></textarea>
-        <button type="button" onclick="submitCopilotToken()" style="margin-top:12px;">Save Token</button>
         <div class="modal-actions" style="margin-top:16px;">
+          <button type="button" onclick="submitCopilotToken()">Save Token</button>
           <button type="button" id="closeCopilotModalBtn" class="secondary-button">Close</button>
         </div>
       </div>
@@ -7029,14 +7258,14 @@ async fn dashboard() -> impl IntoResponse {
         <p class="muted" style="margin-top:16px;">Cookie fallback: paste a Claude.ai browser cookie if the browser OAuth flow is unavailable.</p>
         <label for="claudeCookieInput" style="margin-top:12px;">Claude.ai Cookie</label>
         <textarea id="claudeCookieInput" rows="5" placeholder="Paste Claude.ai browser cookie here"></textarea>
-        <button type="button" onclick="submitClaudeCookie()" style="margin-top:12px;">Save Cookie</button>
         <p class="muted" style="margin-top:16px;">Direct fallback: paste Anthropic OAuth tokens from a trusted local Claude login.</p>
         <label for="claudeAccessTokenInput" style="margin-top:12px;">Access Token</label>
         <textarea id="claudeAccessTokenInput" rows="4" placeholder="OAuth access token"></textarea>
         <label for="claudeRefreshTokenInput" style="margin-top:12px;">Refresh Token</label>
         <textarea id="claudeRefreshTokenInput" rows="3" placeholder="optional refresh token"></textarea>
-        <button type="button" onclick="submitClaudeToken()" style="margin-top:12px;">Save Token</button>
         <div class="modal-actions" style="margin-top:16px;">
+          <button type="button" onclick="submitClaudeCookie()">Save Cookie</button>
+          <button type="button" onclick="submitClaudeToken()">Save Token</button>
           <button type="button" id="closeClaudeModalBtn" class="secondary-button">Close</button>
         </div>
       </div>
@@ -7235,6 +7464,7 @@ async fn dashboard() -> impl IntoResponse {
       document.querySelectorAll('.provider-menu-item').forEach(function(item) {
         item.addEventListener('click', function() {
           closeProviderMenu();
+          setMobileNavOpen(false);
           var provider = item.getAttribute('data-provider');
           if (provider === 'codex') openModal('addModal');
           else if (provider === 'antigravity') openModal('addAgwModal');
@@ -8043,21 +8273,26 @@ async fn dashboard() -> impl IntoResponse {
         var body = new URLSearchParams();
         if (provider) body.set('provider', provider);
         if (fileName) body.set('file_name', fileName);
-        notify('Refreshing models and quota...');
-        const res = await adminFetch('/models/refresh', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded'
-          },
-          body: body
-        });
-        if (!res) return;
-        const data = await res.json();
-        notify(data.message || 'Models and quota refreshed', data.ok === false ? 'error' : '');
-        invalidateDashboardSnapshot();
-        const snapshot = await refreshDashboardSnapshot(true);
-        if (snapshot) renderDashboardSnapshot();
-        refreshCustomModels();
+        var target = provider ? (providerLabels[provider] || provider) : 'all providers';
+        notify('Refreshing ' + target + ' models and quota...', '', 8000);
+        try {
+          const res = await adminFetch('/models/refresh', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            body: body
+          });
+          if (!res) return;
+          const data = await res.json();
+          notify(data.message || (target + ' models and quota refreshed'), data.ok === false ? 'error' : 'success', 5200);
+          invalidateDashboardSnapshot();
+          const snapshot = await refreshDashboardSnapshot(true);
+          if (snapshot) renderDashboardSnapshot();
+          refreshCustomModels();
+        } catch (err) {
+          notify('Refresh failed: ' + (err && err.message ? err.message : err), 'error', 7000);
+        }
       }
       function redeemCodexReset(fileName, label, accountId, creditId, creditTitle) {
         var display = label || accountId || fileName || 'this Codex account';
@@ -8816,12 +9051,13 @@ async fn model_catalog_refresh_route(
     let quota_count =
         refresh_quota_snapshots_now(&state, provider, form.file_name.as_deref()).await;
     let provider_label = provider.unwrap_or("all");
+    let provider_display_label = model_catalog_provider_display_label(provider);
     let message = if outcome.started {
-        format!("Models and quota refreshed for {}", provider_label)
+        format!("Models and quota refreshed for {}", provider_display_label)
     } else {
         format!(
             "Model catalog refresh already running; quota refreshed for {}",
-            provider_label
+            provider_display_label
         )
     };
 
@@ -8833,6 +9069,23 @@ async fn model_catalog_refresh_route(
         "message": message
     }))
     .into_response()
+}
+
+fn model_catalog_provider_display_label(provider: Option<&str>) -> &'static str {
+    match provider {
+        Some("cod") => "Codex",
+        Some("agw") => "Antigravity",
+        Some("gem") => "Gemini",
+        Some("qwn") => "Qwen",
+        Some("dsk") => "DeepSeek",
+        Some("min") => "MiniMax",
+        Some("grk") => "Grok",
+        Some("cop") => "GitHub Copilot",
+        Some("cld") => "Claude",
+        Some("glm") => "GLM (Z.AI)",
+        Some(_) => "selected provider",
+        None => "all providers",
+    }
 }
 
 fn internal_proxy_api_headers(state: &AppState) -> HeaderMap {
