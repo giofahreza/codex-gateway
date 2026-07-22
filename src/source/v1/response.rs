@@ -185,7 +185,7 @@ fn map_model_for_openai(model: &serde_json::Value) -> Option<serde_json::Value> 
     }))
 }
 
-fn status_to_error_type(status: StatusCode) -> &'static str {
+pub(crate) fn status_to_error_type(status: StatusCode) -> &'static str {
     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
         "authentication_error"
     } else if status == StatusCode::TOO_MANY_REQUESTS {
@@ -197,7 +197,7 @@ fn status_to_error_type(status: StatusCode) -> &'static str {
     }
 }
 
-fn status_to_error_code(status: StatusCode) -> Option<&'static str> {
+pub(crate) fn status_to_error_code(status: StatusCode) -> Option<&'static str> {
     if status == StatusCode::NOT_FOUND {
         Some("not_found")
     } else if status == StatusCode::TOO_MANY_REQUESTS {

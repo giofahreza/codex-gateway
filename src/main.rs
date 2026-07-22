@@ -32,7 +32,7 @@ mod target;
 mod usage_store;
 use source::v1::response::{
     model_retrieve_to_openai_json, models_list_to_openai_json, openai_error_body,
-    sse_to_response_json, upstream_error_to_openai,
+    sse_to_response_json, status_to_error_code, status_to_error_type, upstream_error_to_openai,
 };
 use source::{route_request, ResponseMode, TargetModel};
 use stats_store::{Provider, StatsStore};
@@ -10993,23 +10993,11 @@ async fn proxy(
     };
     let token_candidates = candidate_tokens_with_reservation(&state, true);
     if token_candidates.is_empty() {
-        return if matches!(source_api, SourceApi::V1) {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [(
-                    axum::http::header::CONTENT_TYPE.as_str(),
-                    "application/json",
-                )],
-                openai_error_body("No upstream credentials configured", "server_error", None),
-            )
-                .into_response()
-        } else {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "no upstream tokens configured",
-            )
-                .into_response()
-        };
+        return codex_error_response(
+            source_api,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "No eligible Codex credentials configured or enabled for this API key",
+        );
     }
     let request_value: Option<serde_json::Value> =
         serde_json::from_slice(&routed.upstream_body).ok();
@@ -11155,12 +11143,8 @@ async fn proxy(
                 if affects_account_health && attempt_idx + 1 < token_candidates.len() {
                     continue;
                 }
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    [("Content-Type", "application/json")],
-                    openai_error_body(&message, "server_error", None),
-                )
-                    .into_response();
+                let status = codex_error_status_from_message(&message, StatusCode::BAD_GATEWAY);
+                return codex_error_response(source_api, status, message);
             }
             let metrics = usage_metrics_from_sse_response_body(&body_bytes).unwrap_or_default();
             record_usage_success(&state, &codex_context, &metrics);
@@ -11196,6 +11180,7 @@ async fn proxy(
                     );
                 }
                 Err(message) => {
+                    let status = codex_error_status_from_message(&message, StatusCode::BAD_GATEWAY);
                     let affects_account_health = codex_error_affects_account_health(&message);
                     record_codex_error_with_health(
                         &state,
@@ -11207,16 +11192,7 @@ async fn proxy(
                     if affects_account_health && attempt_idx + 1 < token_candidates.len() {
                         continue;
                     }
-                    return if matches!(source_api, SourceApi::V1) {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            [("Content-Type", "application/json")],
-                            openai_error_body(&message, "server_error", None),
-                        )
-                            .into_response()
-                    } else {
-                        (StatusCode::BAD_GATEWAY, message).into_response()
-                    };
+                    return codex_error_response(source_api, status, message);
                 }
             }
         }
@@ -11226,33 +11202,18 @@ async fn proxy(
     }
 
     let Some((resp, codex_context)) = selected_response else {
-        let (_status, message) = last_error.unwrap_or_else(|| {
+        let (status, message) = last_error.unwrap_or_else(|| {
             (
                 StatusCode::BAD_GATEWAY,
                 "All Codex accounts failed".to_string(),
             )
         });
-        return if matches!(source_api, SourceApi::V1) {
-            (
-                StatusCode::BAD_GATEWAY,
-                [(
-                    axum::http::header::CONTENT_TYPE.as_str(),
-                    "application/json",
-                )],
-                openai_error_body(
-                    &format!("All Codex accounts failed; last error: {}", message),
-                    "server_error",
-                    None,
-                ),
-            )
-                .into_response()
-        } else {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("all upstream tokens failed; last error: {}", message),
-            )
-                .into_response()
-        };
+        let status = codex_error_status_from_message(&message, status);
+        return codex_error_response(
+            source_api,
+            status,
+            format!("All Codex accounts failed; last error: {}", message),
+        );
     };
 
     let status = resp.status();
@@ -11321,6 +11282,7 @@ async fn proxy(
             }
         };
         if let Some(message) = sse_error_message(&body_bytes) {
+            let status = codex_error_status_from_message(&message, StatusCode::BAD_GATEWAY);
             let affects_account_health = codex_error_affects_account_health(&message);
             record_codex_error_with_health(
                 &state,
@@ -11328,12 +11290,7 @@ async fn proxy(
                 &message,
                 affects_account_health,
             );
-            return (
-                StatusCode::BAD_GATEWAY,
-                [("Content-Type", "application/json")],
-                openai_error_body(&message, "server_error", None),
-            )
-                .into_response();
+            return codex_error_response(source_api, status, message);
         }
         let metrics = usage_metrics_from_sse_response_body(&body_bytes).unwrap_or_default();
         record_usage_success(&state, &codex_context, &metrics);
@@ -12971,6 +12928,7 @@ async fn dispatch_codex_custom_target(
                 .unwrap_or(false);
             if is_sse {
                 if let Some(message) = sse_error_message(&body_bytes) {
+                    let status = codex_error_status_from_message(&message, StatusCode::BAD_GATEWAY);
                     let affects_account_health = codex_error_affects_account_health(&message);
                     record_codex_error_with_health(
                         &state,
@@ -12985,7 +12943,20 @@ async fn dispatch_codex_custom_target(
                         last_error = Some((StatusCode::TOO_MANY_REQUESTS, message));
                         continue;
                     }
-                    return (StatusCode::BAD_GATEWAY, out_headers, body_bytes).into_response();
+                    out_headers.insert(
+                        axum::http::header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    );
+                    return (
+                        status,
+                        out_headers,
+                        openai_error_body(
+                            &message,
+                            status_to_error_type(status),
+                            status_to_error_code(status),
+                        ),
+                    )
+                        .into_response();
                 }
                 if let Some(metrics) = usage_metrics_from_sse_response_body(&body_bytes) {
                     record_usage_success(&state, &context, &metrics);
@@ -13023,19 +12994,20 @@ async fn dispatch_codex_custom_target(
         }
     }
 
-    let (_status, message) = last_error.unwrap_or_else(|| {
+    let (status, message) = last_error.unwrap_or_else(|| {
         (
             StatusCode::BAD_GATEWAY,
             "All Codex accounts failed".to_string(),
         )
     });
+    let status = codex_error_status_from_message(&message, status);
     (
-        StatusCode::BAD_GATEWAY,
+        status,
         [("Content-Type", "application/json")],
         openai_error_body(
             &format!("All Codex accounts failed; last error: {}", message),
-            "server_error",
-            None,
+            status_to_error_type(status),
+            status_to_error_code(status),
         ),
     )
         .into_response()
@@ -13053,6 +13025,77 @@ fn upstream_failure_message(status: StatusCode, retry_after: Option<&str>, body:
         format!("upstream status {}{}", status, retry_hint)
     } else {
         format!("upstream status {}{}: {}", status, retry_hint, body)
+    }
+}
+
+fn codex_error_status_from_message(message: &str, fallback: StatusCode) -> StatusCode {
+    let lower = message.to_ascii_lowercase();
+    for status in [400, 401, 403, 408, 409, 429, 500, 502, 503, 504] {
+        if contains_http_status(&lower, status) {
+            return StatusCode::from_u16(status).unwrap_or(fallback);
+        }
+    }
+
+    let is_quota = [
+        "rate limit",
+        "ratelimit",
+        "too many requests",
+        "quota",
+        "resource exhausted",
+        "insufficient_quota",
+        "capacity",
+        "usage limit",
+        "daily limit",
+        "weekly limit",
+        "monthly limit",
+        "requests limit",
+        "token limit exceeded",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if is_quota {
+        return StatusCode::TOO_MANY_REQUESTS;
+    }
+
+    if lower.contains("invalid request history")
+        || lower.contains("unsupported parameter")
+        || lower.contains("invalid request")
+        || lower.contains("bad request")
+    {
+        return StatusCode::BAD_REQUEST;
+    }
+    if lower.contains("timeout") || lower.contains("timed out") {
+        return StatusCode::GATEWAY_TIMEOUT;
+    }
+    if lower.contains("no upstream credentials") || lower.contains("no upstream tokens") {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
+
+    fallback
+}
+
+fn codex_error_response(
+    source_api: SourceApi,
+    status: StatusCode,
+    message: impl Into<String>,
+) -> Response {
+    let message = message.into();
+    if matches!(source_api, SourceApi::V1) {
+        (
+            status,
+            [(
+                axum::http::header::CONTENT_TYPE.as_str(),
+                "application/json",
+            )],
+            openai_error_body(
+                &message,
+                status_to_error_type(status),
+                status_to_error_code(status),
+            ),
+        )
+            .into_response()
+    } else {
+        (status, message).into_response()
     }
 }
 
@@ -17528,12 +17571,13 @@ mod codex_provider_model_tests {
 mod account_selection_tests {
     use super::{
         account_runtime_status, api_key_rule_allows_account, apply_router_failure,
-        codex_error_affects_account_health, codex_token_matches_account, parse_retry_after_seconds,
-        select_ordered_account_indices, AccountRuntimeState, AccountRuntimeStatus,
-        AccountSelectionScore,
+        codex_error_affects_account_health, codex_error_status_from_message,
+        codex_token_matches_account, parse_retry_after_seconds, select_ordered_account_indices,
+        AccountRuntimeState, AccountRuntimeStatus, AccountSelectionScore,
     };
     use crate::api_keys::{ApiKeyAccess, ApiKeyProviderAccess};
     use crate::target::codex::tokens::UpstreamToken;
+    use axum::http::StatusCode;
     use std::collections::VecDeque;
     use std::time::{Duration, Instant};
 
@@ -17772,6 +17816,38 @@ mod account_selection_tests {
         assert!(codex_error_affects_account_health(
             "upstream status 503 temporarily unavailable"
         ));
+    }
+
+    #[test]
+    fn codex_error_status_preserves_actionable_statuses() {
+        assert_eq!(
+            codex_error_status_from_message(
+                "upstream status 429 retry-after=30: quota exceeded",
+                StatusCode::BAD_GATEWAY
+            ),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            codex_error_status_from_message(
+                "Invalid request history: function_call_output has no matching function_call",
+                StatusCode::BAD_GATEWAY
+            ),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            codex_error_status_from_message(
+                "upstream first-event timeout after 15 seconds",
+                StatusCode::BAD_GATEWAY
+            ),
+            StatusCode::GATEWAY_TIMEOUT
+        );
+        assert_eq!(
+            codex_error_status_from_message(
+                "unsupported parameter: max_output_tokens",
+                StatusCode::BAD_GATEWAY
+            ),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
