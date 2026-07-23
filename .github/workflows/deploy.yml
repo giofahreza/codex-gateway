@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: codex-gateway-deploy-${{ github.ref_name || github.run_id }}
+  group: io-gateway-deploy-${{ github.ref_name || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -17,7 +17,8 @@ env:
   CARGO_TERM_COLOR: always
   DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
   DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-  REMOTE_REPO: DEPLOY_REMOTE_STAGE_DIR/codex-gateway
+  REMOTE_REPO: DEPLOY_REMOTE_STAGE_DIR/io-gateway
+  LEGACY_REMOTE_REPO: DEPLOY_REMOTE_STAGE_DIR/codex-gateway
   REMOTE_STAGE_DIR: ${{ secrets.DEPLOY_REMOTE_STAGE_DIR }}
   LIVE_BINARY: /opt/gpt-gateway/gpt-gateway
   SERVICE_NAME: gpt-gateway.service
@@ -53,8 +54,8 @@ jobs:
       - name: Check dashboard JavaScript syntax
         run: |
           set -euo pipefail
-          awk '/<script>/{flag=1;next} /<\/script>/{flag=0} flag' src/main.rs > /tmp/codex-gateway-dashboard.js
-          node --check /tmp/codex-gateway-dashboard.js
+          awk '/<script>/{flag=1;next} /<\/script>/{flag=0} flag' src/main.rs > /tmp/io-gateway-dashboard.js
+          node --check /tmp/io-gateway-dashboard.js
 
       - name: Run tests
         run: cargo test --locked
@@ -63,15 +64,15 @@ jobs:
         run: cargo build --release --locked
 
       - name: Record checksum
-        run: sha256sum target/release/codex-gateway > target/release/codex-gateway.sha256
+        run: sha256sum target/release/io-gateway > target/release/io-gateway.sha256
 
       - name: Upload release binary
         uses: actions/upload-artifact@v4
         with:
-          name: codex-gateway-linux-x86_64
+          name: io-gateway-linux-x86_64
           path: |
-            target/release/codex-gateway
-            target/release/codex-gateway.sha256
+            target/release/io-gateway
+            target/release/io-gateway.sha256
           if-no-files-found: error
 
   deploy:
@@ -83,7 +84,7 @@ jobs:
       - name: Download release binary
         uses: actions/download-artifact@v4
         with:
-          name: codex-gateway-linux-x86_64
+          name: io-gateway-linux-x86_64
           path: ./release
 
       - name: Configure SSH
@@ -104,14 +105,14 @@ jobs:
       - name: Upload binary
         run: |
           set -euo pipefail
-          chmod +x ./release/codex-gateway
+          chmod +x ./release/io-gateway
           SHORT_SHA="${GITHUB_SHA::12}"
           STAGED_BINARY="${REMOTE_STAGE_DIR}/gpt-gateway.${SHORT_SHA}"
           scp \
             -i ~/.ssh/deploy_key \
             -o BatchMode=yes \
             -o StrictHostKeyChecking=yes \
-            ./release/codex-gateway \
+            ./release/io-gateway \
             "${DEPLOY_USER}@${DEPLOY_HOST}:${STAGED_BINARY}"
           echo "STAGED_BINARY=${STAGED_BINARY}" >> "${GITHUB_ENV}"
 
@@ -123,10 +124,15 @@ jobs:
             -o BatchMode=yes \
             -o StrictHostKeyChecking=yes \
             "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "GITHUB_SHA='${GITHUB_SHA}' REMOTE_REPO='${REMOTE_REPO}' STAGED_BINARY='${STAGED_BINARY}' LIVE_BINARY='${LIVE_BINARY}' SERVICE_NAME='${SERVICE_NAME}' HEALTH_URL='${HEALTH_URL}' READY_URL='${READY_URL}' bash -s" <<'REMOTE'
+            "GITHUB_SHA='${GITHUB_SHA}' REMOTE_REPO='${REMOTE_REPO}' LEGACY_REMOTE_REPO='${LEGACY_REMOTE_REPO}' STAGED_BINARY='${STAGED_BINARY}' LIVE_BINARY='${LIVE_BINARY}' SERVICE_NAME='${SERVICE_NAME}' HEALTH_URL='${HEALTH_URL}' READY_URL='${READY_URL}' bash -s" <<'REMOTE'
           set -euo pipefail
 
+          if [ ! -d "${REMOTE_REPO}/.git" ] && [ -d "${LEGACY_REMOTE_REPO}/.git" ]; then
+            mv "${LEGACY_REMOTE_REPO}" "${REMOTE_REPO}"
+          fi
+
           cd "${REMOTE_REPO}"
+          git remote set-url origin git@github.com:giofahreza/io-gateway.git
           git fetch --prune --tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
           git checkout --detach "${GITHUB_SHA}^{commit}"
           CURRENT_SHA="$(git rev-parse HEAD)"

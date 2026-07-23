@@ -487,7 +487,7 @@ pub async fn chat_completions(
             .timeout(Duration::from_secs(180));
 
         if !headers.contains_key("user-agent") {
-            request = request.header("User-Agent", "codex-gateway/1.0");
+            request = request.header("User-Agent", "io-gateway/1.0");
         }
 
         let resp = match request.send().await {

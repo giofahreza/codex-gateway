@@ -463,11 +463,11 @@ fn normalize_scopes(items: Vec<&str>) -> Vec<String> {
 
 fn state_cookie_name(provider: OAuthProvider) -> &'static str {
     match provider {
-        OAuthProvider::Codex => "codex_gateway_oauth_state_codex",
-        OAuthProvider::Antigravity => "codex_gateway_oauth_state_antigravity",
-        OAuthProvider::Gemini => "codex_gateway_oauth_state_gemini",
-        OAuthProvider::Qwen => "codex_gateway_oauth_state_qwen",
-        OAuthProvider::Claude => "codex_gateway_oauth_state_claude",
+        OAuthProvider::Codex => "io_gateway_oauth_state_codex",
+        OAuthProvider::Antigravity => "io_gateway_oauth_state_antigravity",
+        OAuthProvider::Gemini => "io_gateway_oauth_state_gemini",
+        OAuthProvider::Qwen => "io_gateway_oauth_state_qwen",
+        OAuthProvider::Claude => "io_gateway_oauth_state_claude",
     }
 }
 

@@ -688,7 +688,7 @@ mod tests {
             ctx.state.clone(),
             "qwen".to_string(),
             Method::GET,
-            cookie_headers("codex_gateway_oauth_state_qwen=missing-state"),
+            cookie_headers("io_gateway_oauth_state_qwen=missing-state"),
             "/login/qwen/callback?state=missing-state&code=good-code"
                 .parse()
                 .unwrap(),
@@ -1050,7 +1050,7 @@ mod tests {
 
     fn unique_test_dir() -> PathBuf {
         let path =
-            std::env::temp_dir().join(format!("codex-gateway-qwen-tests-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("io-gateway-qwen-tests-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
         path
     }

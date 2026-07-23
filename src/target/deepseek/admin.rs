@@ -397,7 +397,7 @@ mod tests {
 
     fn unique_test_dir() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "codex-gateway-deepseek-tests-{}",
+            "io-gateway-deepseek-tests-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&path).unwrap();

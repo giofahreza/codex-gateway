@@ -564,7 +564,7 @@ mod tests {
     }
 
     fn tempfile_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("codex-gateway-api-keys-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("io-gateway-api-keys-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

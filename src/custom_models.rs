@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn save_and_load_replace_duplicate_aliases() {
-        let unique = format!("codex-gateway-custom-model-test-{}", std::process::id());
+        let unique = format!("io-gateway-custom-model-test-{}", std::process::id());
         let dir = std::env::temp_dir().join(unique);
         let cfg = test_config(dir.to_string_lossy().to_string());
 

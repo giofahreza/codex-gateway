@@ -169,8 +169,8 @@ IO Gateway is designed around real coding-agent workflows:
 ```bash
 cargo build --release
 cp config.example.json config.json
-export CODEX_GATEWAY_KEY="your-shared-proxy-key"
-./target/release/codex-gateway
+export IO_GATEWAY_KEY="your-shared-proxy-key"
+./target/release/io-gateway
 ```
 
 Dashboard:
@@ -193,7 +193,7 @@ Codex CLI:
 [model_providers.io_gateway]
 name = "IO Gateway"
 base_url = "http://127.0.0.1:8319"
-env_key = "CODEX_GATEWAY_KEY"
+env_key = "IO_GATEWAY_KEY"
 wire_api = "responses"
 requires_openai_auth = false
 
@@ -208,7 +208,7 @@ Claude Code:
 {
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:8319/claude",
-    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
+    "ANTHROPIC_AUTH_TOKEN": "<IO_GATEWAY_KEY>",
     "ANTHROPIC_MODEL": "cld:claude-sonnet-4"
   }
 }

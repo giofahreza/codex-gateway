@@ -230,7 +230,7 @@ async fn native_responses(
         request = request.header("Accept-Encoding", "identity");
     }
     if !incoming_headers.contains_key("user-agent") {
-        request = request.header("User-Agent", "codex-gateway/1.0");
+        request = request.header("User-Agent", "io-gateway/1.0");
     }
 
     let resp = match request.send().await {

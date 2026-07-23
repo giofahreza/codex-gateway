@@ -61,7 +61,7 @@ Edit `config.json` — minimum required fields:
 ### 3. Set your shared key
 
 ```bash
-export CODEX_GATEWAY_KEY="your-shared-proxy-key"
+export IO_GATEWAY_KEY="your-shared-proxy-key"
 ```
 
 All clients use this single key in the `Authorization: Bearer` header.
@@ -71,7 +71,7 @@ All clients use this single key in the `Authorization: Bearer` header.
 ```bash
 cargo run --release
 # or after building:
-./target/release/codex-gateway
+./target/release/io-gateway
 ```
 
 Dashboard: `http://127.0.0.1:8319/`
@@ -82,7 +82,7 @@ API docs: `http://127.0.0.1:8319/docs/`
 
 ## CI/CD Deployment
 
-GitHub Actions builds, tests, and deploys this app on pushes to `master` or `main`.
+GitHub Actions builds, tests, and deploys this app when a `v*` release tag is pushed, or when the deploy workflow is run manually.
 
 Required GitHub repository secret:
 
@@ -95,7 +95,7 @@ The workflow uses the current production layout:
 | Setting | Value |
 |---|---|
 | Server | `ubuntu@141.144.197.96` |
-| Remote checkout | `/home/ubuntu/codex-gateway` |
+| Remote checkout | `/home/ubuntu/io-gateway` |
 | Live binary | `/opt/gpt-gateway/gpt-gateway` |
 | Systemd service | `gpt-gateway.service` |
 | Health checks | `http://127.0.0.1:8319/health`, `http://127.0.0.1:8319/ready` |
@@ -104,8 +104,9 @@ Deployment flow:
 
 1. Run `cargo fmt --check`, dashboard JavaScript syntax check, `cargo test --locked`, and `cargo build --release --locked`.
 2. Upload the release binary to `/home/ubuntu/gpt-gateway.<commit>`.
-3. Fast-forward the server checkout to the pushed commit.
-4. Back up the current live binary, install the new binary, restart `gpt-gateway.service`, and verify health/readiness.
+3. Move the legacy `/home/ubuntu/codex-gateway` checkout to `/home/ubuntu/io-gateway` on first deploy if needed.
+4. Check out the tagged commit on the server.
+5. Back up the current live binary, install the new binary, restart `gpt-gateway.service`, and verify health/readiness.
 
 ---
 
@@ -238,7 +239,7 @@ Managed API keys can be unrestricted or limited to one or more providers. Each a
 
 ## API Surface
 
-All client requests use `Authorization: Bearer <CODEX_GATEWAY_KEY>`.
+All client requests use `Authorization: Bearer <IO_GATEWAY_KEY>`.
 
 ### Unified endpoints
 
@@ -383,7 +384,7 @@ For a custom model target, omit `account` to use any enabled account for that pr
 
 ```bash
 curl -sS http://127.0.0.1:8319/v1/responses \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Authorization: Bearer $IO_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   --data '{"model":"ctm:workhorse","input":"Reply with OK only."}'
 ```
@@ -504,16 +505,16 @@ curl -sS -X POST 'http://127.0.0.1:8319/codex/rate-limit-reset-credit/consume' \
 #### Codex CLI config
 
 ```toml
-[model_providers.codex_gateway]
+[model_providers.io_gateway]
 name = "Local IO Gateway"
 base_url = "http://127.0.0.1:8319"
-env_key = "CODEX_GATEWAY_KEY"
+env_key = "IO_GATEWAY_KEY"
 wire_api = "responses"
 requires_openai_auth = false
 
-[profiles.codex_gateway]
+[profiles.io_gateway]
 model = "gpt-5.2-codex"
-model_provider = "codex_gateway"
+model_provider = "io_gateway"
 ```
 
 ---
@@ -579,7 +580,7 @@ curl http://127.0.0.1:8319/qwen/accounts.json -b "$ADMIN_COOKIE"
 [model_providers.qwen_via_gateway]
 name = "Qwen via IO Gateway"
 base_url = "http://127.0.0.1:8319/v1"
-experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+experimental_bearer_token = "<IO_GATEWAY_KEY>"
 wire_api = "responses"
 
 [profiles.qwen]
@@ -606,7 +607,7 @@ Tool calls and reasoning summaries are translated to/from DeepSeek's chat-comple
 
 ```bash
 curl http://127.0.0.1:8319/v1/responses \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Authorization: Bearer $IO_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-pro","input":"Reply with one short line."}'
 ```
@@ -617,7 +618,7 @@ curl http://127.0.0.1:8319/v1/responses \
 [model_providers.deepseek_via_gateway]
 name = "DeepSeek via IO Gateway"
 base_url = "http://127.0.0.1:8319/v1"
-experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+experimental_bearer_token = "<IO_GATEWAY_KEY>"
 wire_api = "responses"
 
 [profiles.deepseek]
@@ -647,7 +648,7 @@ Dashboard shows 5-hour and weekly rolling quota windows with per-model breakdown
 
 ```bash
 curl http://127.0.0.1:8319/v1/responses \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Authorization: Bearer $IO_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"MiniMax-M3","input":"say hi in one word"}'
 ```
@@ -658,7 +659,7 @@ curl http://127.0.0.1:8319/v1/responses \
 [model_providers.minimax_via_gateway]
 name = "MiniMax via IO Gateway"
 base_url = "http://127.0.0.1:8319/v1"
-experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+experimental_bearer_token = "<IO_GATEWAY_KEY>"
 wire_api = "responses"
 
 [profiles.minimax]
@@ -674,7 +675,7 @@ model_reasoning_effort = "high"
 {
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:8319/claude",
-    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
+    "ANTHROPIC_AUTH_TOKEN": "<IO_GATEWAY_KEY>",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
     "ANTHROPIC_MODEL": "MiniMax-M3",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "MiniMax-M3",
@@ -714,7 +715,7 @@ Grok tokens expire periodically. Re-auth from the dashboard when the account sho
 [model_providers.grok_via_gateway]
 name = "Grok via IO Gateway"
 base_url = "http://127.0.0.1:8319/v1"
-experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+experimental_bearer_token = "<IO_GATEWAY_KEY>"
 wire_api = "responses"
 
 [profiles.grok]
@@ -755,7 +756,7 @@ Routing:
 
 ```bash
 curl http://127.0.0.1:8319/v1/responses \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Authorization: Bearer $IO_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"cop:gpt-5.1","input":"say hi in one word"}'
 ```
@@ -766,7 +767,7 @@ curl http://127.0.0.1:8319/v1/responses \
 [model_providers.copilot_via_gateway]
 name = "GitHub Copilot via IO Gateway"
 base_url = "http://127.0.0.1:8319/v1"
-experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+experimental_bearer_token = "<IO_GATEWAY_KEY>"
 wire_api = "responses"
 
 [profiles.copilot]
@@ -781,7 +782,7 @@ model_reasoning_effort = "high"
 {
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:8319/claude",
-    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
+    "ANTHROPIC_AUTH_TOKEN": "<IO_GATEWAY_KEY>",
     "ANTHROPIC_MODEL": "cop:claude-sonnet-4",
     "ANTHROPIC_SMALL_FAST_MODEL": "cop:claude-sonnet-4"
   }
@@ -835,7 +836,7 @@ Access tokens are refreshed automatically when they expire.
 
 ```bash
 curl http://127.0.0.1:8319/v1/responses \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Authorization: Bearer $IO_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"cld:claude-sonnet-4-20250514","input":"say hi in one word"}'
 ```
@@ -846,7 +847,7 @@ curl http://127.0.0.1:8319/v1/responses \
 [model_providers.claude_via_gateway]
 name = "Claude via IO Gateway"
 base_url = "http://127.0.0.1:8319/v1"
-experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+experimental_bearer_token = "<IO_GATEWAY_KEY>"
 wire_api = "responses"
 
 [profiles.claude]
@@ -861,7 +862,7 @@ model_reasoning_effort = "high"
 {
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:8319/claude",
-    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
+    "ANTHROPIC_AUTH_TOKEN": "<IO_GATEWAY_KEY>",
     "ANTHROPIC_MODEL": "cld:claude-sonnet-4-20250514",
     "ANTHROPIC_SMALL_FAST_MODEL": "cld:claude-3-5-haiku-20241022"
   }
@@ -893,13 +894,13 @@ Routing:
 ```bash
 # Via Responses API
 curl http://127.0.0.1:8319/v1/responses \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Authorization: Bearer $IO_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"glm:glm-5.2","input":"say hi in one word"}'
 
 # Via native Chat Completions
 curl http://127.0.0.1:8319/v1/chat/completions \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Authorization: Bearer $IO_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"glm:glm-5.2","messages":[{"role":"user","content":"say hi"}]}'
 ```
@@ -910,7 +911,7 @@ curl http://127.0.0.1:8319/v1/chat/completions \
 [model_providers.glm_via_gateway]
 name = "GLM via IO Gateway"
 base_url = "http://127.0.0.1:8319/v1"
-experimental_bearer_token = "<CODEX_GATEWAY_KEY>"
+experimental_bearer_token = "<IO_GATEWAY_KEY>"
 wire_api = "responses"
 
 [profiles.glm]
@@ -925,7 +926,7 @@ model_reasoning_effort = "high"
 {
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:8319/claude",
-    "ANTHROPIC_AUTH_TOKEN": "<CODEX_GATEWAY_KEY>",
+    "ANTHROPIC_AUTH_TOKEN": "<IO_GATEWAY_KEY>",
     "ANTHROPIC_MODEL": "glm:glm-5.2",
     "ANTHROPIC_SMALL_FAST_MODEL": "glm:glm-5.2"
   }
@@ -966,7 +967,7 @@ Generate an image through Antigravity and save the PNG:
 ```bash
 tmp=$(mktemp)
 curl -sS -N http://127.0.0.1:8319/v1/responses \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Authorization: Bearer $IO_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
   --data '{
@@ -1072,14 +1073,14 @@ List all available models (across all enabled providers):
 
 ```bash
 curl http://127.0.0.1:8319/v1/models \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY"
+  -H "Authorization: Bearer $IO_GATEWAY_KEY"
 ```
 
 Basic text request (Codex):
 
 ```bash
 curl http://127.0.0.1:8319/v1/responses \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Authorization: Bearer $IO_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-5.2","input":"Reply with one line."}'
 ```
@@ -1088,7 +1089,7 @@ Streaming:
 
 ```bash
 curl http://127.0.0.1:8319/v1/responses \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Authorization: Bearer $IO_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
   -d '{"model":"MiniMax-M3","input":"say hi","stream":true}'
@@ -1098,7 +1099,7 @@ Via Claude Code endpoint:
 
 ```bash
 curl http://127.0.0.1:8319/claude/v1/messages \
-  -H "Authorization: Bearer $CODEX_GATEWAY_KEY" \
+  -H "Authorization: Bearer $IO_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{"model":"cld:claude-sonnet-4-20250514","max_tokens":256,"messages":[{"role":"user","content":"say hi"}]}'
@@ -1147,7 +1148,7 @@ cargo build
 cargo build --release
 
 # Run tests (216 tests)
-cargo test --bin codex-gateway
+cargo test --bin io-gateway
 
 # Check JS syntax in embedded dashboard
 awk '/<script>/{flag=1;next} /<\/script>/{flag=0} flag' src/main.rs > /tmp/d.js

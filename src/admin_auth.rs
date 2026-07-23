@@ -10,7 +10,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const ADMIN_SESSION_COOKIE: &str = "codex_gateway_admin_session";
+const ADMIN_SESSION_COOKIE: &str = "io_gateway_admin_session";
 const TOTP_STEP_SECONDS: u64 = 30;
 const TOTP_WINDOW_STEPS: i64 = 1;
 const TOTP_DIGITS: u32 = 6;
