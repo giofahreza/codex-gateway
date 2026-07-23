@@ -2,13 +2,12 @@ name: Build and Deploy
 
 on:
   push:
-    branches:
-      - master
-      - main
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 concurrency:
-  group: codex-gateway-deploy-${{ github.ref }}
+  group: codex-gateway-deploy-${{ github.ref_name || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -79,7 +78,6 @@ jobs:
     name: Deploy to production server
     runs-on: ubuntu-latest
     needs: build
-    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
 
     steps:
       - name: Download release binary
@@ -125,20 +123,16 @@ jobs:
             -o BatchMode=yes \
             -o StrictHostKeyChecking=yes \
             "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "GITHUB_SHA='${GITHUB_SHA}' GITHUB_REF_NAME='${GITHUB_REF_NAME}' REMOTE_REPO='${REMOTE_REPO}' STAGED_BINARY='${STAGED_BINARY}' LIVE_BINARY='${LIVE_BINARY}' SERVICE_NAME='${SERVICE_NAME}' HEALTH_URL='${HEALTH_URL}' READY_URL='${READY_URL}' bash -s" <<'REMOTE'
+            "GITHUB_SHA='${GITHUB_SHA}' REMOTE_REPO='${REMOTE_REPO}' STAGED_BINARY='${STAGED_BINARY}' LIVE_BINARY='${LIVE_BINARY}' SERVICE_NAME='${SERVICE_NAME}' HEALTH_URL='${HEALTH_URL}' READY_URL='${READY_URL}' bash -s" <<'REMOTE'
           set -euo pipefail
 
           cd "${REMOTE_REPO}"
-          git fetch --prune origin
-          if git show-ref --verify --quiet "refs/heads/${GITHUB_REF_NAME}"; then
-            git checkout "${GITHUB_REF_NAME}"
-          else
-            git checkout -b "${GITHUB_REF_NAME}" "origin/${GITHUB_REF_NAME}"
-          fi
-          git pull --ff-only origin "${GITHUB_REF_NAME}"
+          git fetch --prune --tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+          git checkout --detach "${GITHUB_SHA}^{commit}"
           CURRENT_SHA="$(git rev-parse HEAD)"
-          if [ "${CURRENT_SHA}" != "${GITHUB_SHA}" ]; then
-            echo "Remote checkout ended at ${CURRENT_SHA}, expected ${GITHUB_SHA}" >&2
+          EXPECTED_SHA="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          if [ "${CURRENT_SHA}" != "${EXPECTED_SHA}" ]; then
+            echo "Remote checkout ended at ${CURRENT_SHA}, expected ${EXPECTED_SHA}" >&2
             exit 1
           fi
 
