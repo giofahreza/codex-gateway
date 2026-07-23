@@ -34,7 +34,7 @@ use source::v1::response::{
     model_retrieve_to_openai_json, models_list_to_openai_json, openai_error_body,
     sse_to_response_json, status_to_error_code, status_to_error_type, upstream_error_to_openai,
 };
-use source::{route_request, ResponseMode, TargetModel};
+use source::{route_request, ResponseMode, RoutedRequest, TargetModel};
 use stats_store::{Provider, StatsStore};
 use target::codex::auth::PendingOAuth;
 use target::codex::quota::QuotaCacheEntry;
@@ -221,6 +221,14 @@ struct ApiKeyAccessUpdateRequest {
 struct ModelCatalogRefreshForm {
     provider: Option<String>,
     file_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminTestApiRequest {
+    model: String,
+    prompt: String,
+    instructions: Option<String>,
+    max_output_tokens: Option<u32>,
 }
 
 #[derive(Default, Clone, Serialize)]
@@ -519,6 +527,7 @@ async fn main() {
         .route("/admin/api-keys/create", any(admin_api_keys_create_route))
         .route("/admin/api-keys/access", any(admin_api_keys_access_route))
         .route("/admin/api-keys/revoke", any(admin_api_keys_revoke_route))
+        .route("/admin/test-api", any(admin_test_api_route))
         .route("/dashboard.json", any(dashboard_json))
         .route("/dashboard/snapshot.json", any(dashboard_snapshot_route))
         .route("/quota.json", any(quota_json_route))
@@ -1379,7 +1388,7 @@ async fn dashboard() -> impl IntoResponse {
       }
       .settings-tabs {
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 8px;
         margin: 10px 0 14px 0;
         border-bottom: 1px solid var(--border);
@@ -1537,6 +1546,53 @@ async fn dashboard() -> impl IntoResponse {
         background: var(--surface);
         border: 1px solid var(--border);
         overflow-wrap: anywhere;
+      }
+      .test-api-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(180px, 0.35fr);
+        gap: 12px;
+        align-items: start;
+      }
+      .test-api-grid input,
+      .test-api-grid textarea,
+      .test-api-grid select,
+      .test-api-model-input {
+        width: 100%;
+        max-width: none;
+      }
+      .test-api-side {
+        display: grid;
+        gap: 10px;
+      }
+      .test-api-result {
+        display: grid;
+        gap: 10px;
+        margin-top: 12px;
+        padding: 10px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface-alt);
+      }
+      .test-api-result-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .test-api-output,
+      .test-api-raw {
+        width: 100%;
+        max-height: min(34vh, 360px);
+        overflow: auto;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .test-api-result details summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
       }
       .notification-channel-grid {
         display: grid;
@@ -3015,7 +3071,7 @@ async fn dashboard() -> impl IntoResponse {
           display: block;
         }
         .settings-tabs {
-          grid-template-columns: repeat(3, minmax(0, 1fr));
+          grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 4px;
           border-bottom: 0;
         }
@@ -3053,6 +3109,7 @@ async fn dashboard() -> impl IntoResponse {
           flex: 1;
         }
         .notification-channel-grid,
+        .test-api-grid,
         .notification-provider-head,
         .custom-model-account-row {
           grid-template-columns: 1fr;
@@ -3464,6 +3521,7 @@ async fn dashboard() -> impl IntoResponse {
         customModels: [],
         customModelAccounts: [],
         customModelModelOptions: [],
+        testApiModelOptions: [],
         providerSettings: readProviderDashboardSettings(),
         notificationSettings: null,
         apiKeys: [],
@@ -3500,7 +3558,8 @@ async fn dashboard() -> impl IntoResponse {
         copilot: 'GitHub Copilot',
         cld: 'Claude',
         claude: 'Claude',
-        glm: 'GLM (Z.AI)'
+        glm: 'GLM (Z.AI)',
+        ctm: 'Custom'
       };
       function normalizeProviderDashboardViewMode(mode) {
         return mode === 'row' || mode === 'single' ? 'row' : 'column';
@@ -3696,7 +3755,9 @@ async fn dashboard() -> impl IntoResponse {
           ? 'notifications'
           : tab === 'api-keys'
             ? 'api-keys'
-            : 'dashboard';
+            : tab === 'test-api'
+              ? 'test-api'
+              : 'dashboard';
         var activeButton = null;
         document.querySelectorAll('[data-settings-tab]').forEach(function(button) {
           var active = button.getAttribute('data-settings-tab') === target;
@@ -3712,6 +3773,7 @@ async fn dashboard() -> impl IntoResponse {
             activeButton.scrollIntoView({ block: 'nearest', inline: 'center' });
           }, 0);
         }
+        if (target === 'test-api') prepareTestApiPanel();
       }
       async function loadNotificationSettings() {
         setText('notificationStatus', 'Loading notification settings...');
@@ -3893,6 +3955,169 @@ async fn dashboard() -> impl IntoResponse {
         if (!res) return;
         const data = await res.json();
         updateNotificationStatusText(data.message || (data.ok ? 'Test notification sent' : 'Test notification failed'));
+      }
+      function testApiModelEntries() {
+        var entries = [];
+        var seen = new Set();
+        function addEntry(id, label, provider) {
+          id = String(id || '').trim();
+          if (!id || seen.has(id)) return;
+          seen.add(id);
+          entries.push({
+            id: id,
+            label: String(label || id).trim() || id,
+            provider: String(provider || '').trim()
+          });
+        }
+        var fullCatalog = dashboardState.testApiModelOptions || [];
+        if (fullCatalog.length) {
+          fullCatalog.forEach(function(option) {
+            var provider = String(option && option.provider || '').trim();
+            var id = String(option && option.id || '').trim();
+            var display = String(option && option.display_name || option && option.model || id).trim();
+            addEntry(id, display, provider);
+          });
+        } else {
+          (dashboardState.customModelModelOptions || []).forEach(function(option) {
+            var provider = String(option && option.provider || '').trim();
+            var model = String(option && option.model || '').trim();
+            var id = String(option && option.id || '').trim();
+            if (!id && provider && model) id = provider + ':' + model;
+            var display = String(option && option.display_name || model || id).trim();
+            addEntry(id, display, provider);
+          });
+          (dashboardState.customModels || []).forEach(function(model) {
+            var alias = normalizeCustomAlias(model && model.alias);
+            if (!alias) return;
+            addEntry('ctm:' + alias, model.display_name || alias, 'ctm');
+          });
+        }
+        entries.sort(function(left, right) {
+          return (left.provider || '').localeCompare(right.provider || '')
+            || left.id.localeCompare(right.id);
+        });
+        return entries;
+      }
+      function renderTestApiModelOptions() {
+        var list = document.getElementById('testApiModelList');
+        var input = document.getElementById('testApiModelInput');
+        if (!list || !input) return;
+        var entries = testApiModelEntries();
+        list.innerHTML = entries.map(function(entry) {
+          var providerLabel = providerLabels[entry.provider] || entry.provider || 'Model';
+          var label = providerLabel + (entry.label && entry.label !== entry.id ? ' - ' + entry.label : '');
+          return '<option value="' + escapeHtml(entry.id) + '" label="' + escapeHtml(label) + '"></option>';
+        }).join('');
+        if (!input.value.trim() && entries.length) {
+          input.value = entries[0].id;
+        }
+      }
+      async function prepareTestApiPanel() {
+        if (!dashboardState.testApiModelOptions.length && !dashboardState.customModelModelOptions.length && !dashboardState.customModels.length) {
+          setText('testApiStatus', 'Loading model catalog...');
+          await refreshCustomModels();
+        }
+        renderTestApiModelOptions();
+        if (document.getElementById('testApiStatus')?.textContent === 'Loading model catalog...') {
+          setText('testApiStatus', 'Ready');
+        }
+      }
+      function setTestApiBusy(busy) {
+        var button = document.getElementById('sendTestApiBtn');
+        if (button) {
+          button.disabled = !!busy;
+          button.textContent = busy ? 'Sending...' : 'Send Test';
+        }
+      }
+      function renderTestApiResult(data) {
+        var result = document.getElementById('testApiResult');
+        var output = document.getElementById('testApiOutput');
+        var raw = document.getElementById('testApiRaw');
+        var meta = document.getElementById('testApiResultMeta');
+        if (!result || !output || !raw || !meta) return;
+        var status = data && data.status ? 'HTTP ' + data.status : 'HTTP ?';
+        var ms = data && data.duration_ms != null ? ' · ' + data.duration_ms + ' ms' : '';
+        var model = data && data.model ? ' · ' + data.model : '';
+        meta.textContent = (data && data.ok ? 'Success' : 'Failed') + ' · ' + status + ms + model;
+        output.textContent = (data && data.output_text) || (data && data.message) || 'No text output returned.';
+        raw.textContent = JSON.stringify((data && data.response) || data || {}, null, 2);
+        result.hidden = false;
+      }
+      async function sendTestApi() {
+        var model = document.getElementById('testApiModelInput')?.value.trim() || '';
+        var prompt = document.getElementById('testApiPromptInput')?.value.trim() || '';
+        var instructions = document.getElementById('testApiInstructionsInput')?.value.trim() || '';
+        var maxOutput = Number(document.getElementById('testApiMaxOutputInput')?.value || 512);
+        if (!model) {
+          setText('testApiStatus', 'Model is required.');
+          return;
+        }
+        if (!prompt) {
+          setText('testApiStatus', 'Prompt is required.');
+          return;
+        }
+        setTestApiBusy(true);
+        setText('testApiStatus', 'Sending test request...');
+        try {
+          const res = await adminFetch('/admin/test-api', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: model,
+              prompt: prompt,
+              instructions: instructions || undefined,
+              max_output_tokens: Number.isFinite(maxOutput) ? maxOutput : 512
+            })
+          });
+          if (!res) return;
+          const text = await res.text();
+          let data;
+          try {
+            data = JSON.parse(text);
+          } catch (_) {
+            data = {
+              ok: false,
+              status: res.status,
+              model: model,
+              message: text || ('Test API returned HTTP ' + res.status),
+              response: { body: text }
+            };
+          }
+          renderTestApiResult(data);
+          setText('testApiStatus', data.message || (data.ok ? 'Test completed' : 'Test failed'));
+          if (data.ok) {
+            invalidateDashboardSnapshot();
+            refreshDashboardSnapshot(true).then(function(snapshot) {
+              if (snapshot) renderDashboardSnapshot();
+            });
+            refreshContextChart();
+          }
+        } catch (err) {
+          var message = err && err.message ? err.message : String(err);
+          setText('testApiStatus', 'Test request failed: ' + message);
+          renderTestApiResult({
+            ok: false,
+            status: 0,
+            model: model,
+            message: message,
+            response: { error: message }
+          });
+        } finally {
+          setTestApiBusy(false);
+        }
+      }
+      function clearTestApi() {
+        var prompt = document.getElementById('testApiPromptInput');
+        var instructions = document.getElementById('testApiInstructionsInput');
+        var result = document.getElementById('testApiResult');
+        if (prompt) prompt.value = '';
+        if (instructions) instructions.value = '';
+        if (result) result.hidden = true;
+        setText('testApiStatus', 'Ready');
+      }
+      async function copyTestApiOutput() {
+        var value = document.getElementById('testApiOutput')?.textContent || '';
+        await copyTextToClipboard(value, 'Test output copied');
       }
       function formatSettingsDateTime(value, fallback) {
         if (!value) return fallback || 'Never';
@@ -4172,6 +4397,7 @@ async fn dashboard() -> impl IntoResponse {
         setApiKeyReveal('');
         resetApiKeyEditor();
         renderProviderSettingsList();
+        renderTestApiModelOptions();
         loadNotificationSettings();
         loadApiKeys();
         setMobileNavOpen(false);
@@ -5971,7 +6197,9 @@ async fn dashboard() -> impl IntoResponse {
         dashboardState.customModels = models;
         dashboardState.customModelAccounts = data.accounts || [];
         dashboardState.customModelModelOptions = data.model_options || [];
+        dashboardState.testApiModelOptions = data.test_model_options || [];
         renderCustomModels(models);
+        renderTestApiModelOptions();
       }
       // ---------- Custom model route editor ----------
       const customModelProviderCatalog = [
@@ -7275,6 +7503,7 @@ async fn dashboard() -> impl IntoResponse {
         <h2 id="appSettingsTitle" style="margin-top:0;">Settings</h2>
         <div class="settings-tabs" role="tablist" aria-label="Settings sections">
           <button type="button" class="settings-tab is-active" role="tab" aria-selected="true" aria-controls="settingsDashboardPanel" data-settings-tab="dashboard">Dashboard</button>
+          <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settingsTestApiPanel" data-settings-tab="test-api">Test API</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settingsApiKeysPanel" data-settings-tab="api-keys">API Keys</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" aria-controls="settingsNotificationsPanel" data-settings-tab="notifications">Notifications</button>
         </div>
@@ -7294,6 +7523,48 @@ async fn dashboard() -> impl IntoResponse {
           <div id="appSettingsStatus" class="muted" style="margin-top:10px;"></div>
           <div class="modal-actions" style="margin-top:12px;">
             <button type="button" id="resetProviderSettingsBtn" class="secondary-button">Reset default</button>
+          </div>
+        </div>
+        <div id="settingsTestApiPanel" class="settings-panel" role="tabpanel" data-settings-panel="test-api" hidden>
+          <div class="settings-block">
+            <div class="custom-model-form-row">
+              <label for="testApiModelInput">Model</label>
+              <input id="testApiModelInput" class="test-api-model-input" list="testApiModelList" autocomplete="off" placeholder="qwn:qwen3-coder-plus">
+              <datalist id="testApiModelList"></datalist>
+              <div class="settings-help">Uses dashboard admin access and the gateway's configured provider accounts.</div>
+            </div>
+            <div class="test-api-grid" style="margin-top:12px;">
+              <div class="custom-model-form-row">
+                <label for="testApiPromptInput">Prompt</label>
+                <textarea id="testApiPromptInput" rows="7" placeholder="Ask a quick question"></textarea>
+              </div>
+              <div class="test-api-side">
+                <div class="custom-model-form-row">
+                  <label for="testApiInstructionsInput">Instructions</label>
+                  <textarea id="testApiInstructionsInput" rows="4" placeholder="optional"></textarea>
+                </div>
+                <div class="custom-model-form-row">
+                  <label for="testApiMaxOutputInput">Max output tokens</label>
+                  <input id="testApiMaxOutputInput" type="number" min="1" max="8192" step="1" value="512">
+                </div>
+              </div>
+            </div>
+            <div class="modal-actions" style="margin-top:12px;">
+              <button type="button" id="sendTestApiBtn">Send Test</button>
+              <button type="button" id="clearTestApiBtn" class="secondary-button">Clear</button>
+            </div>
+            <div id="testApiStatus" class="muted" style="margin-top:10px;"></div>
+            <div id="testApiResult" class="test-api-result" hidden>
+              <div class="test-api-result-head">
+                <strong id="testApiResultMeta">Result</strong>
+                <button type="button" id="copyTestApiOutputBtn" class="mini-btn secondary-button">Copy</button>
+              </div>
+              <pre id="testApiOutput" class="test-api-output"></pre>
+              <details>
+                <summary>Raw response</summary>
+                <pre id="testApiRaw" class="test-api-raw"></pre>
+              </details>
+            </div>
           </div>
         </div>
         <div id="settingsApiKeysPanel" class="settings-panel" role="tabpanel" data-settings-panel="api-keys" hidden>
@@ -7497,6 +7768,9 @@ async fn dashboard() -> impl IntoResponse {
       document.getElementById('cancelApiKeyEditBtn').addEventListener('click', resetApiKeyEditor);
       document.getElementById('apiKeyAccessModeInput').addEventListener('change', updateApiKeyAccessMode);
       document.getElementById('copyApiKeyRevealBtn').addEventListener('click', copyApiKeyReveal);
+      document.getElementById('sendTestApiBtn').addEventListener('click', sendTestApi);
+      document.getElementById('clearTestApiBtn').addEventListener('click', clearTestApi);
+      document.getElementById('copyTestApiOutputBtn').addEventListener('click', copyTestApiOutput);
       document.getElementById('notificationChannelInput').addEventListener('change', updateNotificationChannelUi);
       document.getElementById('saveNotificationSettingsBtn').addEventListener('click', saveNotificationSettings);
       document.getElementById('testNotificationBtn').addEventListener('click', sendTestNotification);
@@ -8912,6 +9186,317 @@ async fn response_json_value(response: Response) -> serde_json::Value {
     }
 }
 
+async fn admin_test_api_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<AdminTestApiRequest>,
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+
+    let model = payload.model.trim().to_string();
+    if model.is_empty() {
+        return admin_test_json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({
+                "ok": false,
+                "status": StatusCode::BAD_REQUEST.as_u16(),
+                "message": "model is required"
+            }),
+        );
+    }
+
+    let prompt = payload.prompt.trim().to_string();
+    if prompt.is_empty() {
+        return admin_test_json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({
+                "ok": false,
+                "status": StatusCode::BAD_REQUEST.as_u16(),
+                "model": model,
+                "message": "prompt is required"
+            }),
+        );
+    }
+
+    let mut request_body = serde_json::json!({
+        "model": model,
+        "input": prompt,
+        "stream": false,
+        "store": false,
+        "max_output_tokens": payload.max_output_tokens.unwrap_or(512).clamp(1, 8192)
+    });
+    if let Some(instructions) = payload
+        .instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        request_body["instructions"] = serde_json::Value::String(instructions.to_string());
+    }
+
+    let body = Bytes::from(serde_json::to_vec(&request_body).unwrap_or_default());
+    let mut model_headers = internal_proxy_api_headers(&state);
+    model_headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    let uri: axum::http::Uri = "/v1/responses"
+        .parse()
+        .expect("static test API route URI is valid");
+    let routed = match route_request("/v1/responses", &uri, &Method::POST, &model_headers, body) {
+        Ok(routed) => routed,
+        Err(err) => {
+            return admin_test_json_response(
+                err.status,
+                serde_json::json!({
+                    "ok": false,
+                    "status": err.status.as_u16(),
+                    "model": payload.model.trim(),
+                    "message": err.message
+                }),
+            )
+        }
+    };
+
+    let started_at = std::time::Instant::now();
+    let response = dispatch_admin_test_routed_request(state.clone(), model_headers, routed).await;
+    admin_test_response_from_upstream(state, payload.model.trim(), response, started_at.elapsed())
+        .await
+}
+
+async fn dispatch_admin_test_routed_request(
+    state: AppState,
+    headers: HeaderMap,
+    routed: RoutedRequest,
+) -> Response {
+    match routed.target {
+        TargetModel::Custom => {
+            custom_model_response(
+                state,
+                headers,
+                &routed.upstream_path,
+                routed.upstream_body,
+                routed.response_mode,
+                &api_keys::ApiKeyAccess::default(),
+            )
+            .await
+        }
+        TargetModel::CodexModels | TargetModel::UnifiedV1Models => (
+            StatusCode::BAD_REQUEST,
+            [("Content-Type", "application/json")],
+            openai_error_body(
+                "test API requires a response model",
+                "invalid_request_error",
+                None,
+            ),
+        )
+            .into_response(),
+        target => {
+            dispatch_custom_target(
+                state,
+                headers,
+                &routed.upstream_path,
+                target,
+                routed.upstream_body,
+                routed.response_mode,
+            )
+            .await
+        }
+    }
+}
+
+async fn admin_test_response_from_upstream(
+    _state: AppState,
+    requested_model: &str,
+    response: Response,
+    elapsed: Duration,
+) -> Response {
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let body = match axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024).await {
+        Ok(body) => body,
+        Err(err) => {
+            return admin_test_json_response(
+                StatusCode::BAD_GATEWAY,
+                serde_json::json!({
+                    "ok": false,
+                    "status": StatusCode::BAD_GATEWAY.as_u16(),
+                    "model": requested_model,
+                    "duration_ms": elapsed.as_millis(),
+                    "message": format!("failed to read upstream response body: {}", err)
+                }),
+            )
+        }
+    };
+
+    let json_value = serde_json::from_slice::<serde_json::Value>(&body).ok();
+    let body_text = String::from_utf8_lossy(&body).trim().to_string();
+    let output_text = json_value
+        .as_ref()
+        .and_then(extract_response_output_text)
+        .unwrap_or_default();
+    let message = if status.is_success() {
+        if output_text.is_empty() {
+            "model returned a response without text output".to_string()
+        } else {
+            "model test completed".to_string()
+        }
+    } else {
+        json_value
+            .as_ref()
+            .and_then(response_error_message)
+            .unwrap_or_else(|| {
+                if body_text.is_empty() {
+                    format!("upstream returned {}", status)
+                } else {
+                    body_text.clone()
+                }
+            })
+    };
+    let response_value = json_value.unwrap_or_else(|| {
+        serde_json::json!({
+            "body": body_text
+        })
+    });
+
+    admin_test_json_response(
+        status,
+        serde_json::json!({
+            "ok": status.is_success(),
+            "status": status.as_u16(),
+            "model": requested_model,
+            "duration_ms": elapsed.as_millis(),
+            "content_type": content_type,
+            "output_text": output_text,
+            "message": message,
+            "response": response_value
+        }),
+    )
+}
+
+fn admin_test_json_response(status: StatusCode, value: serde_json::Value) -> Response {
+    (
+        status,
+        [("Content-Type", "application/json")],
+        serde_json::to_vec(&value).unwrap_or_default(),
+    )
+        .into_response()
+}
+
+fn extract_response_output_text(value: &serde_json::Value) -> Option<String> {
+    if let Some(text) = value
+        .get("output_text")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(text.to_string());
+    }
+
+    let mut parts = Vec::new();
+    if let Some(output) = value.get("output").and_then(|value| value.as_array()) {
+        for item in output {
+            if let Some(content) = item.get("content") {
+                collect_response_text_parts(content, &mut parts);
+            } else {
+                collect_response_text_parts(item, &mut parts);
+            }
+        }
+    }
+    if parts.is_empty() {
+        if let Some(choices) = value.get("choices").and_then(|value| value.as_array()) {
+            for choice in choices {
+                if let Some(message) = choice.get("message") {
+                    if let Some(content) = message.get("content") {
+                        collect_response_text_parts(content, &mut parts);
+                    }
+                }
+                if let Some(delta) = choice.get("delta") {
+                    if let Some(content) = delta.get("content") {
+                        collect_response_text_parts(content, &mut parts);
+                    }
+                }
+            }
+        }
+    }
+    let text = parts
+        .into_iter()
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn collect_response_text_parts(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => {
+            if !text.trim().is_empty() {
+                out.push(text.to_string());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_response_text_parts(item, out);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if object
+                .get("type")
+                .and_then(|value| value.as_str())
+                .is_some_and(|kind| kind == "refusal")
+            {
+                return;
+            }
+            if let Some(text) = object
+                .get("text")
+                .or_else(|| object.get("output_text"))
+                .and_then(|value| value.as_str())
+            {
+                if !text.trim().is_empty() {
+                    out.push(text.to_string());
+                }
+                return;
+            }
+            if let Some(content) = object.get("content") {
+                collect_response_text_parts(content, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn response_error_message(value: &serde_json::Value) -> Option<String> {
+    let error = value.get("error");
+    error
+        .and_then(|error| error.get("message"))
+        .or_else(|| error.and_then(|error| error.get("error_description")))
+        .or_else(|| value.get("message"))
+        .or_else(|| value.get("error_description"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .or_else(|| {
+            error
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+        })
+}
+
 /// Returns cached quota usage for each configured Codex credential.
 #[utoipa::path(
     get,
@@ -8978,8 +9563,9 @@ async fn custom_models_json_route(State(state): State<AppState>, headers: Header
     }
     let models = state.custom_models.lock().unwrap().clone();
     let model_headers = internal_proxy_api_headers(&state);
-    let model_options =
-        custom_model_options_from_catalog(collect_unified_v1_models(&state, &model_headers).await);
+    let model_catalog = collect_unified_v1_models(&state, &model_headers).await;
+    let model_options = custom_model_options_from_catalog(model_catalog.clone());
+    let test_model_options = test_api_model_options_from_catalog(model_catalog);
     let data = models
         .into_iter()
         .map(|model| {
@@ -8997,6 +9583,7 @@ async fn custom_models_json_route(State(state): State<AppState>, headers: Header
     axum::Json(serde_json::json!({
         "models": data,
         "model_options": model_options,
+        "test_model_options": test_model_options,
         "accounts": notification_account_options(&state),
         "path": custom_models::custom_models_path(&state.cfg)
     }))
@@ -9148,6 +9735,63 @@ fn custom_model_options_from_catalog(models: Vec<serde_json::Value>) -> Vec<serd
                 left.get("model")
                     .and_then(|value| value.as_str())
                     .cmp(&right.get("model").and_then(|value| value.as_str()))
+            })
+    });
+    out
+}
+
+fn test_api_model_options_from_catalog(models: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut seen = HashSet::new();
+    let mut out = models
+        .into_iter()
+        .filter_map(|model| {
+            let id = model
+                .get("id")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if id.is_empty() || !seen.insert(id.to_ascii_lowercase()) {
+                return None;
+            }
+            let provider = model
+                .get("provider_prefix")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .or_else(|| id.split_once(':').map(|(prefix, _)| prefix))
+                .unwrap_or_default()
+                .to_string();
+            let upstream_model = model
+                .get("upstream_model")
+                .and_then(|value| value.as_str())
+                .unwrap_or(id.as_str())
+                .trim()
+                .to_string();
+            let display_name = model
+                .get("display_name")
+                .or_else(|| model.get("name"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(id.as_str())
+                .to_string();
+            Some(serde_json::json!({
+                "provider": provider,
+                "model": upstream_model,
+                "id": id,
+                "display_name": display_name
+            }))
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|left, right| {
+        left.get("provider")
+            .and_then(|value| value.as_str())
+            .cmp(&right.get("provider").and_then(|value| value.as_str()))
+            .then_with(|| {
+                left.get("id")
+                    .and_then(|value| value.as_str())
+                    .cmp(&right.get("id").and_then(|value| value.as_str()))
             })
     });
     out
