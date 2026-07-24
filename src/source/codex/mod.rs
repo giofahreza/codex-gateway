@@ -29,6 +29,7 @@ pub fn route_to_target(
     if matches!(upstream_path.as_str(), "responses" | "responses/compact")
         && *method == Method::POST
     {
+        let body = crate::source::decode_stringified_responses_input(body);
         crate::source::v1::provider::validate_provider_prefix_in_body(&body)?;
         let target = crate::source::v1::provider::target_from_request_body(&body)
             .unwrap_or(TargetModel::Codex);
@@ -52,6 +53,7 @@ pub fn route_to_target(
                 body,
             ));
         }
+        return Ok(codex::convert(upstream_path, uri, method, headers, body));
     }
 
     Ok(codex::convert(upstream_path, uri, method, headers, body))
@@ -226,6 +228,68 @@ mod tests {
         assert_eq!(body["model"], "gemini-2.5-pro");
         assert!(body.get("messages").is_none());
         assert_eq!(body["input"][0]["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn codex_responses_decodes_stringified_input_when_switching_to_provider() {
+        let uri: Uri = "/codex/responses".parse().unwrap();
+        let transcript = serde_json::json!([
+            {
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "hello from codex session" }]
+            }
+        ]);
+        let request = serde_json::json!({
+            "model": "cop:gpt-5.1",
+            "input": transcript.to_string(),
+            "store": true,
+            "include": ["reasoning.encrypted_content"]
+        });
+
+        let routed = route_to_target(
+            "/codex/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from(request.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::Copilot);
+        let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "gpt-5.1");
+        assert_eq!(body["input"], transcript);
+        assert_eq!(body["store"], true);
+        assert_eq!(body["include"][0], "reasoning.encrypted_content");
+    }
+
+    #[test]
+    fn codex_responses_decodes_stringified_input_for_codex_upstream() {
+        let uri: Uri = "/codex/responses".parse().unwrap();
+        let transcript = serde_json::json!([
+            {
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "continue" }]
+            }
+        ]);
+        let request = serde_json::json!({
+            "model": "cod:gpt-5.4",
+            "input": transcript.to_string()
+        });
+
+        let routed = route_to_target(
+            "/codex/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from(request.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::Codex);
+        let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "gpt-5.4");
+        assert_eq!(body["input"], transcript);
     }
 
     #[test]

@@ -31,12 +31,14 @@ pub fn route_to_target(
     if matches!(upstream_path.as_str(), "responses" | "responses/compact")
         && *method == Method::POST
     {
+        let body = crate::source::decode_stringified_responses_input(body);
         provider::validate_provider_prefix_in_body(&body)?;
         let target =
             provider::target_from_request_body(&body).unwrap_or(crate::source::TargetModel::Codex);
         if target != crate::source::TargetModel::Codex {
             return Ok(provider::convert(target, upstream_path, uri, body));
         }
+        return Ok(codex::convert(upstream_path, uri, method, headers, body));
     }
 
     if upstream_path == "chat/completions" && *method == Method::POST {
@@ -312,6 +314,64 @@ mod tests {
         assert_eq!(codex.target, crate::source::TargetModel::Codex);
         let body: serde_json::Value = serde_json::from_slice(&codex.upstream_body).unwrap();
         assert_eq!(body["model"], "gpt-5.4");
+    }
+
+    #[test]
+    fn route_to_target_decodes_stringified_input_for_prefixed_provider() {
+        let uri: Uri = "/v1/responses".parse().unwrap();
+        let transcript = serde_json::json!([
+            {
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "resume this session" }]
+            }
+        ]);
+        let request = serde_json::json!({
+            "model": "qwn:qwen3-coder-plus",
+            "input": transcript.to_string()
+        });
+
+        let routed = route_to_target(
+            "/v1/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from(request.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, crate::source::TargetModel::Qwen);
+        let body: serde_json::Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "qwen3-coder-plus");
+        assert_eq!(body["input"], transcript);
+    }
+
+    #[test]
+    fn route_to_target_decodes_stringified_input_before_codex_compat_conversion() {
+        let uri: Uri = "/v1/responses".parse().unwrap();
+        let transcript = serde_json::json!([
+            {
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "continue" }]
+            }
+        ]);
+        let request = serde_json::json!({
+            "model": "cod:gpt-5.4",
+            "input": transcript.to_string()
+        });
+
+        let routed = route_to_target(
+            "/v1/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from(request.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, crate::source::TargetModel::Codex);
+        let body: serde_json::Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "gpt-5.4");
+        assert_eq!(body["input"], transcript);
     }
 
     #[test]
