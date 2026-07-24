@@ -305,6 +305,32 @@ mod tests {
     }
 
     #[test]
+    fn native_codex_replaces_non_object_argument_strings_with_empty_objects() {
+        let body = serde_json::json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_1",
+                    "arguments": ""
+                },
+                {
+                    "type": "tool_search_call",
+                    "call_id": "call_2",
+                    "arguments": "\"not an object\""
+                }
+            ]
+        })
+        .to_string();
+        let sanitized = sanitize_native_codex_responses_body(Bytes::from(body));
+        let v: Value = serde_json::from_slice(&sanitized).unwrap();
+
+        assert_eq!(v["input"][0]["arguments"], serde_json::json!({}));
+        assert_eq!(v["input"][1]["arguments"], serde_json::json!({}));
+    }
+
+    #[test]
     fn chatgpt_plan_models_keep_unrelated_params_and_drop_image_generation_for_spark() {
         // gpt-5.3-codex-spark rejects the image_generation tool but accepts
         // token-limit params, so only one branch should fire.

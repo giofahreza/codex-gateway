@@ -257,11 +257,11 @@ pub(crate) fn objectify_responses_input_arguments(value: &mut Value) -> bool {
         Value::Object(object) => {
             let mut changed = false;
             if let Some(arguments) = object.get_mut("arguments") {
-                if let Some(parsed) = arguments
-                    .as_str()
-                    .and_then(|text| serde_json::from_str::<Value>(text).ok())
-                    .filter(|parsed| parsed.is_object())
-                {
+                if let Some(text) = arguments.as_str() {
+                    let parsed = serde_json::from_str::<Value>(text)
+                        .ok()
+                        .filter(|parsed| parsed.is_object())
+                        .unwrap_or_else(|| serde_json::json!({}));
                     *arguments = parsed;
                     changed = true;
                 }
@@ -464,6 +464,37 @@ mod tests {
             value["input"][0]["arguments"],
             serde_json::json!("{\"path\":\"/tmp\"}")
         );
+    }
+
+    #[test]
+    fn objectifies_non_object_argument_strings_for_codex_inputs() {
+        let mut input = serde_json::json!([
+            {
+                "type": "function_call",
+                "name": "empty_args",
+                "arguments": ""
+            },
+            {
+                "type": "tool_search_call",
+                "arguments": "\"plain text\""
+            },
+            {
+                "type": "function_call",
+                "name": "array_args",
+                "arguments": "[\"not\", \"an\", \"object\"]"
+            },
+            {
+                "type": "function_call",
+                "name": "object_args",
+                "arguments": "{\"path\":\"/tmp\"}"
+            }
+        ]);
+
+        assert!(objectify_responses_input_arguments(&mut input));
+        assert_eq!(input[0]["arguments"], serde_json::json!({}));
+        assert_eq!(input[1]["arguments"], serde_json::json!({}));
+        assert_eq!(input[2]["arguments"], serde_json::json!({}));
+        assert_eq!(input[3]["arguments"], serde_json::json!({"path": "/tmp"}));
     }
 
     #[test]
