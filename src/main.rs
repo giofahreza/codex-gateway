@@ -1028,7 +1028,7 @@ async fn background_maintenance(state: AppState) {
 }
 
 fn cleanup_generated_temp_files(max_age: Duration) {
-    let dir = std::path::Path::new("/tmp/gpt-gateway-downloads");
+    let dir = std::path::Path::new("/tmp/io-gateway-downloads");
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -3199,7 +3199,7 @@ async fn dashboard() -> impl IntoResponse {
     <script>
       (() => {
         try {
-          const savedTheme = localStorage.getItem('gpt-gateway-theme');
+          const savedTheme = localStorage.getItem('io-gateway-theme');
           document.documentElement.setAttribute('data-theme', savedTheme === 'light' ? 'light' : 'dark');
         } catch (_) {
           document.documentElement.setAttribute('data-theme', 'dark');
@@ -3471,9 +3471,9 @@ async fn dashboard() -> impl IntoResponse {
       let copilotDevicePollInFlight = false;
       let copilotDeviceExpiresAt = 0;
       let providerRowArrangeTimer = null;
-      const THEME_KEY = 'gpt-gateway-theme';
-      const CONTEXT_RANGE_KEY = 'gpt-gateway-context-range';
-      const PROVIDER_DASHBOARD_SETTINGS_KEY = 'gpt-gateway-provider-dashboard-settings';
+      const THEME_KEY = 'io-gateway-theme';
+      const CONTEXT_RANGE_KEY = 'io-gateway-context-range';
+      const PROVIDER_DASHBOARD_SETTINGS_KEY = 'io-gateway-provider-dashboard-settings';
       const dashboardProviderKeys = [
         'codex',
         'agw',
@@ -11143,7 +11143,7 @@ async fn temp_file_route(
         return (StatusCode::BAD_REQUEST, "invalid file name").into_response();
     }
 
-    let path = std::path::Path::new("/tmp/gpt-gateway-downloads").join(&name);
+    let path = std::path::Path::new("/tmp/io-gateway-downloads").join(&name);
     let body = match std::fs::read(&path) {
         Ok(body) => body,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {

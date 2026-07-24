@@ -121,7 +121,7 @@ async fn save_account(state: &crate::AppState, body: &Bytes) -> axum::response::
         .cfg
         .auth_dir
         .clone()
-        .unwrap_or_else(|| "/root/dev/yow/gpt-gateway/auths".to_string());
+        .unwrap_or_else(|| "/root/dev/yow/io-gateway/auths".to_string());
     let file_name = format!("deepseek-{}.json", sanitize_label(&label));
     let path = std::path::Path::new(&auth_dir).join(file_name);
     let now = chrono::Utc::now().to_rfc3339();

@@ -291,7 +291,7 @@ pub fn save_auth(
         .cfg
         .auth_dir
         .clone()
-        .unwrap_or_else(|| "/root/dev/yow/gpt-gateway/auths".to_string());
+        .unwrap_or_else(|| "/root/dev/yow/io-gateway/auths".to_string());
     std::fs::create_dir_all(&auth_dir).map_err(|err| err.to_string())?;
 
     let account_type = normalize_account_type(Some(account_type));

@@ -670,7 +670,7 @@ fn load_auth_value(state: &crate::AppState, file_name: Option<&str>) -> Option<V
         .cfg
         .auth_dir
         .clone()
-        .unwrap_or_else(|| "/root/dev/yow/gpt-gateway/auths".to_string());
+        .unwrap_or_else(|| "/root/dev/yow/io-gateway/auths".to_string());
     let path = std::path::Path::new(&auth_dir).join(file_name);
     let data = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&data).ok()

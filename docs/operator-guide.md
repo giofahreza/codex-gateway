@@ -95,18 +95,19 @@ The workflow uses the current production layout:
 | Setting | Value |
 |---|---|
 | Server | `ubuntu@141.144.197.96` |
-| Remote checkout | `/home/ubuntu/io-gateway` |
-| Live binary | `/opt/gpt-gateway/gpt-gateway` |
-| Systemd service | `gpt-gateway.service` |
+| Staged binary | `/home/ubuntu/io-gateway.<commit>` |
+| Live binary | `/opt/io-gateway/io-gateway` |
+| Systemd service | `io-gateway.service` |
+| Revision metadata | `/opt/io-gateway/revision.json` |
 | Health checks | `http://127.0.0.1:8319/health`, `http://127.0.0.1:8319/ready` |
 
 Deployment flow:
 
 1. Run `cargo fmt --check`, dashboard JavaScript syntax check, `cargo test --locked`, and `cargo build --release --locked`.
-2. Upload the release binary to `/home/ubuntu/gpt-gateway.<commit>`.
-3. Move the legacy `/home/ubuntu/codex-gateway` checkout to `/home/ubuntu/io-gateway` on first deploy if needed.
-4. Check out the tagged commit on the server.
-5. Back up the current live binary, install the new binary, restart `gpt-gateway.service`, and verify health/readiness.
+2. Upload the release binary to `/home/ubuntu/io-gateway.<commit>`.
+3. Verify the staged binary checksum against the GitHub-built artifact.
+4. Back up the current live binary, install the new binary, restart `io-gateway.service`, and verify health/readiness.
+5. Verify the live binary checksum and write `/opt/io-gateway/revision.json`.
 
 ---
 

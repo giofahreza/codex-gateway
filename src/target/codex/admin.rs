@@ -124,7 +124,7 @@ pub async fn delete_credential(
         .cfg
         .auth_dir
         .clone()
-        .unwrap_or_else(|| "/root/dev/yow/gpt-gateway/auths".to_string());
+        .unwrap_or_else(|| "/root/dev/yow/io-gateway/auths".to_string());
     let path = std::path::Path::new(&auth_dir).join(file_name);
     match std::fs::remove_file(&path) {
         Ok(_) => {

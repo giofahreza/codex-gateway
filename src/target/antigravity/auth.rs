@@ -285,7 +285,7 @@ pub fn save_auth(
         .cfg
         .auth_dir
         .clone()
-        .unwrap_or_else(|| "/root/dev/yow/gpt-gateway/auths".to_string());
+        .unwrap_or_else(|| "/root/dev/yow/io-gateway/auths".to_string());
     let path = std::path::Path::new(&auth_dir).join(file_name);
     std::fs::create_dir_all(&auth_dir).map_err(|e| e.to_string())?;
     let out = serde_json::json!({
@@ -352,7 +352,7 @@ fn persist_refreshed_account(
         .cfg
         .auth_dir
         .clone()
-        .unwrap_or_else(|| "/root/dev/yow/gpt-gateway/auths".to_string());
+        .unwrap_or_else(|| "/root/dev/yow/io-gateway/auths".to_string());
     let path = std::path::Path::new(&auth_dir).join(file_name);
     let data = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let mut value: serde_json::Value = serde_json::from_str(&data).map_err(|e| e.to_string())?;

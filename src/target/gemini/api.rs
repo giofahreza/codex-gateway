@@ -1170,7 +1170,7 @@ fn attach_temp_downloads(response: &mut serde_json::Value) {
         return;
     }
 
-    if std::fs::create_dir_all("/tmp/gpt-gateway-downloads").is_err() {
+    if std::fs::create_dir_all("/tmp/io-gateway-downloads").is_err() {
         return;
     }
 
@@ -1197,7 +1197,7 @@ fn attach_temp_downloads(response: &mut serde_json::Value) {
 
         let ext = image_extension(mime_type);
         let file_name = format!("gemini-{}.{}", Uuid::new_v4().simple(), ext);
-        let file_path = format!("/tmp/gpt-gateway-downloads/{}", file_name);
+        let file_path = format!("/tmp/io-gateway-downloads/{}", file_name);
         if std::fs::write(&file_path, bytes).is_err() {
             continue;
         }

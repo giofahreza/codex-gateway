@@ -751,7 +751,7 @@ pub fn save_auth(
     let auth_dir = cfg
         .auth_dir
         .clone()
-        .unwrap_or_else(|| "/root/dev/yow/gpt-gateway/auths".to_string());
+        .unwrap_or_else(|| "/root/dev/yow/io-gateway/auths".to_string());
     std::fs::create_dir_all(&auth_dir).map_err(|err| err.to_string())?;
 
     let organization_uuid = organization_uuid
@@ -858,7 +858,7 @@ fn persist_refreshed_token(
         .cfg
         .auth_dir
         .clone()
-        .unwrap_or_else(|| "/root/dev/yow/gpt-gateway/auths".to_string());
+        .unwrap_or_else(|| "/root/dev/yow/io-gateway/auths".to_string());
     let path = Path::new(&auth_dir).join(file_name);
     let mut value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).map_err(|err| err.to_string())?)
