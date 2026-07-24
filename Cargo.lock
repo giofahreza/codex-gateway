@@ -249,38 +249,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "io-gateway"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "async-stream",
- "axum",
- "base64",
- "bytes",
- "chrono",
- "data-encoding",
- "futures-util",
- "hmac",
- "http",
- "rand",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sha1",
- "sha2",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
- "url",
- "utoipa",
- "utoipa-swagger-ui",
- "uuid",
-]
-
-[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -845,6 +813,38 @@ dependencies = [
  "hashbrown 0.17.0",
  "serde",
  "serde_core",
+]
+
+[[package]]
+name = "io-gateway"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "async-stream",
+ "axum",
+ "base64",
+ "bytes",
+ "chrono",
+ "data-encoding",
+ "futures-util",
+ "hmac",
+ "http",
+ "rand",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sha1",
+ "sha2",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "utoipa",
+ "utoipa-swagger-ui",
+ "uuid",
 ]
 
 [[package]]

@@ -73,15 +73,24 @@ pub(crate) fn decode_stringified_responses_input(body: Bytes) -> Bytes {
     let Some(object) = value.as_object_mut() else {
         return body;
     };
-    let Some(input) = object.get("input").and_then(|value| value.as_str()) else {
-        return body;
-    };
-    let Some(decoded) = parse_stringified_responses_input(input) else {
-        return body;
-    };
+    let mut changed = false;
 
-    object.insert("input".to_string(), decoded);
-    serde_json::to_vec(&value).map(Bytes::from).unwrap_or(body)
+    if let Some(input) = object.get("input").and_then(|value| value.as_str()) {
+        if let Some(decoded) = parse_stringified_responses_input(input) {
+            object.insert("input".to_string(), decoded);
+            changed = true;
+        }
+    }
+
+    if let Some(input) = object.get_mut("input") {
+        changed |= sanitize_responses_input(input);
+    }
+
+    if changed {
+        serde_json::to_vec(&value).map(Bytes::from).unwrap_or(body)
+    } else {
+        body
+    }
 }
 
 fn parse_stringified_responses_input(input: &str) -> Option<Value> {
@@ -178,6 +187,33 @@ fn looks_like_responses_input_item(item: &Value) -> bool {
                 | "image_generation_call"
         )
     )
+}
+
+fn sanitize_responses_input(value: &mut Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter_mut().fold(false, |changed, item| {
+            sanitize_responses_input(item) || changed
+        }),
+        Value::Object(object) => {
+            let mut changed = object
+                .remove("internal_chat_message_metadata_passthrough")
+                .is_some();
+
+            if let Some(arguments) = object.get_mut("arguments") {
+                if !arguments.is_string() {
+                    let encoded =
+                        serde_json::to_string(arguments).unwrap_or_else(|_| arguments.to_string());
+                    *arguments = Value::String(encoded);
+                    changed = true;
+                }
+            }
+
+            object.values_mut().fold(changed, |changed, item| {
+                sanitize_responses_input(item) || changed
+            })
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn strip_prefix_path(path: &str, prefix: &str) -> String {
@@ -287,6 +323,66 @@ mod tests {
         let decoded = decode_stringified_responses_input(Bytes::from(body));
         let value: Value = serde_json::from_slice(&decoded).unwrap();
         assert_eq!(value["input"], serde_json::json!([item]));
+    }
+
+    #[test]
+    fn sanitizes_decoded_codex_internal_metadata_and_object_arguments() {
+        let transcript = serde_json::json!([
+            {
+                "type": "tool_search_call",
+                "id": "ts_1",
+                "call_id": "call_1",
+                "arguments": { "query": "Atlassian MCP" },
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn_1"
+                }
+            },
+            {
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "continue" }]
+            }
+        ]);
+        let body = serde_json::json!({
+            "model": "MiniMax-M3",
+            "input": transcript.to_string()
+        })
+        .to_string();
+
+        let decoded = decode_stringified_responses_input(Bytes::from(body));
+        let value: Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(
+            value["input"][0]["arguments"],
+            serde_json::json!("{\"query\":\"Atlassian MCP\"}")
+        );
+        assert!(value["input"][0]
+            .get("internal_chat_message_metadata_passthrough")
+            .is_none());
+    }
+
+    #[test]
+    fn sanitizes_real_input_array_without_requiring_stringified_input() {
+        let body = serde_json::json!({
+            "model": "MiniMax-M3",
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "tool",
+                    "arguments": { "path": "/tmp" },
+                    "internal_chat_message_metadata_passthrough": { "turn_id": "turn_1" }
+                }
+            ]
+        })
+        .to_string();
+
+        let decoded = decode_stringified_responses_input(Bytes::from(body));
+        let value: Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(
+            value["input"][0]["arguments"],
+            serde_json::json!("{\"path\":\"/tmp\"}")
+        );
+        assert!(value["input"][0]
+            .get("internal_chat_message_metadata_passthrough")
+            .is_none());
     }
 
     #[test]
