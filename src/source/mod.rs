@@ -85,12 +85,46 @@ pub(crate) fn decode_stringified_responses_input(body: Bytes) -> Bytes {
 }
 
 fn parse_stringified_responses_input(input: &str) -> Option<Value> {
-    let trimmed = input.trim();
-    if !trimmed.starts_with('[') {
+    let mut current = input.trim().to_string();
+    for _ in 0..4 {
+        if current.starts_with('[') {
+            let decoded = serde_json::from_str::<Value>(&current).ok()?;
+            return responses_input_array(decoded);
+        }
+
+        if current.starts_with('{') {
+            let decoded = serde_json::from_str::<Value>(&current).ok()?;
+            if looks_like_responses_input_item(&decoded) {
+                return Some(Value::Array(vec![decoded]));
+            }
+            if let Some(inner) = decoded.get("input") {
+                if let Some(array) = responses_input_array(inner.clone()) {
+                    return Some(array);
+                }
+                if let Some(input) = inner.as_str() {
+                    current = input.trim().to_string();
+                    continue;
+                }
+            }
+            return None;
+        }
+
+        if current.starts_with('"') {
+            let decoded = serde_json::from_str::<String>(&current).ok()?;
+            let next = decoded.trim();
+            if next == current {
+                return None;
+            }
+            current = next.to_string();
+            continue;
+        }
+
         return None;
     }
+    None
+}
 
-    let decoded = serde_json::from_str::<Value>(trimmed).ok()?;
+fn responses_input_array(decoded: Value) -> Option<Value> {
     let items = decoded.as_array()?;
     let all_items_have_response_markers = items.iter().all(has_responses_input_item_markers);
     let has_known_response_item =
@@ -201,6 +235,61 @@ mod tests {
     }
 
     #[test]
+    fn decodes_double_stringified_responses_input_array() {
+        let transcript = serde_json::json!([
+            {
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "hello" }]
+            }
+        ]);
+        let body = serde_json::json!({
+            "model": "gpt-5.4",
+            "input": serde_json::to_string(&transcript.to_string()).unwrap()
+        })
+        .to_string();
+
+        let decoded = decode_stringified_responses_input(Bytes::from(body));
+        let value: Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(value["input"], transcript);
+    }
+
+    #[test]
+    fn decodes_stringified_request_body_input_array() {
+        let transcript = serde_json::json!([
+            {
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "hello" }]
+            }
+        ]);
+        let body = serde_json::json!({
+            "model": "gpt-5.4",
+            "input": serde_json::json!({ "input": transcript }).to_string()
+        })
+        .to_string();
+
+        let decoded = decode_stringified_responses_input(Bytes::from(body));
+        let value: Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(value["input"], transcript);
+    }
+
+    #[test]
+    fn decodes_stringified_single_response_item_as_array() {
+        let item = serde_json::json!({
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "hello" }]
+        });
+        let body = serde_json::json!({
+            "model": "gpt-5.4",
+            "input": item.to_string()
+        })
+        .to_string();
+
+        let decoded = decode_stringified_responses_input(Bytes::from(body));
+        let value: Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(value["input"], serde_json::json!([item]));
+    }
+
+    #[test]
     fn leaves_plain_prompt_strings_untouched() {
         let body = Bytes::from_static(br#"{"model":"gpt-5.4","input":"[not json"}"#);
         let decoded = decode_stringified_responses_input(body.clone());
@@ -240,6 +329,13 @@ mod tests {
     #[test]
     fn leaves_unknown_typed_json_array_prompt_untouched() {
         let body = Bytes::from_static(br#"{"model":"gpt-5.4","input":"[{\"type\":\"todo\"}]"}"#);
+        let decoded = decode_stringified_responses_input(body.clone());
+        assert_eq!(decoded, body);
+    }
+
+    #[test]
+    fn leaves_plain_json_object_prompt_untouched() {
+        let body = Bytes::from_static(br#"{"model":"gpt-5.4","input":"{\"todo\":true}"}"#);
         let decoded = decode_stringified_responses_input(body.clone());
         assert_eq!(decoded, body);
     }

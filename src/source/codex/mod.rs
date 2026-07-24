@@ -376,7 +376,8 @@ mod tests {
         assert_eq!(routed.target, TargetModel::Codex);
         let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
         assert_eq!(body["model"], "gpt-5.4");
-        assert_eq!(body["input"], "hello");
+        assert_eq!(body["input"][0]["role"], "user");
+        assert_eq!(body["input"][0]["content"][0]["text"], "hello");
     }
 
     #[test]
@@ -396,7 +397,8 @@ mod tests {
         assert_eq!(routed.target, TargetModel::Codex);
         let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
         assert_eq!(body["model"], "gpt-5.3-codex-spark");
-        assert_eq!(body["input"], "qa only");
+        assert_eq!(body["input"][0]["role"], "user");
+        assert_eq!(body["input"][0]["content"][0]["text"], "qa only");
         let tools = body["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["type"], "function");

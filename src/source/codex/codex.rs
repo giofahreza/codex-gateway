@@ -57,6 +57,24 @@ fn sanitize_native_codex_responses_body(body: Bytes) -> Bytes {
     let mut changed = false;
     let mut remove_tools = false;
 
+    if let Some(text) = object
+        .get("input")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+    {
+        object.insert(
+            "input".to_string(),
+            serde_json::json!([{
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": text
+                }]
+            }]),
+        );
+        changed = true;
+    }
+
     if model_rejects_image_generation_tool(&model) {
         if let Some(tools) = object
             .get_mut("tools")
@@ -235,6 +253,26 @@ mod tests {
         let v: Value = serde_json::from_slice(&sanitized).unwrap();
         assert_eq!(v["service_tier"], "priority");
         assert!(v.get("max_output_tokens").is_none());
+    }
+
+    #[test]
+    fn native_codex_wraps_plain_string_input() {
+        let body = serde_json::json!({
+            "model": "gpt-5.4",
+            "input": "hello from a compat client",
+            "stream": true
+        })
+        .to_string();
+        let sanitized = sanitize_native_codex_responses_body(Bytes::from(body));
+        let v: Value = serde_json::from_slice(&sanitized).unwrap();
+
+        assert_eq!(v["input"][0]["role"], "user");
+        assert_eq!(v["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(
+            v["input"][0]["content"][0]["text"],
+            "hello from a compat client"
+        );
+        assert_eq!(v["stream"], true);
     }
 
     #[test]
