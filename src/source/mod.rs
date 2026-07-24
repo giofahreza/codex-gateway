@@ -256,14 +256,18 @@ pub(crate) fn objectify_responses_input_arguments(value: &mut Value) -> bool {
         }),
         Value::Object(object) => {
             let mut changed = false;
-            if let Some(arguments) = object.get_mut("arguments") {
-                if let Some(text) = arguments.as_str() {
-                    let parsed = serde_json::from_str::<Value>(text)
-                        .ok()
-                        .filter(|parsed| parsed.is_object())
-                        .unwrap_or_else(|| serde_json::json!({}));
-                    *arguments = parsed;
-                    changed = true;
+            let should_objectify_arguments =
+                object.get("type").and_then(|value| value.as_str()) == Some("tool_search_call");
+            if should_objectify_arguments {
+                if let Some(arguments) = object.get_mut("arguments") {
+                    if let Some(text) = arguments.as_str() {
+                        let parsed = serde_json::from_str::<Value>(text)
+                            .ok()
+                            .filter(|parsed| parsed.is_object())
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        *arguments = parsed;
+                        changed = true;
+                    }
                 }
             }
 
@@ -467,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn objectifies_non_object_argument_strings_for_codex_inputs() {
+    fn objectifies_tool_search_argument_strings_for_codex_inputs() {
         let mut input = serde_json::json!([
             {
                 "type": "function_call",
@@ -479,19 +483,19 @@ mod tests {
                 "arguments": "\"plain text\""
             },
             {
-                "type": "function_call",
+                "type": "tool_search_call",
                 "name": "array_args",
                 "arguments": "[\"not\", \"an\", \"object\"]"
             },
             {
-                "type": "function_call",
+                "type": "tool_search_call",
                 "name": "object_args",
                 "arguments": "{\"path\":\"/tmp\"}"
             }
         ]);
 
         assert!(objectify_responses_input_arguments(&mut input));
-        assert_eq!(input[0]["arguments"], serde_json::json!({}));
+        assert_eq!(input[0]["arguments"], "");
         assert_eq!(input[1]["arguments"], serde_json::json!({}));
         assert_eq!(input[2]["arguments"], serde_json::json!({}));
         assert_eq!(input[3]["arguments"], serde_json::json!({"path": "/tmp"}));

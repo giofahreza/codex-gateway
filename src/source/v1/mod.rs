@@ -392,8 +392,7 @@ mod tests {
             "model": "cod:gpt-5.4",
             "input": [
                 {
-                    "type": "function_call",
-                    "name": "exec_command",
+                    "type": "tool_search_call",
                     "call_id": "call_1",
                     "arguments": "{\"cmd\":\"pwd\"}"
                 }
@@ -419,6 +418,39 @@ mod tests {
             body["input"][0]["arguments"],
             serde_json::json!({"cmd": "pwd"})
         );
+    }
+
+    #[test]
+    fn route_to_target_preserves_function_call_argument_strings_for_codex_upstream() {
+        let uri: Uri = "/v1/responses".parse().unwrap();
+        let request = serde_json::json!({
+            "model": "cod:gpt-5.4",
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_1",
+                    "arguments": "{\"cmd\":\"pwd\"}"
+                }
+            ]
+        });
+
+        let routed = route_to_target(
+            "/v1/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::from_iter([(
+                "content-type".parse().unwrap(),
+                "application/json".parse().unwrap(),
+            )]),
+            Bytes::from(request.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, crate::source::TargetModel::Codex);
+        let body: serde_json::Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "gpt-5.4");
+        assert_eq!(body["input"][0]["arguments"], "{\"cmd\":\"pwd\"}");
     }
 
     #[test]

@@ -304,8 +304,7 @@ mod tests {
             "model": "cod:gpt-5.4",
             "input": [
                 {
-                    "type": "function_call",
-                    "name": "exec_command",
+                    "type": "tool_search_call",
                     "call_id": "call_1",
                     "arguments": "{\"cmd\":\"pwd\"}"
                 }
@@ -328,6 +327,36 @@ mod tests {
             body["input"][0]["arguments"],
             serde_json::json!({"cmd": "pwd"})
         );
+    }
+
+    #[test]
+    fn codex_responses_preserves_function_call_argument_strings_for_codex_upstream() {
+        let uri: Uri = "/codex/responses".parse().unwrap();
+        let request = serde_json::json!({
+            "model": "cod:gpt-5.4",
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_1",
+                    "arguments": "{\"cmd\":\"pwd\"}"
+                }
+            ]
+        });
+
+        let routed = route_to_target(
+            "/codex/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from(request.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::Codex);
+        let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "gpt-5.4");
+        assert_eq!(body["input"][0]["arguments"], "{\"cmd\":\"pwd\"}");
     }
 
     #[test]
