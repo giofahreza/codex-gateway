@@ -106,6 +106,10 @@ fn convert_openai_compat_body_to_codex(headers: &HeaderMap, body: Bytes) -> Byte
             );
         }
 
+        if let Some(input) = map.get_mut("input") {
+            crate::source::objectify_responses_input_arguments(input);
+        }
+
         // Codex backend rejects this field.
         map.remove("max_output_tokens");
 

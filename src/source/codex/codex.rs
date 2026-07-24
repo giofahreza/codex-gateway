@@ -75,6 +75,10 @@ fn sanitize_native_codex_responses_body(body: Bytes) -> Bytes {
         changed = true;
     }
 
+    if let Some(input) = object.get_mut("input") {
+        changed |= crate::source::objectify_responses_input_arguments(input);
+    }
+
     if model_rejects_image_generation_tool(&model) {
         if let Some(tools) = object
             .get_mut("tools")
@@ -273,6 +277,31 @@ mod tests {
             "hello from a compat client"
         );
         assert_eq!(v["stream"], true);
+    }
+
+    #[test]
+    fn native_codex_parses_function_call_arguments_strings_to_objects() {
+        let body = serde_json::json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_1",
+                    "arguments": "{\"cmd\":\"pwd\",\"workdir\":\"/tmp\"}"
+                }
+            ],
+            "max_output_tokens": 64
+        })
+        .to_string();
+        let sanitized = sanitize_native_codex_responses_body(Bytes::from(body));
+        let v: Value = serde_json::from_slice(&sanitized).unwrap();
+
+        assert_eq!(
+            v["input"][0]["arguments"],
+            serde_json::json!({ "cmd": "pwd", "workdir": "/tmp" })
+        );
+        assert!(v.get("max_output_tokens").is_none());
     }
 
     #[test]

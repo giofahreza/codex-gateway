@@ -83,7 +83,7 @@ pub(crate) fn decode_stringified_responses_input(body: Bytes) -> Bytes {
     }
 
     if let Some(input) = object.get_mut("input") {
-        changed |= sanitize_responses_input(input);
+        changed |= strip_codex_internal_responses_input_metadata(input);
     }
 
     if changed {
@@ -189,16 +189,49 @@ fn looks_like_responses_input_item(item: &Value) -> bool {
     )
 }
 
-fn sanitize_responses_input(value: &mut Value) -> bool {
+fn strip_codex_internal_responses_input_metadata(value: &mut Value) -> bool {
     match value {
         Value::Array(items) => items.iter_mut().fold(false, |changed, item| {
-            sanitize_responses_input(item) || changed
+            strip_codex_internal_responses_input_metadata(item) || changed
         }),
         Value::Object(object) => {
-            let mut changed = object
+            let changed = object
                 .remove("internal_chat_message_metadata_passthrough")
                 .is_some();
 
+            object.values_mut().fold(changed, |changed, item| {
+                strip_codex_internal_responses_input_metadata(item) || changed
+            })
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn stringify_responses_input_arguments(body: Bytes) -> Bytes {
+    let Ok(mut value) = serde_json::from_slice::<Value>(&body) else {
+        return body;
+    };
+    let Some(input) = value
+        .as_object_mut()
+        .and_then(|object| object.get_mut("input"))
+    else {
+        return body;
+    };
+
+    if stringify_arguments(input) {
+        serde_json::to_vec(&value).map(Bytes::from).unwrap_or(body)
+    } else {
+        body
+    }
+}
+
+fn stringify_arguments(value: &mut Value) -> bool {
+    match value {
+        Value::Array(items) => items
+            .iter_mut()
+            .fold(false, |changed, item| stringify_arguments(item) || changed),
+        Value::Object(object) => {
+            let mut changed = false;
             if let Some(arguments) = object.get_mut("arguments") {
                 if !arguments.is_string() {
                     let encoded =
@@ -209,7 +242,33 @@ fn sanitize_responses_input(value: &mut Value) -> bool {
             }
 
             object.values_mut().fold(changed, |changed, item| {
-                sanitize_responses_input(item) || changed
+                stringify_arguments(item) || changed
+            })
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn objectify_responses_input_arguments(value: &mut Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter_mut().fold(false, |changed, item| {
+            objectify_responses_input_arguments(item) || changed
+        }),
+        Value::Object(object) => {
+            let mut changed = false;
+            if let Some(arguments) = object.get_mut("arguments") {
+                if let Some(parsed) = arguments
+                    .as_str()
+                    .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                    .filter(|parsed| parsed.is_object())
+                {
+                    *arguments = parsed;
+                    changed = true;
+                }
+            }
+
+            object.values_mut().fold(changed, |changed, item| {
+                objectify_responses_input_arguments(item) || changed
             })
         }
         _ => false,
@@ -326,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitizes_decoded_codex_internal_metadata_and_object_arguments() {
+    fn strips_decoded_codex_internal_metadata_and_preserves_object_arguments() {
         let transcript = serde_json::json!([
             {
                 "type": "tool_search_call",
@@ -352,7 +411,7 @@ mod tests {
         let value: Value = serde_json::from_slice(&decoded).unwrap();
         assert_eq!(
             value["input"][0]["arguments"],
-            serde_json::json!("{\"query\":\"Atlassian MCP\"}")
+            serde_json::json!({ "query": "Atlassian MCP" })
         );
         assert!(value["input"][0]
             .get("internal_chat_message_metadata_passthrough")
@@ -360,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitizes_real_input_array_without_requiring_stringified_input() {
+    fn strips_real_input_array_metadata_without_requiring_stringified_input() {
         let body = serde_json::json!({
             "model": "MiniMax-M3",
             "input": [
@@ -378,11 +437,33 @@ mod tests {
         let value: Value = serde_json::from_slice(&decoded).unwrap();
         assert_eq!(
             value["input"][0]["arguments"],
-            serde_json::json!("{\"path\":\"/tmp\"}")
+            serde_json::json!({ "path": "/tmp" })
         );
         assert!(value["input"][0]
             .get("internal_chat_message_metadata_passthrough")
             .is_none());
+    }
+
+    #[test]
+    fn stringifies_responses_input_arguments_for_string_argument_providers() {
+        let body = serde_json::json!({
+            "model": "MiniMax-M3",
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "tool",
+                    "arguments": { "path": "/tmp" }
+                }
+            ]
+        })
+        .to_string();
+
+        let decoded = stringify_responses_input_arguments(Bytes::from(body));
+        let value: Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(
+            value["input"][0]["arguments"],
+            serde_json::json!("{\"path\":\"/tmp\"}")
+        );
     }
 
     #[test]

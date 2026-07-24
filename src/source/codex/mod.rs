@@ -38,6 +38,11 @@ pub fn route_to_target(
                 target,
                 TargetModel::MiniMax | TargetModel::Copilot | TargetModel::Custom
             ) {
+                let body = if target == TargetModel::MiniMax {
+                    crate::source::stringify_responses_input_arguments(body)
+                } else {
+                    body
+                };
                 return Ok(crate::source::v1::provider::convert(
                     target,
                     upstream_path,
@@ -293,6 +298,39 @@ mod tests {
     }
 
     #[test]
+    fn codex_responses_objectifies_arguments_for_codex_upstream() {
+        let uri: Uri = "/codex/responses".parse().unwrap();
+        let request = serde_json::json!({
+            "model": "cod:gpt-5.4",
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_1",
+                    "arguments": "{\"cmd\":\"pwd\"}"
+                }
+            ]
+        });
+
+        let routed = route_to_target(
+            "/codex/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from(request.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::Codex);
+        let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "gpt-5.4");
+        assert_eq!(
+            body["input"][0]["arguments"],
+            serde_json::json!({"cmd": "pwd"})
+        );
+    }
+
+    #[test]
     fn codex_responses_passes_minimax_body_through() {
         let uri: Uri = "/codex/responses".parse().unwrap();
         let routed = route_to_target(
@@ -313,6 +351,38 @@ mod tests {
         assert_eq!(body["store"], true);
         assert_eq!(body["include"][0], "reasoning.encrypted_content");
         assert_eq!(body["tools"][0]["name"], "shell");
+    }
+
+    #[test]
+    fn codex_responses_stringifies_arguments_for_minimax_upstream() {
+        let uri: Uri = "/codex/responses".parse().unwrap();
+        let request = serde_json::json!({
+            "model": "min:MiniMax-M3",
+            "input": [
+                {
+                    "type": "tool_search_call",
+                    "call_id": "call_1",
+                    "arguments": { "query": "Atlassian MCP" }
+                }
+            ]
+        });
+
+        let routed = route_to_target(
+            "/codex/responses",
+            &uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from(request.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::MiniMax);
+        let body: Value = serde_json::from_slice(&routed.upstream_body).unwrap();
+        assert_eq!(body["model"], "MiniMax-M3");
+        assert_eq!(
+            body["input"][0]["arguments"],
+            serde_json::json!("{\"query\":\"Atlassian MCP\"}")
+        );
     }
 
     #[test]
