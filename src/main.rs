@@ -285,6 +285,12 @@ pub(crate) struct PromptMetrics {
     is_prompt: bool,
 }
 
+impl PromptMetrics {
+    pub(crate) fn estimated_input_tokens(&self) -> u64 {
+        estimated_tokens_from_chars(self.input_chars)
+    }
+}
+
 #[derive(Default, Clone)]
 pub(crate) struct UsageMetrics {
     input_tokens: u64,
@@ -1447,6 +1453,15 @@ async fn dashboard() -> impl IntoResponse {
       .api-key-access-provider > .check-row {
         font-weight: 700;
       }
+      .api-key-limit-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(120px, 160px);
+        gap: 8px;
+        align-items: center;
+      }
+      .api-key-limit-row input {
+        min-width: 0;
+      }
       .api-key-access-accounts {
         display: grid;
         gap: 6px;
@@ -1454,9 +1469,13 @@ async fn dashboard() -> impl IntoResponse {
       }
       .api-key-access-account {
         display: grid;
-        grid-template-columns: auto minmax(0, 1fr);
+        grid-template-columns: auto minmax(0, 1fr) minmax(110px, 140px);
+        gap: 6px;
         min-width: 0;
         align-items: flex-start;
+      }
+      .api-key-account-limit-input {
+        min-width: 0;
       }
       .account-choice-text,
       .api-key-access-account span {
@@ -3100,6 +3119,10 @@ async fn dashboard() -> impl IntoResponse {
         .api-key-access-groups {
           grid-template-columns: 1fr;
         }
+        .api-key-limit-row,
+        .api-key-access-account {
+          grid-template-columns: 1fr;
+        }
         .api-key-reveal-header,
         .provider-settings-actions,
         .api-key-actions {
@@ -3235,7 +3258,6 @@ async fn dashboard() -> impl IntoResponse {
         </button>
         <div id="headerActions" class="header-actions">
           <button type="button" id="themeToggleBtn" class="secondary-button">Theme: Dark</button>
-          <button type="button" id="logoutBtn" class="secondary-button" style="display:none;">Log out</button>
           <div class="provider-menu-wrap">
             <button type="button" id="addProviderBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="providerMenu">+ Add account</button>
             <div id="providerMenu" class="provider-menu" role="menu" hidden>
@@ -3253,7 +3275,9 @@ async fn dashboard() -> impl IntoResponse {
               <button type="button" class="provider-menu-item" role="menuitem" data-provider="custom-model">Custom model</button>
             </div>
           </div>
+          <button type="button" id="openTestApiBtn" class="secondary-button">Test API</button>
           <button type="button" id="appSettingsBtn" class="secondary-button">Settings</button>
+          <button type="button" id="logoutBtn" class="secondary-button" style="display:none;">Log out</button>
         </div>
       </header>
       <section class="overview-grid" aria-label="Gateway overview">
@@ -4124,22 +4148,41 @@ async fn dashboard() -> impl IntoResponse {
         var date = new Date(value);
         return isNaN(date.getTime()) ? value : date.toLocaleString();
       }
-      function apiKeySourceLabel(source) {
-        return source === 'legacy_config' ? 'Legacy config' : 'Managed';
-      }
-      function normalizeApiKeyAccess(access) {
-        if (!access || access.all !== false) return { all: true, providers: [] };
-        var providers = Array.isArray(access.providers) ? access.providers : [];
-        return {
-          all: false,
-          providers: providers.map(function(rule) {
-            return {
-              provider: String(rule && rule.provider || ''),
-              accounts: Array.isArray(rule && rule.accounts) ? rule.accounts.map(String) : []
-            };
-          }).filter(function(rule) { return !!rule.provider; })
-        };
-      }
+	      function apiKeySourceLabel(source) {
+	        return source === 'legacy_config' ? 'Legacy config' : 'Managed';
+	      }
+	      function normalizePromptTokenLimit(value) {
+	        var n = Number(value);
+	        return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+	      }
+	      function normalizeApiKeyAccess(access) {
+	        if (!access || access.all !== false) {
+	          return {
+	            all: true,
+	            prompt_token_limit: normalizePromptTokenLimit(access && access.prompt_token_limit),
+	            providers: []
+	          };
+	        }
+	        var providers = Array.isArray(access.providers) ? access.providers : [];
+	        return {
+	          all: false,
+	          prompt_token_limit: normalizePromptTokenLimit(access.prompt_token_limit),
+	          providers: providers.map(function(rule) {
+	            var accountLimits = Array.isArray(rule && rule.account_limits) ? rule.account_limits : [];
+	            return {
+	              provider: String(rule && rule.provider || ''),
+	              accounts: Array.isArray(rule && rule.accounts) ? rule.accounts.map(String) : [],
+	              prompt_token_limit: normalizePromptTokenLimit(rule && rule.prompt_token_limit),
+	              account_limits: accountLimits.map(function(limit) {
+	                return {
+	                  account: String(limit && limit.account || ''),
+	                  prompt_token_limit: normalizePromptTokenLimit(limit && limit.prompt_token_limit)
+	                };
+	              }).filter(function(limit) { return !!limit.account && limit.prompt_token_limit != null; })
+	            };
+	          }).filter(function(rule) { return !!rule.provider; })
+	        };
+	      }
       function apiKeyAccessRule(access, provider) {
         return normalizeApiKeyAccess(access).providers.find(function(rule) {
           return rule.provider === provider;
@@ -4149,65 +4192,81 @@ async fn dashboard() -> impl IntoResponse {
         access = normalizeApiKeyAccess(access);
         if (access.all) return 'All providers and accounts';
         if (!access.providers.length) return 'No access';
-        return access.providers.map(function(rule) {
-          var label = providerLabels[rule.provider] || rule.provider;
-          return rule.accounts.length
-            ? label + ' (' + rule.accounts.length + ' account' + (rule.accounts.length === 1 ? '' : 's') + ')'
-            : label + ' (all accounts)';
-        }).join(', ');
-      }
-      function renderApiKeyAccessEditor(access) {
-        access = normalizeApiKeyAccess(access);
-        var mode = document.getElementById('apiKeyAccessModeInput');
-        var groups = document.getElementById('apiKeyAccessGroups');
-        if (!mode || !groups) return;
-        mode.value = access.all ? 'all' : 'restricted';
-        var accounts = Array.isArray(dashboardState.apiKeyAccounts) ? dashboardState.apiKeyAccounts : [];
-        var grouped = {};
+	        return access.providers.map(function(rule) {
+	          var label = providerLabels[rule.provider] || rule.provider;
+	          var limit = rule.prompt_token_limit ? ', limit ' + rule.prompt_token_limit + ' tok' : '';
+	          var accountLimits = rule.account_limits.length
+	            ? ', ' + rule.account_limits.length + ' account limit' + (rule.account_limits.length === 1 ? '' : 's')
+	            : '';
+	          return rule.accounts.length
+	            ? label + ' (' + rule.accounts.length + ' account' + (rule.accounts.length === 1 ? '' : 's') + limit + accountLimits + ')'
+	            : label + ' (all accounts' + limit + accountLimits + ')';
+	        }).join(', ');
+	      }
+	      function renderApiKeyAccessEditor(access) {
+	        access = normalizeApiKeyAccess(access);
+	        var mode = document.getElementById('apiKeyAccessModeInput');
+	        var groups = document.getElementById('apiKeyAccessGroups');
+	        var wholeLimit = document.getElementById('apiKeyPromptLimitInput');
+	        if (!mode || !groups) return;
+	        if (wholeLimit) wholeLimit.value = access.prompt_token_limit || '';
+	        mode.value = access.all ? 'all' : 'restricted';
+	        var accounts = Array.isArray(dashboardState.apiKeyAccounts) ? dashboardState.apiKeyAccounts : [];
+	        var grouped = {};
         accounts.forEach(function(account) {
           var provider = String(account && account.provider || '');
           if (!provider) return;
           if (!grouped[provider]) grouped[provider] = [];
           grouped[provider].push(account);
         });
-        groups.innerHTML = dashboardProviderKeys.map(function(provider) {
-          var rule = apiKeyAccessRule(access, provider);
-          var allAccounts = !!rule && rule.accounts.length === 0;
-          var allowed = new Set(rule ? rule.accounts : []);
-          var providerValue = escapeHtml(provider);
-          var providerAccounts = grouped[provider] || [];
-          var seenKeys = new Set(providerAccounts.map(function(account) { return String(account.key || ''); }));
+	        groups.innerHTML = dashboardProviderKeys.map(function(provider) {
+	          var rule = apiKeyAccessRule(access, provider);
+	          var allAccounts = !!rule && rule.accounts.length === 0;
+	          var allowed = new Set(rule ? rule.accounts : []);
+	          var providerLimit = rule && rule.prompt_token_limit ? rule.prompt_token_limit : '';
+	          var accountLimits = new Map((rule && rule.account_limits || []).map(function(limit) {
+	            return [String(limit.account || ''), limit.prompt_token_limit];
+	          }));
+	          var providerValue = escapeHtml(provider);
+	          var providerAccounts = grouped[provider] || [];
+	          var seenKeys = new Set(providerAccounts.map(function(account) { return String(account.key || ''); }));
           var items = providerAccounts.map(function(account) {
             var key = String(account.key || '');
             if (!key) return '';
             var title = account.label || account.account_id || key;
             var meta = [account.account_id, account.credential_file].filter(Boolean).join(' - ');
-            return '<label class="check-row api-key-access-account">'
-              + '<input type="checkbox" data-api-key-access-account data-provider="' + providerValue + '" value="' + escapeHtml(key) + '"'
-              + (allowed.has(key) ? ' checked' : '') + (allAccounts ? ' disabled' : '') + '> '
-              + '<span class="account-choice-text">'
-              + '<span class="account-choice-title">' + escapeHtml(title) + '</span>'
-              + (meta ? '<small title="' + escapeHtml(meta) + '">' + escapeHtml(compactMiddle(meta, 72)) + '</small>' : '')
-              + '</span>'
-              + '</label>';
-          }).join('');
-          if (rule && rule.accounts.length) {
-            items += rule.accounts.filter(function(key) { return !seenKeys.has(key); }).map(function(key) {
-              return '<label class="check-row api-key-access-account">'
-                + '<input type="checkbox" data-api-key-access-account data-provider="' + providerValue + '" value="' + escapeHtml(key) + '" checked> '
-                + '<span class="account-choice-text"><span class="account-choice-title">Unavailable account</span><small title="' + escapeHtml(key) + '">' + escapeHtml(compactMiddle(key, 72)) + '</small></span>'
-                + '</label>';
-            }).join('');
-          }
-          return '<div class="api-key-access-provider">'
-            + '<label class="check-row">'
-            + '<input type="checkbox" data-api-key-access-provider data-provider="' + providerValue + '"'
-            + (allAccounts ? ' checked' : '') + ' onchange="syncApiKeyAccessProvider(this)"> '
-            + '<span>All ' + escapeHtml(providerLabels[provider] || provider) + ' accounts</span>'
-            + '</label>'
-            + '<div class="api-key-access-accounts">'
-            + (items || '<span class="muted">No accounts configured</span>')
-            + '</div>'
+	            return '<label class="check-row api-key-access-account">'
+	              + '<input type="checkbox" data-api-key-access-account data-provider="' + providerValue + '" value="' + escapeHtml(key) + '"'
+	              + (allowed.has(key) ? ' checked' : '') + (allAccounts ? ' disabled' : '') + '> '
+	              + '<span class="account-choice-text">'
+	              + '<span class="account-choice-title">' + escapeHtml(title) + '</span>'
+	              + (meta ? '<small title="' + escapeHtml(meta) + '">' + escapeHtml(compactMiddle(meta, 72)) + '</small>' : '')
+	              + '</span>'
+	              + '<input class="api-key-account-limit-input" type="number" min="1" step="1" inputmode="numeric" data-api-key-account-prompt-limit data-provider="' + providerValue + '" data-account="' + escapeHtml(key) + '" value="' + escapeHtml(accountLimits.get(key) || '') + '" placeholder="limit">'
+	              + '</label>';
+	          }).join('');
+	          if (rule && rule.accounts.length) {
+	            items += rule.accounts.filter(function(key) { return !seenKeys.has(key); }).map(function(key) {
+	              return '<label class="check-row api-key-access-account">'
+	                + '<input type="checkbox" data-api-key-access-account data-provider="' + providerValue + '" value="' + escapeHtml(key) + '" checked> '
+	                + '<span class="account-choice-text"><span class="account-choice-title">Unavailable account</span><small title="' + escapeHtml(key) + '">' + escapeHtml(compactMiddle(key, 72)) + '</small></span>'
+	                + '<input class="api-key-account-limit-input" type="number" min="1" step="1" inputmode="numeric" data-api-key-account-prompt-limit data-provider="' + providerValue + '" data-account="' + escapeHtml(key) + '" value="' + escapeHtml(accountLimits.get(key) || '') + '" placeholder="limit">'
+	                + '</label>';
+	            }).join('');
+	          }
+	          return '<div class="api-key-access-provider">'
+	            + '<label class="check-row">'
+	            + '<input type="checkbox" data-api-key-access-provider data-provider="' + providerValue + '"'
+	            + (allAccounts ? ' checked' : '') + ' onchange="syncApiKeyAccessProvider(this)"> '
+	            + '<span>All ' + escapeHtml(providerLabels[provider] || provider) + ' accounts</span>'
+	            + '</label>'
+	            + '<div class="api-key-limit-row" style="margin-top:8px;">'
+	            + '<span class="muted">Provider prompt token limit</span>'
+	            + '<input type="number" min="1" step="1" inputmode="numeric" data-api-key-provider-prompt-limit data-provider="' + providerValue + '" value="' + escapeHtml(providerLimit) + '" placeholder="unlimited">'
+	            + '</div>'
+	            + '<div class="api-key-access-accounts">'
+	            + (items || '<span class="muted">No accounts configured</span>')
+	            + '</div>'
             + '</div>';
         }).join('');
         groups.hidden = access.all;
@@ -4223,24 +4282,44 @@ async fn dashboard() -> impl IntoResponse {
         var groups = document.getElementById('apiKeyAccessGroups');
         if (mode && groups) groups.hidden = mode.value !== 'restricted';
       }
-      function apiKeyAccessFromDom() {
-        var mode = document.getElementById('apiKeyAccessModeInput');
-        if (!mode || mode.value !== 'restricted') return { all: true, providers: [] };
-        var providers = [];
-        dashboardProviderKeys.forEach(function(provider) {
-          var allInput = document.querySelector('[data-api-key-access-provider][data-provider="' + provider + '"]');
-          if (allInput && allInput.checked) {
-            providers.push({ provider: provider, accounts: [] });
-            return;
-          }
-          var accounts = Array.from(document.querySelectorAll('[data-api-key-access-account][data-provider="' + provider + '"]:checked'))
-            .map(function(input) { return input.value; })
-            .filter(Boolean);
-          if (accounts.length) providers.push({ provider: provider, accounts: accounts });
-        });
-        if (!providers.length) return null;
-        return { all: false, providers: providers };
-      }
+	      function apiKeyAccessFromDom() {
+	        var mode = document.getElementById('apiKeyAccessModeInput');
+	        var wholeLimit = normalizePromptTokenLimit(document.getElementById('apiKeyPromptLimitInput')?.value);
+	        if (!mode || mode.value !== 'restricted') return { all: true, prompt_token_limit: wholeLimit, providers: [] };
+	        var providers = [];
+	        dashboardProviderKeys.forEach(function(provider) {
+	          var allInput = document.querySelector('[data-api-key-access-provider][data-provider="' + provider + '"]');
+	          var providerLimit = normalizePromptTokenLimit(document.querySelector('[data-api-key-provider-prompt-limit][data-provider="' + provider + '"]')?.value);
+	          var accountLimits = Array.from(document.querySelectorAll('[data-api-key-account-prompt-limit][data-provider="' + provider + '"]'))
+	            .map(function(input) {
+	              return {
+	                account: input.getAttribute('data-account') || '',
+	                prompt_token_limit: normalizePromptTokenLimit(input.value)
+	              };
+	            })
+	            .filter(function(limit) { return !!limit.account && limit.prompt_token_limit != null; });
+	          if (allInput && allInput.checked) {
+	            providers.push({ provider: provider, accounts: [], prompt_token_limit: providerLimit, account_limits: accountLimits });
+	            return;
+	          }
+	          var accounts = Array.from(document.querySelectorAll('[data-api-key-access-account][data-provider="' + provider + '"]:checked'))
+	            .map(function(input) { return input.value; })
+	            .filter(Boolean);
+	          accountLimits.forEach(function(limit) {
+	            if (!accounts.includes(limit.account)) accounts.push(limit.account);
+	          });
+	          if (accounts.length || providerLimit != null || accountLimits.length) {
+	            providers.push({
+	              provider: provider,
+	              accounts: accounts,
+	              prompt_token_limit: providerLimit,
+	              account_limits: accountLimits
+	            });
+	          }
+	        });
+	        if (!providers.length) return null;
+	        return { all: false, prompt_token_limit: wholeLimit, providers: providers };
+	      }
       function resetApiKeyEditor() {
         dashboardState.apiKeyEditingId = '';
         var label = document.getElementById('apiKeyLabelInput');
@@ -4392,17 +4471,20 @@ async fn dashboard() -> impl IntoResponse {
           updateApiKeyStatusText('Copy failed. Use manual copy.');
         }
       }
-      function openAppSettingsModal() {
-        setAppSettingsTab('dashboard');
-        setApiKeyReveal('');
-        resetApiKeyEditor();
-        renderProviderSettingsList();
-        renderTestApiModelOptions();
+	      function openAppSettingsModal(tab) {
+	        setAppSettingsTab(tab || 'dashboard');
+	        setApiKeyReveal('');
+	        resetApiKeyEditor();
+	        renderProviderSettingsList();
+	        renderTestApiModelOptions();
         loadNotificationSettings();
         loadApiKeys();
-        setMobileNavOpen(false);
-        openModal('appSettingsModal');
-      }
+	        setMobileNavOpen(false);
+	        openModal('appSettingsModal');
+	      }
+	      function openTestApiPanel() {
+	        openAppSettingsModal('test-api');
+	      }
       function closeAppSettingsModal() {
         closeModal('appSettingsModal');
       }
@@ -7578,6 +7660,10 @@ async fn dashboard() -> impl IntoResponse {
                   <button type="button" id="cancelApiKeyEditBtn" class="secondary-button" hidden>Cancel</button>
                 </div>
               </div>
+              <div class="api-key-limit-row" style="margin-top:10px;">
+                <label for="apiKeyPromptLimitInput">Whole key prompt token limit</label>
+                <input id="apiKeyPromptLimitInput" type="number" min="1" step="1" inputmode="numeric" placeholder="unlimited">
+              </div>
               <div class="api-key-access-editor">
                 <label for="apiKeyAccessModeInput">Access</label>
                 <select id="apiKeyAccessModeInput">
@@ -7704,6 +7790,7 @@ async fn dashboard() -> impl IntoResponse {
       }
       document.getElementById('themeToggleBtn').addEventListener('click', toggleTheme);
       document.getElementById('appSettingsBtn').addEventListener('click', openAppSettingsModal);
+      document.getElementById('openTestApiBtn').addEventListener('click', openTestApiPanel);
       // Provider selector menu
       document.getElementById('addProviderBtn').addEventListener('click', function(e) {
         e.stopPropagation();
@@ -9273,6 +9360,10 @@ async fn dispatch_admin_test_routed_request(
 ) -> Response {
     match routed.target {
         TargetModel::Custom => {
+            let prompt = serde_json::from_slice::<serde_json::Value>(&routed.upstream_body)
+                .ok()
+                .map(|value| prompt_metrics_from_request_value(&value))
+                .unwrap_or_default();
             custom_model_response(
                 state,
                 headers,
@@ -9280,6 +9371,7 @@ async fn dispatch_admin_test_routed_request(
                 routed.upstream_body,
                 routed.response_mode,
                 &api_keys::ApiKeyAccess::default(),
+                prompt,
             )
             .await
         }
@@ -11721,6 +11813,41 @@ async fn proxy(
             };
         }
     }
+    let request_value_for_limits: Option<serde_json::Value> =
+        serde_json::from_slice(&routed.upstream_body).ok();
+    let prompt_for_limits = request_value_for_limits
+        .as_ref()
+        .map(prompt_metrics_from_request_value)
+        .unwrap_or_default();
+    if let Some(response) = api_key_prompt_limit_response(
+        source_api,
+        &authenticated.access,
+        None,
+        None,
+        prompt_for_limits.estimated_input_tokens(),
+    ) {
+        return response;
+    }
+    if let Some(provider) = target_provider_access_key(routed.target) {
+        if let Some(response) = api_key_prompt_limit_response(
+            source_api,
+            &authenticated.access,
+            Some(provider),
+            None,
+            prompt_for_limits.estimated_input_tokens(),
+        ) {
+            return response;
+        }
+    }
+    if let Some(response) = api_key_account_prompt_limit_response_for_target(
+        source_api,
+        &state,
+        &authenticated.access,
+        routed.target,
+        prompt_for_limits.estimated_input_tokens(),
+    ) {
+        return response;
+    }
     match routed.target {
         TargetModel::CodexModels => {
             let state = scoped_state_for_api_key_access(
@@ -11740,7 +11867,6 @@ async fn proxy(
             .await;
         }
         TargetModel::Custom => {
-            let state = scoped_state_for_api_key_access(state, &authenticated.access, None);
             return custom_model_response(
                 state,
                 headers,
@@ -11748,12 +11874,18 @@ async fn proxy(
                 routed.upstream_body,
                 routed.response_mode,
                 &authenticated.access,
+                prompt_for_limits,
             )
             .await;
         }
         _ => {}
     }
-    let state = scoped_state_for_api_key_access(state, &authenticated.access, Some(routed.target));
+    let state = scoped_state_for_api_key_request(
+        state,
+        &authenticated.access,
+        Some(routed.target),
+        Some(prompt_for_limits.estimated_input_tokens()),
+    );
     match routed.target {
         TargetModel::Antigravity => {
             return match routed.upstream_path.as_str() {
@@ -12375,6 +12507,7 @@ async fn custom_model_response(
     body: Bytes,
     response_mode: ResponseMode,
     access: &api_keys::ApiKeyAccess,
+    prompt: PromptMetrics,
 ) -> axum::response::Response {
     if upstream_path != "responses" {
         return (
@@ -12443,11 +12576,21 @@ async fn custom_model_response(
             .into_response();
     }
 
+    let prompt_tokens = prompt.estimated_input_tokens();
     let candidates = custom_model_candidate_order(&state, &custom_model)
         .into_iter()
         .filter(|candidate| {
             target_provider_access_key(source::v1::provider::target_from_model(&candidate.model))
-                .is_some_and(|provider| access.allows_provider(provider))
+                .is_some_and(|provider| {
+                    access.allows_provider(provider)
+                        && api_key_prompt_limit_violation(
+                            access,
+                            Some(provider),
+                            None,
+                            prompt_tokens,
+                        )
+                        .is_none()
+                })
         })
         .collect::<Vec<_>>();
     if candidates.is_empty() {
@@ -12494,6 +12637,12 @@ async fn custom_model_response(
                     continue;
                 }
             };
+        let scoped_state = scoped_state_for_api_key_request(
+            scoped_state,
+            access,
+            Some(target),
+            Some(prompt_tokens),
+        );
         let response = dispatch_custom_target(
             scoped_state,
             headers.clone(),
@@ -13153,13 +13302,275 @@ where
     })
 }
 
+fn api_key_prompt_limit_response(
+    source_api: SourceApi,
+    access: &api_keys::ApiKeyAccess,
+    provider: Option<&str>,
+    account_limit: Option<u64>,
+    estimated_tokens: u64,
+) -> Option<Response> {
+    let message =
+        api_key_prompt_limit_violation(access, provider, account_limit, estimated_tokens)?;
+    Some(if matches!(source_api, SourceApi::V1) {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(
+                axum::http::header::CONTENT_TYPE.as_str(),
+                "application/json",
+            )],
+            openai_error_body(&message, "rate_limit_error", Some("token_limit_exceeded")),
+        )
+            .into_response()
+    } else {
+        (StatusCode::TOO_MANY_REQUESTS, message).into_response()
+    })
+}
+
+fn api_key_prompt_limit_violation(
+    access: &api_keys::ApiKeyAccess,
+    provider: Option<&str>,
+    account_limit: Option<u64>,
+    estimated_tokens: u64,
+) -> Option<String> {
+    if estimated_tokens == 0 {
+        return None;
+    }
+
+    let mut limit = access.prompt_token_limit;
+    if let Some(provider) = provider {
+        if let Some(rule) = access.provider_rule(provider) {
+            limit = min_optional_u64(limit, rule.prompt_token_limit);
+        }
+    }
+    limit = min_optional_u64(limit, account_limit);
+
+    let limit = limit?;
+    if estimated_tokens <= limit {
+        return None;
+    }
+
+    let scope = match (provider, account_limit) {
+        (Some(provider), Some(_)) => format!("{} account", provider),
+        (Some(provider), None) => format!("{} provider", provider),
+        (None, _) => "API key".to_string(),
+    };
+    Some(format!(
+        "{} prompt token limit exceeded: estimated {} input tokens, limit {}",
+        scope, estimated_tokens, limit
+    ))
+}
+
+fn api_key_account_prompt_limit_allows<F>(
+    access: &api_keys::ApiKeyAccess,
+    provider: &str,
+    mut matches: F,
+    estimated_tokens: Option<u64>,
+) -> bool
+where
+    F: FnMut(&str) -> bool,
+{
+    let Some(estimated_tokens) = estimated_tokens else {
+        return true;
+    };
+    if estimated_tokens == 0 {
+        return true;
+    }
+    let account_limit = access
+        .provider_rule(provider)
+        .and_then(|rule| rule.account_prompt_token_limit(|account| matches(account)));
+    api_key_prompt_limit_violation(access, Some(provider), account_limit, estimated_tokens)
+        .is_none()
+}
+
+fn api_key_account_prompt_limit_response_for_target(
+    source_api: SourceApi,
+    state: &AppState,
+    access: &api_keys::ApiKeyAccess,
+    target: TargetModel,
+    estimated_tokens: u64,
+) -> Option<Response> {
+    let provider = target_provider_access_key(target)?;
+    let account_limit = match target {
+        TargetModel::Codex => {
+            let accounts = state.tokens.lock().unwrap();
+            api_key_account_prompt_limit_blocked(
+                &accounts,
+                access,
+                provider,
+                estimated_tokens,
+                |token, filter| codex_token_matches_account(token, filter),
+            )
+        }
+        TargetModel::Antigravity => {
+            let accounts = state.agw_accounts.lock().unwrap();
+            api_key_account_prompt_limit_blocked(
+                &accounts,
+                access,
+                provider,
+                estimated_tokens,
+                |account, filter| antigravity_account_matches(account, filter),
+            )
+        }
+        TargetModel::Gemini => {
+            let accounts = state.gemini_accounts.lock().unwrap();
+            api_key_account_prompt_limit_blocked(
+                &accounts,
+                access,
+                provider,
+                estimated_tokens,
+                |account, filter| gemini_account_matches(account, filter),
+            )
+        }
+        TargetModel::Qwen => {
+            let accounts = state.qwen_accounts.lock().unwrap();
+            api_key_account_prompt_limit_blocked(
+                &accounts,
+                access,
+                provider,
+                estimated_tokens,
+                |account, filter| qwen_account_matches(account, filter),
+            )
+        }
+        TargetModel::DeepSeek => {
+            let accounts = state.deepseek_accounts.lock().unwrap();
+            api_key_account_prompt_limit_blocked(
+                &accounts,
+                access,
+                provider,
+                estimated_tokens,
+                |account, filter| deepseek_account_matches(account, filter),
+            )
+        }
+        TargetModel::Grok => {
+            let accounts = state.grok_accounts.lock().unwrap();
+            api_key_account_prompt_limit_blocked(
+                &accounts,
+                access,
+                provider,
+                estimated_tokens,
+                |account, filter| grok_account_matches(account, filter),
+            )
+        }
+        TargetModel::MiniMax => {
+            let accounts = state.minimax_accounts.lock().unwrap();
+            api_key_account_prompt_limit_blocked(
+                &accounts,
+                access,
+                provider,
+                estimated_tokens,
+                |account, filter| minimax_account_matches(account, filter),
+            )
+        }
+        TargetModel::Copilot => {
+            let accounts = state.copilot_accounts.lock().unwrap();
+            api_key_account_prompt_limit_blocked(
+                &accounts,
+                access,
+                provider,
+                estimated_tokens,
+                |account, filter| copilot_account_matches(account, filter),
+            )
+        }
+        TargetModel::Claude => {
+            let accounts = state.claude_accounts.lock().unwrap();
+            api_key_account_prompt_limit_blocked(
+                &accounts,
+                access,
+                provider,
+                estimated_tokens,
+                |account, filter| claude_account_matches(account, filter),
+            )
+        }
+        TargetModel::Glm => {
+            let accounts = state.glm_accounts.lock().unwrap();
+            api_key_account_prompt_limit_blocked(
+                &accounts,
+                access,
+                provider,
+                estimated_tokens,
+                |account, filter| glm_account_matches(account, filter),
+            )
+        }
+        TargetModel::CodexModels | TargetModel::Custom | TargetModel::UnifiedV1Models => None,
+    }?;
+
+    api_key_prompt_limit_response(
+        source_api,
+        access,
+        Some(provider),
+        Some(account_limit),
+        estimated_tokens,
+    )
+}
+
+fn api_key_account_prompt_limit_blocked<T, F>(
+    accounts: &[T],
+    access: &api_keys::ApiKeyAccess,
+    provider: &str,
+    estimated_tokens: u64,
+    mut matches: F,
+) -> Option<u64>
+where
+    F: FnMut(&T, &str) -> bool,
+{
+    if estimated_tokens == 0 {
+        return None;
+    }
+    let rule = access.provider_rule(provider)?;
+    if rule.account_limits.is_empty() {
+        return None;
+    }
+
+    let mut saw_allowed_account = false;
+    let mut strictest_blocked_limit = None;
+    for account in accounts {
+        if !api_key_rule_allows_account(access, provider, |filter| matches(account, filter)) {
+            continue;
+        }
+        saw_allowed_account = true;
+        let account_limit = rule.account_prompt_token_limit(|filter| matches(account, filter));
+        if api_key_prompt_limit_violation(access, Some(provider), account_limit, estimated_tokens)
+            .is_none()
+        {
+            return None;
+        }
+        strictest_blocked_limit = min_optional_u64(strictest_blocked_limit, account_limit);
+    }
+
+    if saw_allowed_account {
+        strictest_blocked_limit
+    } else {
+        None
+    }
+}
+
+fn min_optional_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
 fn scoped_state_for_api_key_access(
     state: AppState,
     access: &api_keys::ApiKeyAccess,
     target: Option<TargetModel>,
 ) -> AppState {
+    scoped_state_for_api_key_request(state, access, target, None)
+}
+
+fn scoped_state_for_api_key_request(
+    state: AppState,
+    access: &api_keys::ApiKeyAccess,
+    target: Option<TargetModel>,
+    estimated_prompt_tokens: Option<u64>,
+) -> AppState {
     if access.all {
-        return state;
+        if estimated_prompt_tokens.is_none() {
+            return state;
+        }
     }
 
     let mut scoped = state.clone();
@@ -13174,7 +13585,12 @@ fn scoped_state_for_api_key_access(
                 .filter(|token| {
                     api_key_rule_allows_account(access, "codex", |account| {
                         codex_token_matches_account(token, account)
-                    })
+                    }) && api_key_account_prompt_limit_allows(
+                        access,
+                        "codex",
+                        |account| codex_token_matches_account(token, account),
+                        estimated_prompt_tokens,
+                    )
                 })
                 .cloned()
                 .collect(),
@@ -13190,7 +13606,12 @@ fn scoped_state_for_api_key_access(
                 .filter(|account| {
                     api_key_rule_allows_account(access, "agw", |filter| {
                         antigravity_account_matches(account, filter)
-                    })
+                    }) && api_key_account_prompt_limit_allows(
+                        access,
+                        "agw",
+                        |filter| antigravity_account_matches(account, filter),
+                        estimated_prompt_tokens,
+                    )
                 })
                 .cloned()
                 .collect(),
@@ -13206,7 +13627,12 @@ fn scoped_state_for_api_key_access(
                 .filter(|account| {
                     api_key_rule_allows_account(access, "gemini", |filter| {
                         gemini_account_matches(account, filter)
-                    })
+                    }) && api_key_account_prompt_limit_allows(
+                        access,
+                        "gemini",
+                        |filter| gemini_account_matches(account, filter),
+                        estimated_prompt_tokens,
+                    )
                 })
                 .cloned()
                 .collect(),
@@ -13222,7 +13648,12 @@ fn scoped_state_for_api_key_access(
                 .filter(|account| {
                     api_key_rule_allows_account(access, "qwen", |filter| {
                         qwen_account_matches(account, filter)
-                    })
+                    }) && api_key_account_prompt_limit_allows(
+                        access,
+                        "qwen",
+                        |filter| qwen_account_matches(account, filter),
+                        estimated_prompt_tokens,
+                    )
                 })
                 .cloned()
                 .collect(),
@@ -13238,7 +13669,12 @@ fn scoped_state_for_api_key_access(
                 .filter(|account| {
                     api_key_rule_allows_account(access, "deepseek", |filter| {
                         deepseek_account_matches(account, filter)
-                    })
+                    }) && api_key_account_prompt_limit_allows(
+                        access,
+                        "deepseek",
+                        |filter| deepseek_account_matches(account, filter),
+                        estimated_prompt_tokens,
+                    )
                 })
                 .cloned()
                 .collect(),
@@ -13254,7 +13690,12 @@ fn scoped_state_for_api_key_access(
                 .filter(|account| {
                     api_key_rule_allows_account(access, "grok", |filter| {
                         grok_account_matches(account, filter)
-                    })
+                    }) && api_key_account_prompt_limit_allows(
+                        access,
+                        "grok",
+                        |filter| grok_account_matches(account, filter),
+                        estimated_prompt_tokens,
+                    )
                 })
                 .cloned()
                 .collect(),
@@ -13270,7 +13711,12 @@ fn scoped_state_for_api_key_access(
                 .filter(|account| {
                     api_key_rule_allows_account(access, "minimax", |filter| {
                         minimax_account_matches(account, filter)
-                    })
+                    }) && api_key_account_prompt_limit_allows(
+                        access,
+                        "minimax",
+                        |filter| minimax_account_matches(account, filter),
+                        estimated_prompt_tokens,
+                    )
                 })
                 .cloned()
                 .collect(),
@@ -13286,7 +13732,12 @@ fn scoped_state_for_api_key_access(
                 .filter(|account| {
                     api_key_rule_allows_account(access, "copilot", |filter| {
                         copilot_account_matches(account, filter)
-                    })
+                    }) && api_key_account_prompt_limit_allows(
+                        access,
+                        "copilot",
+                        |filter| copilot_account_matches(account, filter),
+                        estimated_prompt_tokens,
+                    )
                 })
                 .cloned()
                 .collect(),
@@ -13302,7 +13753,12 @@ fn scoped_state_for_api_key_access(
                 .filter(|account| {
                     api_key_rule_allows_account(access, "claude", |filter| {
                         claude_account_matches(account, filter)
-                    })
+                    }) && api_key_account_prompt_limit_allows(
+                        access,
+                        "claude",
+                        |filter| claude_account_matches(account, filter),
+                        estimated_prompt_tokens,
+                    )
                 })
                 .cloned()
                 .collect(),
@@ -13318,7 +13774,12 @@ fn scoped_state_for_api_key_access(
                 .filter(|account| {
                     api_key_rule_allows_account(access, "glm", |filter| {
                         glm_account_matches(account, filter)
-                    })
+                    }) && api_key_account_prompt_limit_allows(
+                        access,
+                        "glm",
+                        |filter| glm_account_matches(account, filter),
+                        estimated_prompt_tokens,
+                    )
                 })
                 .cloned()
                 .collect(),
@@ -18467,12 +18928,14 @@ mod codex_provider_model_tests {
 #[cfg(test)]
 mod account_selection_tests {
     use super::{
-        account_runtime_status, api_key_rule_allows_account, apply_router_failure,
-        codex_error_affects_account_health, codex_error_status_from_message,
-        codex_token_matches_account, parse_retry_after_seconds, select_ordered_account_indices,
-        AccountRuntimeState, AccountRuntimeStatus, AccountSelectionScore,
+        account_runtime_status, api_key_account_prompt_limit_allows,
+        api_key_account_prompt_limit_blocked, api_key_prompt_limit_violation,
+        api_key_rule_allows_account, apply_router_failure, codex_error_affects_account_health,
+        codex_error_status_from_message, codex_token_matches_account, parse_retry_after_seconds,
+        select_ordered_account_indices, AccountRuntimeState, AccountRuntimeStatus,
+        AccountSelectionScore,
     };
-    use crate::api_keys::{ApiKeyAccess, ApiKeyProviderAccess};
+    use crate::api_keys::{ApiKeyAccess, ApiKeyAccountLimit, ApiKeyProviderAccess};
     use crate::target::codex::tokens::UpstreamToken;
     use axum::http::StatusCode;
     use std::collections::VecDeque;
@@ -18594,9 +19057,12 @@ mod account_selection_tests {
     fn api_key_account_rule_matches_any_selected_account_alias() {
         let access = ApiKeyAccess {
             all: false,
+            prompt_token_limit: None,
             providers: vec![ApiKeyProviderAccess {
                 provider: "codex".to_string(),
                 accounts: vec!["first.json".to_string(), "second.json".to_string()],
+                prompt_token_limit: None,
+                account_limits: Vec::new(),
             }],
         };
 
@@ -18624,6 +19090,122 @@ mod account_selection_tests {
             codex_token_matches_account(&excluded, allowed)
         }));
         assert!(!api_key_rule_allows_account(&access, "gemini", |_| true));
+    }
+
+    #[test]
+    fn api_key_prompt_limits_use_strictest_matching_scope() {
+        let access = ApiKeyAccess {
+            all: false,
+            prompt_token_limit: Some(1000),
+            providers: vec![ApiKeyProviderAccess {
+                provider: "codex".to_string(),
+                accounts: vec!["first.json".to_string(), "second.json".to_string()],
+                prompt_token_limit: Some(800),
+                account_limits: vec![
+                    ApiKeyAccountLimit {
+                        account: "first.json".to_string(),
+                        prompt_token_limit: Some(300),
+                    },
+                    ApiKeyAccountLimit {
+                        account: "second.json".to_string(),
+                        prompt_token_limit: Some(900),
+                    },
+                ],
+            }],
+        }
+        .normalized()
+        .unwrap();
+
+        assert!(api_key_prompt_limit_violation(&access, None, None, 1001).is_some());
+        assert!(api_key_prompt_limit_violation(&access, Some("codex"), None, 801).is_some());
+        assert!(api_key_account_prompt_limit_allows(
+            &access,
+            "codex",
+            |account| account == "first.json",
+            Some(300)
+        ));
+        assert!(!api_key_account_prompt_limit_allows(
+            &access,
+            "codex",
+            |account| account == "first.json",
+            Some(301)
+        ));
+        assert!(api_key_account_prompt_limit_allows(
+            &access,
+            "codex",
+            |account| account == "second.json",
+            Some(800)
+        ));
+        assert!(!api_key_account_prompt_limit_allows(
+            &access,
+            "codex",
+            |account| account == "second.json",
+            Some(801)
+        ));
+    }
+
+    #[test]
+    fn api_key_account_prompt_limit_blocked_requires_all_allowed_accounts_over_limit() {
+        let access = ApiKeyAccess {
+            all: false,
+            prompt_token_limit: None,
+            providers: vec![ApiKeyProviderAccess {
+                provider: "codex".to_string(),
+                accounts: Vec::new(),
+                prompt_token_limit: None,
+                account_limits: vec![
+                    ApiKeyAccountLimit {
+                        account: "first.json".to_string(),
+                        prompt_token_limit: Some(300),
+                    },
+                    ApiKeyAccountLimit {
+                        account: "second.json".to_string(),
+                        prompt_token_limit: Some(250),
+                    },
+                ],
+            }],
+        }
+        .normalized()
+        .unwrap();
+        let accounts = vec![
+            UpstreamToken {
+                token: "token-a".to_string(),
+                account_id: Some("account-a".to_string()),
+                label: "First".to_string(),
+                file_name: Some("first.json".to_string()),
+                enabled: true,
+                expired_at: None,
+            },
+            UpstreamToken {
+                token: "token-b".to_string(),
+                account_id: Some("account-b".to_string()),
+                label: "Second".to_string(),
+                file_name: Some("second.json".to_string()),
+                enabled: true,
+                expired_at: None,
+            },
+        ];
+
+        assert_eq!(
+            api_key_account_prompt_limit_blocked(
+                &accounts,
+                &access,
+                "codex",
+                301,
+                codex_token_matches_account,
+            ),
+            Some(250)
+        );
+        assert_eq!(
+            api_key_account_prompt_limit_blocked(
+                &accounts,
+                &access,
+                "codex",
+                275,
+                codex_token_matches_account,
+            ),
+            None
+        );
     }
 
     #[test]

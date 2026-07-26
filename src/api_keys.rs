@@ -52,6 +52,7 @@ impl Default for ApiKeyRecord {
 #[serde(default)]
 pub(crate) struct ApiKeyAccess {
     pub all: bool,
+    pub prompt_token_limit: Option<u64>,
     pub providers: Vec<ApiKeyProviderAccess>,
 }
 
@@ -59,6 +60,7 @@ impl Default for ApiKeyAccess {
     fn default() -> Self {
         Self {
             all: true,
+            prompt_token_limit: None,
             providers: Vec::new(),
         }
     }
@@ -70,6 +72,15 @@ pub(crate) struct ApiKeyProviderAccess {
     pub provider: String,
     /// Empty means every account for this provider.
     pub accounts: Vec<String>,
+    pub prompt_token_limit: Option<u64>,
+    pub account_limits: Vec<ApiKeyAccountLimit>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ApiKeyAccountLimit {
+    pub account: String,
+    pub prompt_token_limit: Option<u64>,
 }
 
 impl ApiKeyAccess {
@@ -83,8 +94,13 @@ impl ApiKeyAccess {
     }
 
     pub(crate) fn normalized(&self) -> Result<Self, String> {
+        let prompt_token_limit = normalize_limit(self.prompt_token_limit);
         if self.all {
-            return Ok(Self::default());
+            return Ok(Self {
+                all: true,
+                prompt_token_limit,
+                providers: Vec::new(),
+            });
         }
 
         let mut providers: Vec<ApiKeyProviderAccess> = Vec::new();
@@ -103,6 +119,8 @@ impl ApiKeyAccess {
                 }
                 accounts.push(account.to_string());
             }
+            let account_limits = normalize_account_limits(&incoming.account_limits);
+            let provider_limit = normalize_limit(incoming.prompt_token_limit);
 
             if let Some(existing) = providers.iter_mut().find(|rule| rule.provider == provider) {
                 if existing.accounts.is_empty() || accounts.is_empty() {
@@ -118,10 +136,15 @@ impl ApiKeyAccess {
                         }
                     }
                 }
+                existing.prompt_token_limit =
+                    min_limit(existing.prompt_token_limit, provider_limit);
+                merge_account_limits(&mut existing.account_limits, account_limits);
             } else {
                 providers.push(ApiKeyProviderAccess {
                     provider: provider.to_string(),
                     accounts,
+                    prompt_token_limit: provider_limit,
+                    account_limits,
                 });
             }
         }
@@ -132,8 +155,75 @@ impl ApiKeyAccess {
         providers.sort_by(|left, right| left.provider.cmp(&right.provider));
         Ok(Self {
             all: false,
+            prompt_token_limit,
             providers,
         })
+    }
+}
+
+impl ApiKeyProviderAccess {
+    pub(crate) fn account_prompt_token_limit<F>(&self, mut matches: F) -> Option<u64>
+    where
+        F: FnMut(&str) -> bool,
+    {
+        self.account_limits
+            .iter()
+            .filter(|limit| matches(&limit.account))
+            .filter_map(|limit| limit.prompt_token_limit)
+            .min()
+    }
+}
+
+fn normalize_limit(limit: Option<u64>) -> Option<u64> {
+    limit.filter(|value| *value > 0)
+}
+
+fn min_limit(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+fn normalize_account_limits(limits: &[ApiKeyAccountLimit]) -> Vec<ApiKeyAccountLimit> {
+    let mut out = Vec::new();
+    for incoming in limits {
+        let account = incoming.account.trim();
+        let Some(prompt_token_limit) = normalize_limit(incoming.prompt_token_limit) else {
+            continue;
+        };
+        if account.is_empty() {
+            continue;
+        }
+        if let Some(index) = out
+            .iter()
+            .position(|limit: &ApiKeyAccountLimit| limit.account.eq_ignore_ascii_case(account))
+        {
+            out[index].prompt_token_limit =
+                min_limit(out[index].prompt_token_limit, Some(prompt_token_limit));
+        } else {
+            out.push(ApiKeyAccountLimit {
+                account: account.to_string(),
+                prompt_token_limit: Some(prompt_token_limit),
+            });
+        }
+    }
+    out
+}
+
+fn merge_account_limits(target: &mut Vec<ApiKeyAccountLimit>, incoming: Vec<ApiKeyAccountLimit>) {
+    for incoming in incoming {
+        if let Some(existing) = target
+            .iter_mut()
+            .find(|limit| limit.account.eq_ignore_ascii_case(&incoming.account))
+        {
+            existing.prompt_token_limit =
+                min_limit(existing.prompt_token_limit, incoming.prompt_token_limit);
+        } else {
+            target.push(incoming);
+        }
     }
 }
 
@@ -529,14 +619,32 @@ mod tests {
     fn normalizes_and_enforces_restricted_provider_accounts() {
         let access = ApiKeyAccess {
             all: false,
+            prompt_token_limit: None,
             providers: vec![
                 ApiKeyProviderAccess {
                     provider: "cod".to_string(),
                     accounts: vec!["account-a".to_string(), "account-a".to_string()],
+                    prompt_token_limit: Some(2000),
+                    account_limits: vec![
+                        ApiKeyAccountLimit {
+                            account: "account-a".to_string(),
+                            prompt_token_limit: Some(1000),
+                        },
+                        ApiKeyAccountLimit {
+                            account: "account-a".to_string(),
+                            prompt_token_limit: Some(800),
+                        },
+                        ApiKeyAccountLimit {
+                            account: "ignored".to_string(),
+                            prompt_token_limit: Some(0),
+                        },
+                    ],
                 },
                 ApiKeyProviderAccess {
                     provider: "claude".to_string(),
                     accounts: Vec::new(),
+                    prompt_token_limit: None,
+                    account_limits: Vec::new(),
                 },
             ],
         }
@@ -548,6 +656,17 @@ mod tests {
             access.provider_rule("codex").unwrap().accounts,
             vec!["account-a"]
         );
+        assert_eq!(
+            access.provider_rule("codex").unwrap().prompt_token_limit,
+            Some(2000)
+        );
+        assert_eq!(
+            access
+                .provider_rule("codex")
+                .unwrap()
+                .account_prompt_token_limit(|account| account.eq_ignore_ascii_case("account-a")),
+            Some(800)
+        );
         assert!(access.provider_rule("cld").unwrap().accounts.is_empty());
         assert!(!access.allows_provider("gemini"));
     }
@@ -556,6 +675,7 @@ mod tests {
     fn restricted_access_requires_a_selection() {
         let err = ApiKeyAccess {
             all: false,
+            prompt_token_limit: None,
             providers: Vec::new(),
         }
         .normalized()
