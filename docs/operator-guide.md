@@ -225,12 +225,15 @@ Sessions are persisted to disk and survive server restarts. Session duration is 
 - Request count, error count, token usage (input / output / cache / reasoning)
 - Last seen / last success / last error timestamps
 - Live quota from upstream (provider-specific: balance, rolling window, weekly window, model breakdown)
+- Priority routing status and the **Use first** / **Remove priority** action
 - Enable / disable / delete controls
 - Re-auth flow for providers with expiring tokens
 
 **Settings modal** — API-key management, notification channel (Telegram or Google Chat) configuration, and per-account alert subscriptions.
 
-Managed API keys can be unrestricted or limited to one or more providers. Each allowed provider can grant access to every account for that provider or only selected accounts. Access rules are enforced before provider dispatch and account load balancing, including requests routed through custom models. Existing and legacy keys remain unrestricted until their access is edited.
+Managed API keys can be unrestricted or limited to one or more providers. Each allowed provider can grant access to every account for that provider or only selected accounts. Keys can also enforce estimated prompt-token limits for the whole key, a provider, or a specific account. Access and prompt-limit rules are enforced before provider dispatch and account load balancing, including requests routed through custom models. Existing and legacy keys remain unrestricted until their access is edited.
+
+Prompt-token limits are request guardrails, not monthly counters. A request is blocked when its estimated input prompt tokens exceed the strictest matching whole-key, provider, or account limit.
 
 **Theme toggle** — dark / light, persisted to localStorage.
 
@@ -269,6 +272,8 @@ All client requests use `Authorization: Bearer <IO_GATEWAY_KEY>`.
 | `POST /admin/api-keys/create` | Create an API key with optional provider/account access rules |
 | `POST /admin/api-keys/access` | Replace an API key's provider/account access rules |
 | `POST /admin/api-keys/revoke` | Revoke an API key |
+| `GET /admin/account-routing` | List priority routing settings and selectable accounts |
+| `POST /admin/account-routing/priority` | Add or remove an account from provider priority routing |
 | `GET/POST /notifications/settings` | Read or update notification settings |
 | `POST /notifications/test` | Send a test notification |
 | `GET /usage/summary.json` | Aggregate usage summary |
@@ -421,6 +426,24 @@ curl -sS http://127.0.0.1:8319/custom-models/delete \
 ### Round-robin rotation
 
 Each provider maintains its own round-robin counter. Accounts are rotated per-request. Disabled accounts are skipped. Custom models use usage-weighted selection when `load_balance` is enabled.
+
+### Priority account routing
+
+Use priority routing when one or more accounts should be consumed before the normal account pool. In the dashboard, open an account's three-dot menu and choose **Use first**. Priority accounts for the same provider are selected before non-priority accounts until they are disabled, cooling down, unavailable, or quota-exhausted. If multiple accounts are marked priority, the router balances within that priority set.
+
+Disable or delete an account to automatically remove its priority setting. Re-enabling the account does not silently restore priority; use **Use first** again when you want it back.
+
+Admin API:
+
+```bash
+curl -sS http://127.0.0.1:8319/admin/account-routing \
+  -b "$ADMIN_COOKIE"
+
+curl -sS http://127.0.0.1:8319/admin/account-routing/priority \
+  -b "$ADMIN_COOKIE" \
+  -H "Content-Type: application/json" \
+  -d '{"provider":"codex","account":"codex:label:manual-2","priority":true}'
+```
 
 ### Enable / disable accounts
 
@@ -1134,6 +1157,7 @@ Set `ANTIGRAVITY_GOOGLE_CLIENT_ID`, `ANTIGRAVITY_GOOGLE_CLIENT_SECRET`, `GEMINI_
 | `auths/notification-settings.json` | Notification channel and watched accounts |
 | `auths/admin-sessions.json` | Active admin sessions (survives restarts) |
 | `auths/api-keys.json` | Hashed API keys, metadata, and provider/account access rules |
+| `auths/account-routing.json` | Priority account routing settings |
 | `ecosystem.config.cjs` | PM2 process config |
 | `src/main.rs` | Main gateway source (~12k lines, includes embedded dashboard HTML/JS/CSS) |
 

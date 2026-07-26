@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta
       name="description"
-      content="IO Gateway wiki for setup, dashboard operations, provider accounts, custom models, Test API, API keys, notifications, deployment, and troubleshooting."
+      content="IO Gateway wiki for setup, dashboard operations, priority account routing, API-key prompt limits, provider accounts, custom models, Test API, notifications, deployment, and troubleshooting."
     >
     <title>IO Gateway Wiki</title>
     <link rel="icon" href="data:,">
@@ -35,8 +35,8 @@
         <h1>Operator guide for the AI account gateway.</h1>
         <p>
           A practical wiki for running IO Gateway: setup, provider login, routing,
-          custom model aliases, dashboard Test API, API keys, quota operations,
-          deployment, and troubleshooting.
+          priority account usage, custom model aliases, dashboard Test API,
+          API-key prompt limits, quota operations, deployment, and troubleshooting.
         </p>
         <div class="hero-actions">
           <a class="button primary" href="#feature-index">Browse Wiki</a>
@@ -75,10 +75,10 @@
               <a href="#configuration"><span>Config</span><strong>Core config and env overrides</strong></a>
               <a href="#dashboard"><span>Control</span><strong>Dashboard login and sections</strong></a>
               <a href="#provider-accounts"><span>Accounts</span><strong>Add every supported provider</strong></a>
-              <a href="#routing-models"><span>Routing</span><strong>Endpoints, prefixes, and failover</strong></a>
+              <a href="#routing-models"><span>Routing</span><strong>Endpoints, prefixes, priority, and failover</strong></a>
               <a href="#custom-models"><span>Aliases</span><strong>Create ctm: custom models</strong></a>
               <a href="#test-api"><span>Testing</span><strong>Try models without a client key</strong></a>
-              <a href="#api-keys"><span>Access</span><strong>Scoped client API keys</strong></a>
+              <a href="#api-keys"><span>Access</span><strong>Scoped keys and prompt limits</strong></a>
               <a href="#notifications"><span>Alerts</span><strong>Telegram and Google Chat</strong></a>
               <a href="#usage-quota"><span>Observe</span><strong>Usage, quota, and history</strong></a>
               <a href="#deployment"><span>Deploy</span><strong>Server and GitHub Actions flow</strong></a>
@@ -190,7 +190,7 @@ ADMIN_AUTH_SECURE_COOKIES=true</code></pre>
             <h3>Main dashboard areas</h3>
             <div class="wiki-grid">
               <article><h3>Overview</h3><p>Total requests, error rate, account count, and attention states.</p></article>
-              <article><h3>Providers</h3><p>Account cards with health, quota, usage, enable/disable, delete, refresh, and re-auth controls.</p></article>
+              <article><h3>Providers</h3><p>Account cards with health, quota, usage, priority routing, enable/disable, delete, refresh, and re-auth controls.</p></article>
               <article><h3>Custom Models</h3><p>Create and manage <code>ctm:</code> aliases with fallback and load balancing.</p></article>
               <article><h3>Settings</h3><p>Test API, managed API keys, notification channels, and alert subscriptions.</p></article>
             </div>
@@ -217,7 +217,6 @@ ADMIN_AUTH_SECURE_COOKIES=true</code></pre>
                 <thead><tr><th>Provider</th><th>Prefix</th><th>Auth method</th><th>Notes</th></tr></thead>
                 <tbody>
                   <tr><td>Codex / OpenAI via ChatGPT</td><td><code>cod:</code></td><td>OAuth browser redirect</td><td>Used for OpenAI Responses-style workflows.</td></tr>
-                  <tr><td>Claude</td><td><code>cld:</code></td><td>PKCE OAuth</td><td>Works with Anthropic Messages clients and Claude Code.</td></tr>
                   <tr><td>Gemini</td><td><code>gem:</code></td><td>Google OAuth</td><td>Google provider account routing.</td></tr>
                   <tr><td>Antigravity</td><td><code>agw:</code></td><td>Google OAuth</td><td>Google Cloud Antigravity routing.</td></tr>
                   <tr><td>Qwen</td><td><code>qwn:</code></td><td>Browser token extraction</td><td>Portal token based flow.</td></tr>
@@ -251,7 +250,8 @@ ADMIN_AUTH_SECURE_COOKIES=true</code></pre>
             </div>
             <p class="wiki-lead">
               Clients use one gateway base URL. Routing is controlled by the
-              model name, provider prefix, or custom <code>ctm:</code> alias.
+              model name, provider prefix, custom <code>ctm:</code> alias, and
+              optional priority accounts.
             </p>
             <h3>Client endpoints</h3>
             <div class="wiki-table-wrap">
@@ -275,6 +275,18 @@ ctm:workhorse</code></pre>
             <div class="wiki-note">
               <strong>Failover behavior</strong>
               <p>The router avoids disabled accounts, cooling-down accounts, recent failures, and unavailable quota where provider data is available.</p>
+            </div>
+            <h3>Priority account routing</h3>
+            <ol class="wiki-steps compact">
+              <li><span>1</span><div><strong>Open an account action menu.</strong><p>Use the three-dot menu on a provider account card.</p></div></li>
+              <li><span>2</span><div><strong>Choose <em>Use first</em>.</strong><p>The account receives traffic before normal accounts for that provider.</p></div></li>
+              <li><span>3</span><div><strong>Pick more accounts when needed.</strong><p>If several accounts are prioritized, the router balances within the priority set.</p></div></li>
+              <li><span>4</span><div><strong>Let the account drain first.</strong><p>Priority accounts stay preferred until they become unavailable, disabled, cooling down, or quota-exhausted.</p></div></li>
+              <li><span>5</span><div><strong>Disable removes priority.</strong><p>When an account is disabled or deleted, its priority setting is pruned automatically.</p></div></li>
+            </ol>
+            <div class="wiki-note">
+              <strong>Stored setting</strong>
+              <p>Priority choices are persisted in <code>auths/account-routing.json</code> and exposed through <code>GET /admin/account-routing</code>.</p>
             </div>
           </section>
 
@@ -364,19 +376,33 @@ ctm:workhorse</code></pre>
             <p class="wiki-lead">
               Managed API keys let you give clients gateway access without
               sharing the admin dashboard key or upstream provider credentials.
+              Each key can also enforce prompt-token limits before provider dispatch.
             </p>
             <h3>Create a key</h3>
             <ol class="wiki-steps compact">
               <li><span>1</span><div><strong>Open Settings -> API Keys.</strong><p>Only dashboard admins can create or revoke managed keys.</p></div></li>
               <li><span>2</span><div><strong>Create a new key.</strong><p>Give it a readable label so you know which app or user owns it.</p></div></li>
               <li><span>3</span><div><strong>Choose access.</strong><p>Leave unrestricted, limit to providers, or limit to selected accounts inside providers.</p></div></li>
-              <li><span>4</span><div><strong>Copy the key once.</strong><p>Store it in the client environment or secret manager.</p></div></li>
+              <li><span>4</span><div><strong>Set prompt limits.</strong><p>Optionally cap the whole key, each provider, or individual accounts by estimated input prompt tokens.</p></div></li>
+              <li><span>5</span><div><strong>Copy the key once.</strong><p>Store it in the client environment or secret manager.</p></div></li>
             </ol>
+            <h3>Prompt-token limit levels</h3>
+            <div class="wiki-table-wrap">
+              <table class="wiki-table">
+                <thead><tr><th>Level</th><th>What it controls</th></tr></thead>
+                <tbody>
+                  <tr><td>Whole key</td><td>Blocks any request whose estimated prompt is above the API key limit.</td></tr>
+                  <tr><td>Provider</td><td>Blocks requests for one provider when the provider-specific limit is stricter.</td></tr>
+                  <tr><td>Account</td><td>Filters or blocks individual accounts when an account-specific limit is exceeded.</td></tr>
+                </tbody>
+              </table>
+            </div>
             <h3>Common access patterns</h3>
             <div class="wiki-grid">
               <article><h3>All providers</h3><p>Use for trusted internal tools that should follow gateway routing.</p></article>
               <article><h3>One provider</h3><p>Use when a client should only access Claude, Gemini, GLM, or another single provider.</p></article>
               <article><h3>Selected accounts</h3><p>Use when you need cost, team, or tenant separation.</p></article>
+              <article><h3>Prompt ceilings</h3><p>Use when clients should send small prompts only, even if the provider supports larger context.</p></article>
               <article><h3>Custom aliases</h3><p>Access rules are enforced before dispatch, including requests routed through <code>ctm:</code> aliases.</p></article>
             </div>
           </section>
@@ -432,7 +458,7 @@ ctm:workhorse</code></pre>
               <article><h3>Context Usage</h3><p>Charts input, output, cache, reasoning, and total tokens over time.</p></article>
               <article><h3>Provider quota</h3><p>Shows provider-specific windows, balance, reset time, package data, and model breakdown when available.</p></article>
               <article><h3>Account health</h3><p>Tracks last seen, last success, latest error, request counts, and active streams.</p></article>
-              <article><h3>History filters</h3><p>Use time range, bucket size, model breakdown, and account filters to narrow operational data.</p></article>
+              <article><h3>Priority and limits</h3><p>Use account priority to spend selected accounts first and API-key limits to reject oversized prompts early.</p></article>
             </div>
             <h3>Useful endpoints</h3>
             <div class="wiki-table-wrap">
@@ -442,6 +468,8 @@ ctm:workhorse</code></pre>
                   <tr><td><code>GET /usage/summary.json</code></td><td>Aggregate usage summary.</td></tr>
                   <tr><td><code>GET /usage/history.json</code></td><td>Time-bucketed usage history.</td></tr>
                   <tr><td><code>GET /usage/context-history.json</code></td><td>Per-request context history.</td></tr>
+                  <tr><td><code>GET /admin/account-routing</code></td><td>List priority routing settings and selectable accounts.</td></tr>
+                  <tr><td><code>POST /admin/account-routing/priority</code></td><td>Add or remove an account from provider priority routing.</td></tr>
                   <tr><td><code>GET /dashboard.json</code></td><td>Full dashboard data JSON.</td></tr>
                 </tbody>
               </table>
@@ -462,7 +490,8 @@ ctm:workhorse</code></pre>
             <p class="wiki-lead">
               The production workflow should build in CI, upload the exact
               binary artifact, restart the systemd service, and verify health
-              before declaring deployment complete.
+              before declaring deployment complete. Landing-page deployments are
+              path-gated separately from app releases.
             </p>
             <h3>Release deployment flow</h3>
             <ol class="wiki-steps">
@@ -472,6 +501,12 @@ ctm:workhorse</code></pre>
               <li><span>4</span><div><strong>Install and restart.</strong><p>Back up the live binary, install the new one, and restart <code>io-gateway.service</code>.</p></div></li>
               <li><span>5</span><div><strong>Verify readiness.</strong><p>Check <code>/health</code>, <code>/ready</code>, service state, and revision metadata.</p></div></li>
             </ol>
+            <h3>Path-aware pipelines</h3>
+            <ul class="wiki-list">
+              <li><strong>Landing/wiki only</strong> Changes under <code>site/</code> deploy GitHub Pages without building the app binary.</li>
+              <li><strong>App only</strong> Changes under app paths run the app pipeline; production app deploy remains release-tag based.</li>
+              <li><strong>Both surfaces</strong> A change set touching both app and <code>site/</code> runs both pipelines.</li>
+            </ul>
             <pre><code>curl http://127.0.0.1:8319/health
 curl http://127.0.0.1:8319/ready</code></pre>
           </section>
@@ -509,7 +544,7 @@ curl http://127.0.0.1:8319/ready</code></pre>
             <ol class="wiki-steps compact">
               <li><span>1</span><div><strong>Open the dashboard.</strong><p>Look for attention cards, latest errors, disabled accounts, and quota states.</p></div></li>
               <li><span>2</span><div><strong>Run Test API.</strong><p>Test the exact model or custom alias that failed from a client.</p></div></li>
-              <li><span>3</span><div><strong>Check access rules.</strong><p>Confirm the client API key can use the requested provider/account/custom alias path.</p></div></li>
+              <li><span>3</span><div><strong>Check access rules.</strong><p>Confirm the client API key can use the requested provider/account/custom alias path and is under the configured prompt-token limits.</p></div></li>
               <li><span>4</span><div><strong>Read service logs.</strong><p>Use systemd or process logs to inspect upstream response details and gateway errors.</p></div></li>
             </ol>
           </section>

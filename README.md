@@ -23,10 +23,10 @@ IO Gateway turns a pile of separate AI accounts into one operational gateway:
 
 - One API surface for OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages.
 - Account-aware routing across Codex, Claude, Gemini, Antigravity, Qwen, DeepSeek, MiniMax, Grok, GitHub Copilot, and GLM.
-- Load balancing and failover across multiple accounts.
+- Load balancing, priority account usage, and failover across multiple accounts.
 - Custom model aliases that can route to one or many provider targets.
 - Dashboard-based account, quota, usage, notification, and API-key management.
-- Provider and account scoped API keys for controlled client access.
+- Provider/account scoped API keys with whole-key, provider, and account prompt-token limits.
 
 ## Feature Highlights
 
@@ -86,6 +86,8 @@ The router is built for agent traffic:
 - Retry another account before meaningful output reaches the client.
 - Track active streams so concurrent prompts spread across accounts.
 - Refresh quota snapshots in the background.
+- Mark one or more accounts as **Use first** so they are consumed before the normal account pool.
+- Remove priority automatically when an account is disabled or deleted.
 
 ### API Key Management
 
@@ -97,9 +99,10 @@ Keys can be:
 - Limited to one provider.
 - Limited to multiple providers.
 - Limited to selected accounts inside a provider.
+- Limited by estimated prompt tokens for the whole key, a provider, or a specific account.
 - Updated or revoked from the dashboard.
 
-Access rules are enforced before routing and load balancing, including custom-model requests.
+Access and prompt-limit rules are enforced before routing and load balancing, including custom-model requests.
 
 ### Dashboard
 
@@ -107,7 +110,7 @@ The dashboard is the control plane for the gateway:
 
 - Add accounts through OAuth, device-code login, browser token extraction, or API key entry.
 - See account cards with connection state, quota, package details, latest error details, and usage.
-- Enable, disable, delete, refresh, and re-auth accounts.
+- Enable, disable, delete, refresh, prioritize, and re-auth accounts.
 - Switch account layout modes for dense provider views.
 - Manage custom models.
 - Manage API keys and scoped access.

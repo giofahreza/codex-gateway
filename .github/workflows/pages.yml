@@ -19,9 +19,69 @@ permissions:
   id-token: write
 
 jobs:
+  changes:
+    name: Detect landing changes
+    runs-on: ubuntu-latest
+    outputs:
+      landing: ${{ steps.detect.outputs.landing }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed landing files
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "landing=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [ "${REF_TYPE}" = "tag" ]; then
+            previous_tag="$(git tag --sort=-v:refname | grep -E '^v[0-9]' | grep -vx "${REF_NAME}" | head -n 1 || true)"
+            if [ -n "${previous_tag}" ]; then
+              mapfile -t changed_files < <(git diff --name-only "${previous_tag}" "${REF_NAME}")
+            else
+              mapfile -t changed_files < <(git ls-tree -r --name-only "${REF_NAME}")
+            fi
+          elif [ -z "${BEFORE}" ] || [[ "${BEFORE}" =~ ^0+$ ]]; then
+            if git rev-parse "${AFTER}^" >/dev/null 2>&1; then
+              mapfile -t changed_files < <(git diff --name-only "${AFTER}^" "${AFTER}")
+            else
+              mapfile -t changed_files < <(git ls-tree -r --name-only "${AFTER}")
+            fi
+          else
+            mapfile -t changed_files < <(git diff --name-only "${BEFORE}" "${AFTER}")
+          fi
+
+          landing=false
+          for path in "${changed_files[@]}"; do
+            case "${path}" in
+              site/*|.github/workflows/pages.yml)
+                landing=true
+                ;;
+            esac
+          done
+
+          printf 'Changed files:\n'
+          printf '%s\n' "${changed_files[@]}"
+          echo "landing=${landing}" >> "${GITHUB_OUTPUT}"
+
   build:
     name: Build Pages artifact
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.landing == 'true'
 
     steps:
       - name: Checkout
@@ -44,7 +104,10 @@ jobs:
   deploy:
     name: Deploy Pages
     runs-on: ubuntu-latest
-    needs: build
+    needs:
+      - changes
+      - build
+    if: needs.changes.outputs.landing == 'true'
 
     environment:
       name: github-pages

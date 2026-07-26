@@ -7,7 +7,7 @@
     <link rel="icon" href="data:,">
     <meta
       name="description"
-      content="Self-hosted AI account gateway with quota-aware routing, scoped API keys, model testing, and dashboard operations."
+      content="Self-hosted AI account gateway with quota-aware routing, priority account usage, scoped API-key prompt limits, model testing, and dashboard operations."
     >
     <style>
       :root {
@@ -1250,13 +1250,14 @@
           <p class="eyebrow">Self-hosted AI account gateway</p>
           <h1>One gateway for every AI account.</h1>
           <p class="lead">
-            Route client requests, test models, and monitor quota from one dashboard before
-            upstream accounts fail.
+            Route client requests, prioritize the accounts you want used first, enforce
+            prompt-token guardrails, and monitor quota from one dashboard before upstream
+            accounts fail.
           </p>
           <div class="hero-signals" aria-label="Gateway capabilities">
             <span class="hero-signal">OpenAI-compatible endpoint</span>
-            <span class="hero-signal">Custom model aliases</span>
-            <span class="hero-signal">Dashboard Test API</span>
+            <span class="hero-signal">Priority account routing</span>
+            <span class="hero-signal">Per-key prompt limits</span>
           </div>
           <div class="actions">
             <a class="button primary" href="https://github.com/giofahreza/io-gateway">View GitHub</a>
@@ -1275,9 +1276,9 @@
                 <div class="account-row">
                   <span>
                     <b>claude-primary</b>
-                    <small>2 active streams</small>
+                    <small>priority until 100% used</small>
                   </span>
-                  <span class="status ready">ready</span>
+                  <span class="status ready">priority</span>
                 </div>
                 <div class="account-row">
                   <span>
@@ -1305,11 +1306,11 @@
                 </div>
               </div>
               <div class="proof-panel test-box">
-                <h3>Test a model directly</h3>
-                <span class="model-chip">glm:glm-4.5</span>
-                <div class="prompt-line">Ask a quick question from the dashboard. No client API key needed.</div>
-                <div class="response-line">HTTP 200 - model test completed</div>
-                <span class="model-chip">ctm:research -> cld + gem</span>
+                <h3>Control client keys</h3>
+                <span class="model-chip">key: internal-tools</span>
+                <div class="prompt-line">Whole-key, provider, and account prompt-token limits.</div>
+                <div class="response-line">Blocked before dispatch when a prompt is too large</div>
+                <span class="model-chip">codex:label:manual-2 -> Use first</span>
               </div>
             </div>
           </div>
@@ -1325,12 +1326,12 @@
           <span>model suggestions</span>
         </div>
         <div class="metric">
-          <strong>ctm:</strong>
-          <span>custom model aliases</span>
+          <strong>100%</strong>
+          <span>priority account drain</span>
         </div>
         <div class="metric">
-          <strong>OTP</strong>
-          <span>dashboard access</span>
+          <strong>3</strong>
+          <span>API-key limit levels</span>
         </div>
       </div>
     </section>
@@ -1353,8 +1354,8 @@
             </article>
             <article class="workflow-card">
               <span class="step-label">2. Route</span>
-              <h3>Use stable model prefixes</h3>
-              <p>Send clients to <code>cld:</code>, <code>gem:</code>, <code>glm:</code>, or a custom <code>ctm:</code> alias.</p>
+              <h3>Choose the accounts used first</h3>
+              <p>Mark one or more accounts as <b>Use first</b> so they receive traffic before normal accounts.</p>
             </article>
             <article class="workflow-card">
               <span class="step-label">3. Test</span>
@@ -1369,7 +1370,7 @@
             <article class="workflow-card">
               <span class="step-label">5. Protect</span>
               <h3>Issue scoped API keys</h3>
-              <p>Give users access to all providers, selected providers, or specific accounts only.</p>
+              <p>Limit each key by whole prompt size, provider prompt size, or specific account prompt size.</p>
             </article>
             <article class="workflow-card">
               <span class="step-label">6. Alert</span>
@@ -1394,7 +1395,7 @@
                 <div class="mini-stat"><b>13</b><small>attention</small></div>
               </div>
               <div class="provider-row">
-                <span><b>Claude</b><small>sonnet, opus, account routing</small></span>
+                <span><b>Claude</b><small>priority account active, normal pool paused</small></span>
                 <div class="track"><i style="width:68%"></i></div>
               </div>
               <div class="provider-row">
@@ -1402,7 +1403,7 @@
                 <div class="track"><i style="width:54%"></i></div>
               </div>
               <div class="provider-row">
-                <span><b>Custom route</b><small><code>ctm:research</code> with fallback targets</small></span>
+                <span><b>API key</b><small>provider and account prompt-token limits enforced</small></span>
                 <div class="track"><i style="width:84%"></i></div>
               </div>
             </div>
@@ -1421,7 +1422,11 @@
             </div>
             <div class="copy-block">
               <h3>Routing is explicit</h3>
-              <p>Provider prefixes and custom aliases make it clear where traffic goes and how fallback behaves.</p>
+              <p>Provider prefixes, custom aliases, and priority account flags make it clear where traffic goes.</p>
+            </div>
+            <div class="copy-block">
+              <h3>Keys have guardrails</h3>
+              <p>Set prompt-token ceilings for an API key globally, by provider, or by account before dispatch.</p>
             </div>
           </div>
         </div>
@@ -1448,7 +1453,7 @@
               </div>
               <div class="custom-feature">
                 <b>Provider and account targeting</b>
-                <span>Point one alias at selected providers, specific accounts, or a mixed provider chain.</span>
+                <span>Point one alias at selected providers, specific accounts, priority accounts, or a mixed provider chain.</span>
               </div>
               <div class="custom-feature">
                 <b>Direct Test API checks</b>
@@ -1530,7 +1535,7 @@
               <h2>One endpoint, many upstreams.</h2>
               <p>
                 Keep client config stable while you move traffic between real accounts, providers,
-                and custom model aliases.
+                custom model aliases, and priority account pools.
               </p>
             </div>
             <div class="provider-cloud" aria-label="Supported model prefixes">
@@ -1544,6 +1549,8 @@
               <span class="provider-pill">cop: Copilot</span>
               <span class="provider-pill">glm: GLM</span>
               <span class="provider-pill">ctm: Custom</span>
+              <span class="provider-pill">Use first priority</span>
+              <span class="provider-pill">Prompt-token limits</span>
             </div>
           </div>
           <div class="terminal" aria-label="Quick start command">
