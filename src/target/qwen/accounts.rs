@@ -170,7 +170,8 @@ pub fn candidate_accounts(state: &crate::AppState) -> Vec<QwenAccount> {
     }
 
     let len = accounts.len();
-    let picked_indices = crate::select_ordered_account_indices(
+    let priority_accounts = crate::routing_priority_accounts_for_provider(state, "qwen");
+    let picked_indices = crate::select_ordered_account_indices_with_priority(
         len,
         *idx,
         |candidate_idx| {
@@ -180,6 +181,9 @@ pub fn candidate_accounts(state: &crate::AppState) -> Vec<QwenAccount> {
                     "qwen",
                     &crate::qwen_stats_key(&accounts[candidate_idx]),
                 )
+        },
+        |candidate_idx| {
+            priority_accounts.contains(&crate::qwen_stats_key(&accounts[candidate_idx]))
         },
         |candidate_idx| crate::qwen_account_selection_score(state, &accounts[candidate_idx]),
     );

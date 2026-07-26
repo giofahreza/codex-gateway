@@ -117,7 +117,8 @@ pub fn candidate_accounts(state: &crate::AppState) -> Vec<AntigravityAccount> {
     }
 
     let len = accounts.len();
-    let picked_indices = crate::select_ordered_account_indices(
+    let priority_accounts = crate::routing_priority_accounts_for_provider(state, "antigravity");
+    let picked_indices = crate::select_ordered_account_indices_with_priority(
         len,
         *idx,
         |candidate_idx| {
@@ -127,6 +128,9 @@ pub fn candidate_accounts(state: &crate::AppState) -> Vec<AntigravityAccount> {
                     "antigravity",
                     &crate::antigravity_stats_key(&accounts[candidate_idx]),
                 )
+        },
+        |candidate_idx| {
+            priority_accounts.contains(&crate::antigravity_stats_key(&accounts[candidate_idx]))
         },
         |candidate_idx| crate::antigravity_account_selection_score(state, &accounts[candidate_idx]),
     );

@@ -110,6 +110,7 @@ struct AppState {
     api_key_last_used: Arc<Mutex<HashMap<String, String>>>,
     internal_proxy_secret: Arc<String>,
     notification_settings: Arc<Mutex<notifications::NotificationSettings>>,
+    account_routing: Arc<Mutex<AccountRoutingSettings>>,
     disabled: Arc<Mutex<HashSet<String>>>,
     persistence_tx: mpsc::Sender<PersistenceEvent>,
     account_router: Arc<Mutex<HashMap<String, AccountRuntimeState>>>,
@@ -126,6 +127,18 @@ enum ApiKeyCacheEntry {
 struct AuthenticatedApiKey {
     id: Option<String>,
     access: api_keys::ApiKeyAccess,
+}
+
+#[derive(Default, Clone, Serialize, Deserialize)]
+struct AccountRoutingSettings {
+    #[serde(default)]
+    providers: HashMap<String, AccountRoutingProviderSettings>,
+}
+
+#[derive(Default, Clone, Serialize, Deserialize)]
+struct AccountRoutingProviderSettings {
+    #[serde(default)]
+    priority_accounts: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -215,6 +228,13 @@ struct ApiKeyRevokeRequest {
 struct ApiKeyAccessUpdateRequest {
     id: String,
     access: api_keys::ApiKeyAccess,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountRoutingPriorityRequest {
+    provider: String,
+    account: String,
+    priority: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -411,6 +431,7 @@ async fn main() {
     let persisted_stats = Arc::new(Mutex::new(stats_store::load(&cfg)));
     let admin_sessions = admin_auth::load_sessions(&admin_session_path(&cfg));
     let notification_settings = notifications::load(&cfg);
+    let account_routing = load_account_routing_settings(&cfg);
     let mut api_key_store = api_keys::load(&cfg);
     match api_keys::bootstrap_legacy_key(&mut api_key_store, &cfg.proxy_api_key, &now_rfc3339()) {
         Ok(true) => {
@@ -510,6 +531,7 @@ async fn main() {
         api_key_last_used: Arc::new(Mutex::new(HashMap::new())),
         internal_proxy_secret: Arc::new(Uuid::new_v4().simple().to_string()),
         notification_settings: Arc::new(Mutex::new(notification_settings)),
+        account_routing: Arc::new(Mutex::new(account_routing)),
         disabled: Arc::new(Mutex::new(disabled)),
         persistence_tx,
         account_router: Arc::new(Mutex::new(HashMap::new())),
@@ -517,6 +539,7 @@ async fn main() {
     };
     migrate_qwen_usage_keys(&state);
     migrate_grok_usage_keys(&state);
+    prune_account_routing_settings(&state);
     backfill_last_error_messages_from_history(&state);
     sync_usage_stats(&state);
 
@@ -533,6 +556,11 @@ async fn main() {
         .route("/admin/api-keys/create", any(admin_api_keys_create_route))
         .route("/admin/api-keys/access", any(admin_api_keys_access_route))
         .route("/admin/api-keys/revoke", any(admin_api_keys_revoke_route))
+        .route("/admin/account-routing", any(admin_account_routing_route))
+        .route(
+            "/admin/account-routing/priority",
+            any(admin_account_routing_priority_route),
+        )
         .route("/admin/test-api", any(admin_test_api_route))
         .route("/dashboard.json", any(dashboard_json))
         .route("/dashboard/snapshot.json", any(dashboard_snapshot_route))
@@ -3548,6 +3576,7 @@ async fn dashboard() -> impl IntoResponse {
         testApiModelOptions: [],
         providerSettings: readProviderDashboardSettings(),
         notificationSettings: null,
+        accountRouting: { providers: {} },
         apiKeys: [],
         apiKeyAccounts: [],
         apiKeyEditingId: '',
@@ -4525,6 +4554,94 @@ async fn dashboard() -> impl IntoResponse {
       function accountKey(a) {
         return (a && (a.file_name || a.label || a.email || a.account_id || a.name)) || '';
       }
+      function routingProviderKey(provider) {
+        var value = String(provider || '').toLowerCase();
+        if (value === 'cod' || value === 'codex') return 'codex';
+        if (value === 'agw' || value === 'antigravity') return 'antigravity';
+        if (value === 'gem' || value === 'gemini') return 'gemini';
+        if (value === 'qwn' || value === 'qwen') return 'qwen';
+        if (value === 'dsk' || value === 'deepseek') return 'deepseek';
+        if (value === 'grk' || value === 'grok') return 'grok';
+        if (value === 'min' || value === 'minimax') return 'minimax';
+        if (value === 'cop' || value === 'copilot') return 'copilot';
+        if (value === 'cld' || value === 'claude') return 'claude';
+        if (value === 'glm') return 'glm';
+        return value;
+      }
+      function priorityAccountKey(provider, a) {
+        provider = routingProviderKey(provider);
+        a = a || {};
+        if (provider === 'codex') {
+          if (a.account_id) return 'codex:account_id:' + a.account_id;
+          if (a.file_name) return 'codex:file:' + a.file_name;
+          return 'codex:label:' + (a.label || '');
+        }
+        if (provider === 'antigravity') {
+          if (a.email) return 'agw:email:' + a.email;
+          if (a.file_name) return 'agw:file:' + a.file_name;
+          if (a.project_id) return 'agw:project:' + a.project_id;
+          return 'agw:label:' + (a.label || '');
+        }
+        if (provider === 'gemini') {
+          if (a.email && a.project_id) return 'gemini:email:' + a.email + '|project:' + a.project_id;
+          if (a.email) return 'gemini:email:' + a.email;
+          if (a.file_name) return 'gemini:file:' + a.file_name;
+          return 'gemini:label:' + (a.label || '');
+        }
+        if (provider === 'qwen') {
+          if (a.subject) return 'qwen:subject:' + a.subject;
+          if (a.account_id) return 'qwen:subject:' + a.account_id;
+          if (a.email) return 'qwen:email:' + a.email;
+          if (a.file_name) return 'qwen:file:' + a.file_name;
+          if (a.resource_url) return 'qwen:resource:' + a.resource_url;
+          return 'qwen:label:' + (a.label || '');
+        }
+        if (provider === 'deepseek') {
+          if (a.account_id) return 'deepseek:account_id:' + a.account_id;
+          if (a.file_name) return 'deepseek:file:' + a.file_name;
+          return 'deepseek:label:' + (a.label || '');
+        }
+        if (provider === 'grok') {
+          if (a.user_id) return 'grok:user_id:' + a.user_id;
+          if (a.email) return 'grok:email:' + a.email;
+          if (a.file_name) return 'grok:file:' + a.file_name;
+          return 'grok:label:' + (a.label || '');
+        }
+        if (provider === 'minimax') {
+          if (a.account_id) return 'minimax:account_id:' + a.account_id;
+          if (a.file_name) return 'minimax:file:' + a.file_name;
+          return 'minimax:label:' + (a.label || '');
+        }
+        if (provider === 'copilot') {
+          if (a.account_id) return 'copilot:account_id:' + a.account_id;
+          if (a.login) return 'copilot:login:' + a.login;
+          if (a.file_name) return 'copilot:file:' + a.file_name;
+          return 'copilot:label:' + (a.label || '');
+        }
+        if (provider === 'claude') {
+          if (a.organization_uuid) return 'claude:organization:' + a.organization_uuid;
+          if (a.account_id) return 'claude:account_id:' + a.account_id;
+          if (a.email) return 'claude:email:' + a.email;
+          if (a.file_name) return 'claude:file:' + a.file_name;
+          return 'claude:label:' + (a.label || '');
+        }
+        if (provider === 'glm') {
+          if (a.account_id) return 'glm:account_id:' + a.account_id;
+          if (a.file_name) return 'glm:file:' + a.file_name;
+          return 'glm:label:' + (a.label || '');
+        }
+        return accountKey(a);
+      }
+      function isPriorityAccount(provider, a) {
+        var providerKey = routingProviderKey(provider);
+        var providerSettings = dashboardState.accountRouting
+          && dashboardState.accountRouting.providers
+          && dashboardState.accountRouting.providers[providerKey];
+        var accounts = providerSettings && Array.isArray(providerSettings.priority_accounts)
+          ? providerSettings.priority_accounts
+          : [];
+        return accounts.indexOf(priorityAccountKey(provider, a)) !== -1;
+      }
       function isExpired(value) {
         if (!value) return false;
         const ts = Date.parse(value);
@@ -4977,7 +5094,8 @@ async fn dashboard() -> impl IntoResponse {
           '/claude/accounts.json': providers.claude,
           '/claude/quota.json': quotas.claude,
           '/glm/accounts.json': providers.glm,
-          '/glm/quota.json': quotas.glm
+          '/glm/quota.json': quotas.glm,
+          '/admin/account-routing': dashboardSnapshot.account_routing
         };
         return routeMap[url];
       }
@@ -5483,6 +5601,10 @@ async fn dashboard() -> impl IntoResponse {
         const title = 'Attention: ' + label;
         return '<span class="attention-account-badge" title="' + escapeHtml(title) + '" aria-label="' + escapeHtml(title) + '">' + escapeHtml(label) + '</span>';
       }
+      function renderPriorityBadge(provider, a) {
+        if (!isPriorityAccount(provider, a)) return '';
+        return '<span class="account-state enabled" title="Priority routing" aria-label="Priority routing">Priority</span>';
+      }
       function renderCardHeader(title, badgesHtml, actionsHtml) {
         return '<div class="card-header">'
           + '<div class="card-identity">'
@@ -5495,7 +5617,7 @@ async fn dashboard() -> impl IntoResponse {
       function renderAccountHeader(title, provider, a) {
         return renderCardHeader(
           title,
-          renderAccountState(a) + renderAttentionBadge(provider, a),
+          renderAccountState(a) + renderPriorityBadge(provider, a) + renderAttentionBadge(provider, a),
           renderAccountActions(provider, a)
         );
       }
@@ -5513,6 +5635,12 @@ async fn dashboard() -> impl IntoResponse {
         const fileArg = escapeHtml(jsString(a.file_name));
         const labelArg = escapeHtml(jsString(label));
         const providerArg = escapeHtml(jsString(provider || ''));
+        const accountKey = priorityAccountKey(provider, a);
+        const accountKeyArg = escapeHtml(jsString(accountKey));
+        const isPriority = isPriorityAccount(provider, a);
+        const priorityAction = isEnabled
+          ? '<button type="button" role="menuitem" aria-label="' + escapeHtml((isPriority ? 'Remove priority from ' : 'Use first ') + label) + '" onclick="toggleAccountPriority(' + providerArg + ', ' + accountKeyArg + ', ' + (isPriority ? 'false' : 'true') + ')" class="mini-btn action-btn">' + (isPriority ? 'Remove priority' : 'Use first') + '</button>'
+          : '';
         const forceEnableAction = isCooldown
           ? '<button type="button" role="menuitem" aria-label="' + escapeHtml('Force enable ' + label) + '" onclick="toggleCred(' + fileArg + ', true, ' + labelArg + ')" class="mini-btn action-btn is-enabled">Force enable</button>'
           : '';
@@ -5520,6 +5648,7 @@ async fn dashboard() -> impl IntoResponse {
           + '<button type="button" class="mini-btn account-menu-button" aria-label="' + escapeHtml('Open actions for ' + label) + '" aria-haspopup="menu" aria-expanded="false" aria-controls="' + escapeHtml(menuId) + '" onclick="toggleAccountActionMenu(event, ' + menuArg + ')">&#8942;</button>'
           + '<span id="' + escapeHtml(menuId) + '" class="account-action-menu" role="menu" hidden onclick="event.stopPropagation()">'
           + '<button type="button" role="menuitem" aria-label="' + escapeHtml('Refresh models and quota for ' + label) + '" onclick="refreshModelCatalog(' + providerArg + ', ' + fileArg + ')" class="mini-btn action-btn">Refresh models + quota</button>'
+          + priorityAction
           + forceEnableAction
           + '<button type="button" role="menuitem" aria-label="' + escapeHtml(toggleLabel + ' ' + label) + '" onclick="toggleCred(' + fileArg + ', ' + (isEnabled ? 'false' : 'true') + ', ' + labelArg + ')" class="mini-btn action-btn ' + toggleClass + '">' + toggleLabel + '</button>'
           + '<button type="button" role="menuitem" aria-label="' + escapeHtml('Delete ' + label) + '" onclick="deleteCred(' + fileArg + ', ' + labelArg + ')" class="mini-btn action-btn danger">Delete</button>'
@@ -8629,6 +8758,28 @@ async fn dashboard() -> impl IntoResponse {
         notify(data.message || 'Credential updated', data.ok === false ? 'error' : '');
         refreshCredentialViews();
       }
+      async function toggleAccountPriority(provider, accountKey, priority) {
+        closeAccountActionMenus();
+        const res = await adminFetch('/admin/account-routing/priority', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: provider,
+            account: accountKey,
+            priority: !!priority
+          })
+        });
+        if (!res) return;
+        const data = await res.json();
+        if (!data.ok) {
+          notify(data.message || 'Failed to update priority routing', 'error');
+          return;
+        }
+        dashboardState.accountRouting = data.settings || { providers: {} };
+        dashboardState.apiKeyAccounts = Array.isArray(data.accounts) ? data.accounts : dashboardState.apiKeyAccounts;
+        notify(priority ? 'Account will be used first' : 'Account priority removed', 'success');
+        refreshCredentialViews();
+      }
       async function refreshModelCatalog(provider, fileName) {
         closeAccountActionMenus();
         var body = new URLSearchParams();
@@ -8691,6 +8842,11 @@ async fn dashboard() -> impl IntoResponse {
         refreshQuota();
       }
       function renderDashboardSnapshot() {
+        if (dashboardSnapshot && dashboardSnapshot.account_routing) {
+          var routing = dashboardSnapshot.account_routing;
+          dashboardState.accountRouting = routing.settings || { providers: {} };
+          dashboardState.apiKeyAccounts = Array.isArray(routing.accounts) ? routing.accounts : dashboardState.apiKeyAccounts;
+        }
         refreshQuota();
         refreshAgwQuota();
         refreshGeminiQuota();
@@ -9043,6 +9199,112 @@ async fn admin_api_keys_revoke_route(
     .into_response()
 }
 
+async fn admin_account_routing_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    prune_account_routing_settings(&state);
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "settings": account_routing_public_json(&state),
+        "accounts": notification_account_options(&state)
+    }))
+    .into_response()
+}
+
+async fn admin_account_routing_priority_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<AccountRoutingPriorityRequest>,
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    let provider = match normalize_routing_provider(&payload.provider) {
+        Some(provider) => provider,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({
+                    "ok": false,
+                    "message": "unknown provider"
+                })),
+            )
+                .into_response();
+        }
+    };
+    let account = payload.account.trim().to_string();
+    if account.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "message": "account is required"
+            })),
+        )
+            .into_response();
+    }
+
+    if payload.priority {
+        let enabled_accounts = enabled_routing_account_keys(&state);
+        let allowed = enabled_accounts
+            .get(provider)
+            .map(|accounts| accounts.contains(&account))
+            .unwrap_or(false);
+        if !allowed {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({
+                    "ok": false,
+                    "message": "priority account must be enabled"
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    {
+        let mut settings = state.account_routing.lock().unwrap();
+        let entry = settings.providers.entry(provider.to_string()).or_default();
+        if payload.priority {
+            if !entry
+                .priority_accounts
+                .iter()
+                .any(|value| value == &account)
+            {
+                entry.priority_accounts.push(account);
+            }
+        } else {
+            entry.priority_accounts.retain(|value| value != &account);
+        }
+        normalize_account_routing_settings(&mut settings);
+    }
+    prune_account_routing_settings(&state);
+    if let Err(err) =
+        save_account_routing_settings(&state.cfg, &state.account_routing.lock().unwrap())
+    {
+        error!("failed to save account routing settings: {}", err);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({
+                "ok": false,
+                "message": "failed to save account routing settings"
+            })),
+        )
+            .into_response();
+    }
+
+    axum::Json(serde_json::json!({
+        "ok": true,
+        "settings": account_routing_public_json(&state),
+        "accounts": notification_account_options(&state)
+    }))
+    .into_response()
+}
+
 /// Returns the dashboard counters and per-account request totals.
 #[utoipa::path(
     get,
@@ -9254,6 +9516,11 @@ async fn dashboard_snapshot_route(State(state): State<AppState>, headers: Header
             "copilot": quota("copilot"),
             "claude": quota("claude"),
             "glm": quota("glm")
+        },
+        "account_routing": {
+            "ok": true,
+            "settings": account_routing_public_json(&state),
+            "accounts": notification_account_options(&state)
         }
     }))
     .into_response()
@@ -10260,6 +10527,232 @@ fn notification_account_options(state: &AppState) -> Vec<notifications::Notifica
             .then_with(|| a.key.cmp(&b.key))
     });
     out
+}
+
+fn account_routing_settings_path(cfg: &Config) -> PathBuf {
+    cfg.auth_dir
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("account-routing.json")
+}
+
+fn load_account_routing_settings(cfg: &Config) -> AccountRoutingSettings {
+    let path = account_routing_settings_path(cfg);
+    let Ok(data) = std::fs::read_to_string(path) else {
+        return AccountRoutingSettings::default();
+    };
+    serde_json::from_str::<AccountRoutingSettings>(&data)
+        .map(|mut settings| {
+            normalize_account_routing_settings(&mut settings);
+            settings
+        })
+        .unwrap_or_default()
+}
+
+fn save_account_routing_settings(
+    cfg: &Config,
+    settings: &AccountRoutingSettings,
+) -> Result<(), String> {
+    let mut settings = settings.clone();
+    normalize_account_routing_settings(&mut settings);
+    let path = account_routing_settings_path(cfg);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create account routing dir: {}", err))?;
+    }
+    let data = serde_json::to_vec_pretty(&settings)
+        .map_err(|err| format!("failed to serialize account routing settings: {}", err))?;
+    std::fs::write(&path, data)
+        .map_err(|err| format!("failed to write account routing settings: {}", err))
+}
+
+fn normalize_account_routing_settings(settings: &mut AccountRoutingSettings) {
+    let mut normalized = HashMap::new();
+    for (provider, mut provider_settings) in std::mem::take(&mut settings.providers) {
+        let Some(provider) = normalize_routing_provider(&provider) else {
+            continue;
+        };
+        let mut seen = HashSet::new();
+        provider_settings.priority_accounts.retain(|account| {
+            let account = account.trim();
+            !account.is_empty() && seen.insert(account.to_string())
+        });
+        provider_settings
+            .priority_accounts
+            .iter_mut()
+            .for_each(|account| *account = account.trim().to_string());
+        if !provider_settings.priority_accounts.is_empty() {
+            normalized.insert(provider.to_string(), provider_settings);
+        }
+    }
+    settings.providers = normalized;
+}
+
+fn normalize_routing_provider(provider: &str) -> Option<&'static str> {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "cod" | "codex" => Some("codex"),
+        "agw" | "antigravity" => Some("antigravity"),
+        "gem" | "gemini" => Some("gemini"),
+        "qwn" | "qwen" => Some("qwen"),
+        "dsk" | "deepseek" => Some("deepseek"),
+        "grk" | "grok" => Some("grok"),
+        "min" | "minimax" => Some("minimax"),
+        "cop" | "copilot" => Some("copilot"),
+        "cld" | "claude" => Some("claude"),
+        "glm" => Some("glm"),
+        _ => None,
+    }
+}
+
+fn account_routing_public_json(state: &AppState) -> serde_json::Value {
+    let mut settings = state.account_routing.lock().unwrap().clone();
+    normalize_account_routing_settings(&mut settings);
+    serde_json::to_value(settings).unwrap_or_else(|_| serde_json::json!({ "providers": {} }))
+}
+
+pub(crate) fn routing_priority_accounts_for_provider(
+    state: &AppState,
+    provider: &str,
+) -> HashSet<String> {
+    let Some(provider) = normalize_routing_provider(provider) else {
+        return HashSet::new();
+    };
+    state
+        .account_routing
+        .lock()
+        .unwrap()
+        .providers
+        .get(provider)
+        .map(|settings| settings.priority_accounts.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn enabled_routing_account_keys(state: &AppState) -> HashMap<&'static str, HashSet<String>> {
+    let mut out: HashMap<&'static str, HashSet<String>> = HashMap::new();
+    let mut push = |provider: &'static str, key: String| {
+        out.entry(provider).or_default().insert(key);
+    };
+
+    for token in state
+        .tokens
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|token| token.enabled)
+    {
+        push("codex", codex_stats_key(token));
+    }
+    for account in state
+        .agw_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|account| account.enabled)
+    {
+        push("antigravity", antigravity_stats_key(account));
+    }
+    for account in state
+        .gemini_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|account| account.enabled)
+    {
+        push("gemini", gemini_stats_key(account));
+    }
+    for account in state
+        .qwen_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|account| account.enabled)
+    {
+        push("qwen", qwen_stats_key(account));
+    }
+    for account in state
+        .deepseek_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|account| account.enabled)
+    {
+        push("deepseek", deepseek_stats_key(account));
+    }
+    for account in state
+        .grok_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|account| account.enabled)
+    {
+        push("grok", grok_stats_key(account));
+    }
+    for account in state
+        .minimax_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|account| account.enabled)
+    {
+        push("minimax", minimax_stats_key(account));
+    }
+    for account in state
+        .copilot_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|account| account.enabled)
+    {
+        push("copilot", copilot_stats_key(account));
+    }
+    for account in state
+        .claude_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|account| account.enabled)
+    {
+        push("claude", claude_stats_key(account));
+    }
+    for account in state
+        .glm_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|account| account.enabled)
+    {
+        push("glm", glm_stats_key(account));
+    }
+
+    out
+}
+
+fn prune_account_routing_settings(state: &AppState) {
+    let enabled_accounts = enabled_routing_account_keys(state);
+    let mut changed = false;
+    {
+        let mut settings = state.account_routing.lock().unwrap();
+        normalize_account_routing_settings(&mut settings);
+        settings.providers.retain(|provider, provider_settings| {
+            let Some(enabled) = enabled_accounts.get(provider.as_str()) else {
+                changed |= !provider_settings.priority_accounts.is_empty();
+                return false;
+            };
+            let before = provider_settings.priority_accounts.len();
+            provider_settings
+                .priority_accounts
+                .retain(|account| enabled.contains(account));
+            changed |= provider_settings.priority_accounts.len() != before;
+            !provider_settings.priority_accounts.is_empty()
+        });
+    }
+    if changed {
+        let settings = state.account_routing.lock().unwrap().clone();
+        if let Err(err) = save_account_routing_settings(&state.cfg, &settings) {
+            error!("failed to save pruned account routing settings: {}", err);
+        }
+    }
 }
 
 fn parse_custom_model_save(
@@ -11305,10 +11798,11 @@ async fn delete_credential_route(
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    let response = target::codex::admin::delete_credential(State(state), Form(form))
+    let response = target::codex::admin::delete_credential(State(state.clone()), Form(form))
         .await
         .into_response();
     invalidate_model_caches().await;
+    prune_account_routing_settings(&state);
     response
 }
 
@@ -11343,10 +11837,11 @@ async fn toggle_credential_route(
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
-    let response = target::codex::admin::toggle_credential(State(state), Form(form))
+    let response = target::codex::admin::toggle_credential(State(state.clone()), Form(form))
         .await
         .into_response();
     invalidate_model_caches().await;
+    prune_account_routing_settings(&state);
     response
 }
 
@@ -16552,14 +17047,16 @@ impl AccountSelectionScore {
     }
 }
 
-pub(crate) fn select_ordered_account_indices<FEnabled, FScore>(
+pub(crate) fn select_ordered_account_indices_with_priority<FEnabled, FPriority, FScore>(
     len: usize,
     start_idx: usize,
     mut is_enabled: FEnabled,
+    mut is_priority: FPriority,
     mut score_for: FScore,
 ) -> Vec<usize>
 where
     FEnabled: FnMut(usize) -> bool,
+    FPriority: FnMut(usize) -> bool,
     FScore: FnMut(usize) -> AccountSelectionScore,
 {
     if len == 0 {
@@ -16572,11 +17069,34 @@ where
         if !is_enabled(candidate_idx) {
             continue;
         }
-        candidates.push((candidate_idx, offset, score_for(candidate_idx)));
+        candidates.push((
+            candidate_idx,
+            offset,
+            is_priority(candidate_idx),
+            score_for(candidate_idx),
+        ));
     }
 
-    candidates.sort_by(
-        |(_, left_offset, left_score), (_, right_offset, right_score)| {
+    let has_usable_priority = candidates
+        .iter()
+        .any(|(_, _, priority, score)| *priority && !score.is_quota_exhausted());
+    let mut selected = candidates
+        .into_iter()
+        .filter(|(_, _, priority, score)| {
+            if has_usable_priority {
+                *priority && !score.is_quota_exhausted()
+            } else {
+                !*priority
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if selected.is_empty() {
+        return Vec::new();
+    }
+
+    selected.sort_by(
+        |(_, left_offset, _, left_score), (_, right_offset, _, right_score)| {
             if left_score.is_better_than(right_score) {
                 Ordering::Less
             } else if right_score.is_better_than(left_score) {
@@ -16587,7 +17107,7 @@ where
         },
     );
 
-    candidates.into_iter().map(|(idx, _, _)| idx).collect()
+    selected.into_iter().map(|(idx, _, _, _)| idx).collect()
 }
 
 fn quota_cache_key(file_name: Option<&str>, label: &str) -> String {
@@ -17022,13 +17542,8 @@ pub(crate) fn codex_token_selection_score(
         cache
             .get(token_idx)
             .and_then(|entry| entry.as_ref())
-            .and_then(|entry| {
-                if entry.error.is_some() {
-                    Some(f64::INFINITY)
-                } else {
-                    codex_quota_pressure(&entry.summary)
-                }
-            })
+            .and_then(|entry| entry.error.is_none().then(|| &entry.summary))
+            .and_then(codex_quota_pressure)
     };
     usage_backed_selection_score(
         state,
@@ -17045,13 +17560,10 @@ pub(crate) fn antigravity_account_selection_score(
     let key = quota_cache_key(account.file_name.as_deref(), &account.label);
     let quota_pressure = {
         let cache = state.agw_quota_cache.lock().unwrap();
-        cache.get(&key).and_then(|entry| {
-            if entry.error.is_some() {
-                Some(f64::INFINITY)
-            } else {
-                google_quota_pressure(&entry.summary.groups, &entry.summary.models)
-            }
-        })
+        cache
+            .get(&key)
+            .and_then(|entry| entry.error.is_none().then(|| &entry.summary))
+            .and_then(|summary| google_quota_pressure(&summary.groups, &summary.models))
     };
     usage_backed_selection_score(
         state,
@@ -17068,13 +17580,10 @@ pub(crate) fn gemini_account_selection_score(
     let key = quota_cache_key(account.file_name.as_deref(), &account.label);
     let quota_pressure = {
         let cache = state.gemini_quota_cache.lock().unwrap();
-        cache.get(&key).and_then(|entry| {
-            if entry.error.is_some() {
-                Some(f64::INFINITY)
-            } else {
-                gemini_quota_pressure(&entry.summary.groups, &entry.summary.models)
-            }
-        })
+        cache
+            .get(&key)
+            .and_then(|entry| entry.error.is_none().then(|| &entry.summary))
+            .and_then(|summary| gemini_quota_pressure(&summary.groups, &summary.models))
     };
     usage_backed_selection_score(
         state,
@@ -17091,13 +17600,10 @@ pub(crate) fn qwen_account_selection_score(
     let key = quota_cache_key(account.file_name.as_deref(), &account.label);
     let quota_pressure = {
         let cache = state.qwen_quota_cache.lock().unwrap();
-        cache.get(&key).and_then(|entry| {
-            if entry.error.is_some() {
-                Some(f64::INFINITY)
-            } else {
-                qwen_quota_pressure(&entry.summary.limits)
-            }
-        })
+        cache
+            .get(&key)
+            .and_then(|entry| entry.error.is_none().then(|| &entry.summary))
+            .and_then(|summary| qwen_quota_pressure(&summary.limits))
     };
     usage_backed_selection_score(
         state,
@@ -17114,13 +17620,10 @@ pub(crate) fn deepseek_account_selection_score(
     let key = quota_cache_key(account.file_name.as_deref(), &account.label);
     let quota_pressure = {
         let cache = state.deepseek_quota_cache.lock().unwrap();
-        cache.get(&key).and_then(|entry| {
-            if entry.error.is_some() {
-                Some(f64::INFINITY)
-            } else {
-                deepseek_balance_pressure(&entry.summary)
-            }
-        })
+        cache
+            .get(&key)
+            .and_then(|entry| entry.error.is_none().then(|| &entry.summary))
+            .and_then(deepseek_balance_pressure)
     };
     usage_backed_selection_score(
         state,
@@ -17137,13 +17640,10 @@ pub(crate) fn minimax_account_selection_score(
     let key = quota_cache_key(account.file_name.as_deref(), &account.label);
     let quota_pressure = {
         let cache = state.minimax_quota_cache.lock().unwrap();
-        cache.get(&key).and_then(|entry| {
-            if entry.error.is_some() {
-                Some(f64::INFINITY)
-            } else {
-                minimax_quota_pressure(&entry.summary)
-            }
-        })
+        cache
+            .get(&key)
+            .and_then(|entry| entry.error.is_none().then(|| &entry.summary))
+            .and_then(minimax_quota_pressure)
     };
     usage_backed_selection_score(
         state,
@@ -17997,13 +18497,15 @@ fn candidate_tokens_with_reservation(
         return Vec::new();
     }
     let len = tokens.len();
-    let picked_indices = select_ordered_account_indices(
+    let priority_accounts = routing_priority_accounts_for_provider(state, "codex");
+    let picked_indices = select_ordered_account_indices_with_priority(
         len,
         *idx,
         |candidate_idx| {
             tokens[candidate_idx].enabled
                 && router_account_eligible(state, "codex", &codex_stats_key(&tokens[candidate_idx]))
         },
+        |candidate_idx| priority_accounts.contains(&codex_stats_key(&tokens[candidate_idx])),
         |candidate_idx| codex_token_selection_score(state, candidate_idx, &tokens[candidate_idx]),
     );
     if let Some(picked_idx) = picked_indices.first() {
@@ -18932,7 +19434,7 @@ mod account_selection_tests {
         api_key_account_prompt_limit_blocked, api_key_prompt_limit_violation,
         api_key_rule_allows_account, apply_router_failure, codex_error_affects_account_health,
         codex_error_status_from_message, codex_token_matches_account, parse_retry_after_seconds,
-        select_ordered_account_indices, AccountRuntimeState, AccountRuntimeStatus,
+        select_ordered_account_indices_with_priority, AccountRuntimeState, AccountRuntimeStatus,
         AccountSelectionScore,
     };
     use crate::api_keys::{ApiKeyAccess, ApiKeyAccountLimit, ApiKeyProviderAccess};
@@ -18956,10 +19458,16 @@ mod account_selection_tests {
             },
         ];
 
-        let picked = select_ordered_account_indices(2, 0, |_| true, |idx| scores[idx])
-            .into_iter()
-            .next()
-            .expect("picked account");
+        let picked = select_ordered_account_indices_with_priority(
+            2,
+            0,
+            |_| true,
+            |_| false,
+            |idx| scores[idx],
+        )
+        .into_iter()
+        .next()
+        .expect("picked account");
         assert_eq!(picked, 1);
     }
 
@@ -18983,7 +19491,13 @@ mod account_selection_tests {
             },
         ];
 
-        let order = select_ordered_account_indices(3, 0, |_| true, |idx| scores[idx]);
+        let order = select_ordered_account_indices_with_priority(
+            3,
+            0,
+            |_| true,
+            |_| false,
+            |idx| scores[idx],
+        );
         assert_eq!(order, vec![1, 0, 2]);
     }
 
@@ -19002,10 +19516,16 @@ mod account_selection_tests {
             },
         ];
 
-        let picked = select_ordered_account_indices(2, 1, |_| true, |idx| scores[idx])
-            .into_iter()
-            .next()
-            .expect("picked account");
+        let picked = select_ordered_account_indices_with_priority(
+            2,
+            1,
+            |_| true,
+            |_| false,
+            |idx| scores[idx],
+        )
+        .into_iter()
+        .next()
+        .expect("picked account");
         assert_eq!(picked, 1);
     }
 
@@ -19024,10 +19544,16 @@ mod account_selection_tests {
             },
         ];
 
-        let picked = select_ordered_account_indices(2, 0, |idx| idx == 1, |idx| scores[idx])
-            .into_iter()
-            .next()
-            .expect("picked account");
+        let picked = select_ordered_account_indices_with_priority(
+            2,
+            0,
+            |idx| idx == 1,
+            |_| false,
+            |idx| scores[idx],
+        )
+        .into_iter()
+        .next()
+        .expect("picked account");
         assert_eq!(picked, 1);
     }
 
@@ -19046,10 +19572,72 @@ mod account_selection_tests {
             },
         ];
 
-        let picked = select_ordered_account_indices(2, 0, |_| true, |idx| scores[idx])
-            .into_iter()
-            .next()
-            .expect("picked account");
+        let picked = select_ordered_account_indices_with_priority(
+            2,
+            0,
+            |_| true,
+            |_| false,
+            |idx| scores[idx],
+        )
+        .into_iter()
+        .next()
+        .expect("picked account");
+        assert_eq!(picked, 1);
+    }
+
+    #[test]
+    fn priority_accounts_are_selected_before_normal_accounts() {
+        let scores = [
+            AccountSelectionScore {
+                quota_pressure: Some(90.0),
+                active_requests: 10,
+                recent_requests: 10,
+            },
+            AccountSelectionScore {
+                quota_pressure: Some(10.0),
+                active_requests: 0,
+                recent_requests: 0,
+            },
+        ];
+
+        let picked = select_ordered_account_indices_with_priority(
+            2,
+            0,
+            |_| true,
+            |idx| idx == 0,
+            |idx| scores[idx],
+        )
+        .into_iter()
+        .next()
+        .expect("picked account");
+        assert_eq!(picked, 0);
+    }
+
+    #[test]
+    fn exhausted_priority_accounts_fall_back_to_normal_accounts() {
+        let scores = [
+            AccountSelectionScore {
+                quota_pressure: Some(f64::INFINITY),
+                active_requests: 0,
+                recent_requests: 0,
+            },
+            AccountSelectionScore {
+                quota_pressure: Some(10.0),
+                active_requests: 0,
+                recent_requests: 0,
+            },
+        ];
+
+        let picked = select_ordered_account_indices_with_priority(
+            2,
+            0,
+            |_| true,
+            |idx| idx == 0,
+            |idx| scores[idx],
+        )
+        .into_iter()
+        .next()
+        .expect("picked account");
         assert_eq!(picked, 1);
     }
 

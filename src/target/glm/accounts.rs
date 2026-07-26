@@ -188,7 +188,8 @@ pub fn candidate_accounts(state: &crate::AppState) -> Vec<GlmAccount> {
     }
 
     let len = accounts.len();
-    let picked_indices = crate::select_ordered_account_indices(
+    let priority_accounts = crate::routing_priority_accounts_for_provider(state, "glm");
+    let picked_indices = crate::select_ordered_account_indices_with_priority(
         len,
         *idx,
         |candidate_idx| {
@@ -199,6 +200,7 @@ pub fn candidate_accounts(state: &crate::AppState) -> Vec<GlmAccount> {
                     &crate::glm_stats_key(&accounts[candidate_idx]),
                 )
         },
+        |candidate_idx| priority_accounts.contains(&crate::glm_stats_key(&accounts[candidate_idx])),
         |candidate_idx| crate::glm_account_selection_score(state, &accounts[candidate_idx]),
     );
     if let Some(picked_idx) = picked_indices.first() {

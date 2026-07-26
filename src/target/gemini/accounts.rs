@@ -149,7 +149,8 @@ pub fn candidate_accounts(state: &crate::AppState) -> Vec<GeminiAccount> {
     }
 
     let len = accounts.len();
-    let picked_indices = crate::select_ordered_account_indices(
+    let priority_accounts = crate::routing_priority_accounts_for_provider(state, "gemini");
+    let picked_indices = crate::select_ordered_account_indices_with_priority(
         len,
         *idx,
         |candidate_idx| {
@@ -159,6 +160,9 @@ pub fn candidate_accounts(state: &crate::AppState) -> Vec<GeminiAccount> {
                     "gemini",
                     &crate::gemini_stats_key(&accounts[candidate_idx]),
                 )
+        },
+        |candidate_idx| {
+            priority_accounts.contains(&crate::gemini_stats_key(&accounts[candidate_idx]))
         },
         |candidate_idx| crate::gemini_account_selection_score(state, &accounts[candidate_idx]),
     );

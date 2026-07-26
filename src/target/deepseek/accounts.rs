@@ -114,7 +114,8 @@ pub fn candidate_accounts(state: &crate::AppState) -> Vec<DeepSeekAccount> {
     }
 
     let len = accounts.len();
-    let picked_indices = crate::select_ordered_account_indices(
+    let priority_accounts = crate::routing_priority_accounts_for_provider(state, "deepseek");
+    let picked_indices = crate::select_ordered_account_indices_with_priority(
         len,
         *idx,
         |candidate_idx| {
@@ -124,6 +125,9 @@ pub fn candidate_accounts(state: &crate::AppState) -> Vec<DeepSeekAccount> {
                     "deepseek",
                     &crate::deepseek_stats_key(&accounts[candidate_idx]),
                 )
+        },
+        |candidate_idx| {
+            priority_accounts.contains(&crate::deepseek_stats_key(&accounts[candidate_idx]))
         },
         |candidate_idx| crate::deepseek_account_selection_score(state, &accounts[candidate_idx]),
     );

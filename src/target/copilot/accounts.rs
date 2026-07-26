@@ -228,7 +228,8 @@ pub fn candidate_accounts(state: &crate::AppState) -> Vec<CopilotAccount> {
     }
 
     let len = accounts.len();
-    let picked_indices = crate::select_ordered_account_indices(
+    let priority_accounts = crate::routing_priority_accounts_for_provider(state, "copilot");
+    let picked_indices = crate::select_ordered_account_indices_with_priority(
         len,
         *idx,
         |candidate_idx| {
@@ -238,6 +239,9 @@ pub fn candidate_accounts(state: &crate::AppState) -> Vec<CopilotAccount> {
                     "copilot",
                     &crate::copilot_stats_key(&accounts[candidate_idx]),
                 )
+        },
+        |candidate_idx| {
+            priority_accounts.contains(&crate::copilot_stats_key(&accounts[candidate_idx]))
         },
         |candidate_idx| crate::copilot_account_selection_score(state, &accounts[candidate_idx]),
     );

@@ -333,6 +333,7 @@ mod tests {
                 notification_settings: Arc::new(Mutex::new(
                     crate::notifications::NotificationSettings::default(),
                 )),
+                account_routing: Arc::new(Mutex::new(crate::AccountRoutingSettings::default())),
                 disabled: Arc::new(Mutex::new(HashSet::new())),
                 persistence_tx: std::sync::mpsc::channel().0,
                 account_router: Arc::new(Mutex::new(HashMap::new())),
