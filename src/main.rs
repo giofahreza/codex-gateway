@@ -5622,7 +5622,7 @@ async fn dashboard() -> impl IntoResponse {
         );
       }
       function renderAccountActions(provider, a) {
-        if (!a || !a.file_name) {
+        if (!a) {
           return '';
         }
         const label = accountLabel(a);
@@ -5630,28 +5630,36 @@ async fn dashboard() -> impl IntoResponse {
         const isCooldown = isEnabled && a.runtime && String(a.runtime.status || '').toLowerCase() === 'cooldown';
         const toggleLabel = isEnabled ? 'Disable' : 'Enable';
         const toggleClass = isEnabled ? 'danger' : 'is-enabled';
-        const menuId = accountActionMenuId(a.file_name);
+        const accountKey = priorityAccountKey(provider, a);
+        if (!accountKey) {
+          return '';
+        }
+        const hasFile = !!a.file_name;
+        const menuId = accountActionMenuId(a.file_name || (String(provider || '') + ':' + accountKey));
         const menuArg = escapeHtml(jsString(menuId));
-        const fileArg = escapeHtml(jsString(a.file_name));
+        const fileArg = escapeHtml(jsString(a.file_name || ''));
         const labelArg = escapeHtml(jsString(label));
         const providerArg = escapeHtml(jsString(provider || ''));
-        const accountKey = priorityAccountKey(provider, a);
         const accountKeyArg = escapeHtml(jsString(accountKey));
         const isPriority = isPriorityAccount(provider, a);
         const priorityAction = isEnabled
           ? '<button type="button" role="menuitem" aria-label="' + escapeHtml((isPriority ? 'Remove priority from ' : 'Use first ') + label) + '" onclick="toggleAccountPriority(' + providerArg + ', ' + accountKeyArg + ', ' + (isPriority ? 'false' : 'true') + ')" class="mini-btn action-btn">' + (isPriority ? 'Remove priority' : 'Use first') + '</button>'
           : '';
-        const forceEnableAction = isCooldown
+        const refreshAction = '<button type="button" role="menuitem" aria-label="' + escapeHtml('Refresh models and quota for ' + label) + '" onclick="refreshModelCatalog(' + providerArg + ', ' + (hasFile ? fileArg : "''") + ')" class="mini-btn action-btn">Refresh models + quota</button>';
+        const forceEnableAction = hasFile && isCooldown
           ? '<button type="button" role="menuitem" aria-label="' + escapeHtml('Force enable ' + label) + '" onclick="toggleCred(' + fileArg + ', true, ' + labelArg + ')" class="mini-btn action-btn is-enabled">Force enable</button>'
+          : '';
+        const fileActions = hasFile
+          ? '<button type="button" role="menuitem" aria-label="' + escapeHtml(toggleLabel + ' ' + label) + '" onclick="toggleCred(' + fileArg + ', ' + (isEnabled ? 'false' : 'true') + ', ' + labelArg + ')" class="mini-btn action-btn ' + toggleClass + '">' + toggleLabel + '</button>'
+            + '<button type="button" role="menuitem" aria-label="' + escapeHtml('Delete ' + label) + '" onclick="deleteCred(' + fileArg + ', ' + labelArg + ')" class="mini-btn action-btn danger">Delete</button>'
           : '';
         return '<span class="account-menu-wrap">'
           + '<button type="button" class="mini-btn account-menu-button" aria-label="' + escapeHtml('Open actions for ' + label) + '" aria-haspopup="menu" aria-expanded="false" aria-controls="' + escapeHtml(menuId) + '" onclick="toggleAccountActionMenu(event, ' + menuArg + ')">&#8942;</button>'
           + '<span id="' + escapeHtml(menuId) + '" class="account-action-menu" role="menu" hidden onclick="event.stopPropagation()">'
-          + '<button type="button" role="menuitem" aria-label="' + escapeHtml('Refresh models and quota for ' + label) + '" onclick="refreshModelCatalog(' + providerArg + ', ' + fileArg + ')" class="mini-btn action-btn">Refresh models + quota</button>'
+          + refreshAction
           + priorityAction
           + forceEnableAction
-          + '<button type="button" role="menuitem" aria-label="' + escapeHtml(toggleLabel + ' ' + label) + '" onclick="toggleCred(' + fileArg + ', ' + (isEnabled ? 'false' : 'true') + ', ' + labelArg + ')" class="mini-btn action-btn ' + toggleClass + '">' + toggleLabel + '</button>'
-          + '<button type="button" role="menuitem" aria-label="' + escapeHtml('Delete ' + label) + '" onclick="deleteCred(' + fileArg + ', ' + labelArg + ')" class="mini-btn action-btn danger">Delete</button>'
+          + fileActions
           + '</span>'
           + '</span>';
       }
