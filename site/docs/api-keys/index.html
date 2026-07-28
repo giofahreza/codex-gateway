@@ -3,11 +3,12 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
     <meta name="description" content="Create managed keys with provider/account scopes and prompt-token limits at whole, provider, and account levels.">
     <title>API keys - IO Gateway Docs</title>
     <link rel="icon" href="data:,">
     <link rel="canonical" href="https://gateway.giofahreza.com/docs/api-keys/">
-    <link rel="stylesheet" href="/docs.css?v=20260728d">
+    <link rel="stylesheet" href="/docs.css?v=20260728i">
   </head>
   <body>
 
@@ -147,6 +148,13 @@
           </div>
 
       <p class="docs-lead">Managed API keys let operators expose only the model routes a client should use and enforce prompt-token limits at the whole-key, provider, and account levels.</p>
+
+      <figure class="docs-figure">
+        <div class="docs-figure-frame">
+          <img src="/assets/docs-api-key-limits.png?v=20260728i" alt="API key settings showing whole-key, provider-level, and account-level prompt token limits." loading="lazy">
+        </div>
+        <figcaption>Managed keys can combine route scope with prompt ceilings before any upstream account is selected.</figcaption>
+      </figure>
       <h2>Access model</h2>
       <ul class="docs-list">
         <li><strong>Whole key</strong> Global limit across every provider and model the key may call.</li>
@@ -192,6 +200,6 @@
       <span>IO Gateway Docs</span>
       <span>giofahreza.com</span>
     </footer>
-    <script src="/docs.js?v=20260728d" defer></script>
+    <script src="/docs.js?v=20260728i" defer></script>
   </body>
 </html>

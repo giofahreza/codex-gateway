@@ -31,7 +31,7 @@
         "Verify",
         "Next steps"
       ],
-      "excerpt": "Use this tutorial to get IO Gateway running, open the operator dashboard, add upstream credentials, and verify that a model request reaches a provider account. Before you start Repository checkout Work from the IO Gateway source tree that contains Cargo.toml . Rust toolchain Build the app with the installed Rust toolchain used by the server. Provider credent"
+      "excerpt": "Use this tutorial to get IO Gateway running, open the operator dashboard, add upstream credentials, and verify that a model request reaches a provider account. The dashboard is the first place to verify that the gateway sees accounts, quota, and routes. Before you start Repository checkout Work from the IO Gateway source tree that contains Cargo.toml . Rust "
     },
     {
       "title": "Dashboard",
@@ -50,7 +50,7 @@
         "Notifications",
         "Verify changes"
       ],
-      "excerpt": "The dashboard is the operator console for upstream accounts, model routing, Test API, managed API keys, usage history, and notification settings. Before you start Enable dashboard authentication in configuration before exposing the dashboard outside a trusted network. Common tasks 1 Add provider accounts. Open the provider account section and add OAuth or AP"
+      "excerpt": "The dashboard is the operator console for upstream accounts, model routing, Test API, managed API keys, usage history, and notification settings. The dashboard surfaces account state, quota, custom routes, Test API, and settings in one operator view. Before you start Enable dashboard authentication in configuration before exposing the dashboard outside a tru"
     },
     {
       "title": "Provider accounts",
@@ -65,7 +65,7 @@
         "Account operations",
         "Verify routing"
       ],
-      "excerpt": "Provider accounts are the upstream identities IO Gateway uses when routing model requests. Add at least one healthy account before exposing an API key to clients. Before you start Credential storage Confirm auth_dir points to the directory where provider credentials should live. Provider support Use provider-specific account flows for Claude, Gemini, Codex, "
+      "excerpt": "Provider accounts are the upstream identities IO Gateway uses when routing model requests. Add at least one healthy account before exposing an API key to clients. Provider cards make routing eligibility visible before traffic reaches the account pool. Before you start Credential storage Confirm auth_dir points to the directory where provider credentials shou"
     },
     {
       "title": "Priority routing",
@@ -80,7 +80,7 @@
         "Verify behavior",
         "Automatic removal"
       ],
-      "excerpt": "Priority routing lets operators choose one or more provider accounts that receive traffic before the normal account pool. Use it to spend selected subscriptions, balances, or trials before spreading traffic to the rest of the provider. Before you start Provider account exists Add and test the upstream account before marking it as priority. Account remains el"
+      "excerpt": "Priority routing lets operators choose one or more provider accounts that receive traffic before the normal account pool. Use it to spend selected subscriptions, balances, or trials before spreading traffic to the rest of the provider. Priority membership is managed from the account actions menu and remains visible on the account card. Before you start Provi"
     },
     {
       "title": "Custom models",
@@ -95,7 +95,7 @@
         "Supported behavior",
         "Example"
       ],
-      "excerpt": "Custom models create stable ctm: aliases that can route to one or more provider models, specific accounts, weighted target sets, or fallback chains. Before you start Confirm the target provider accounts are healthy and visible in the dashboard . If the alias will be exposed to clients, decide which API keys may call it. Create an alias 1 Open Custom Models i"
+      "excerpt": "Custom models create stable ctm: aliases that can route to one or more provider models, specific accounts, weighted target sets, or fallback chains. A custom model is shown as a route card: stable alias, route steps, target count, and provider/account targets. Before you start Confirm the target provider accounts are healthy and visible in the dashboard . If"
     },
     {
       "title": "Test API",
@@ -109,7 +109,7 @@
         "Run a test",
         "What a passing result proves"
       ],
-      "excerpt": "Test API sends a dashboard-authenticated prompt through the same routing layer used by clients. Use it after account, custom-model, API-key, or priority-routing changes. Before you start Sign in to the dashboard with an operator session. Test API validates routing without requiring a separate managed client key. Run a test 1 Open Test API. Use the dashboard "
+      "excerpt": "Test API sends a dashboard-authenticated prompt through the same routing layer used by clients. Use it after account, custom-model, API-key, or priority-routing changes. Use Test API to validate route behavior before giving the route to client keys. Before you start Sign in to the dashboard with an operator session. Test API validates routing without requiri"
     },
     {
       "title": "Notifications",
@@ -154,7 +154,7 @@
         "Limit fields",
         "Operational advice"
       ],
-      "excerpt": "Managed API keys let operators expose only the model routes a client should use and enforce prompt-token limits at the whole-key, provider, and account levels. Access model Whole key Global limit across every provider and model the key may call. Provider Limit usage for one upstream provider such as Claude, Gemini, or Codex. Account Limit usage for a specifi"
+      "excerpt": "Managed API keys let operators expose only the model routes a client should use and enforce prompt-token limits at the whole-key, provider, and account levels. Managed keys can combine route scope with prompt ceilings before any upstream account is selected. Access model Whole key Global limit across every provider and model the key may call. Provider Limit "
     },
     {
       "title": "Usage and quota",
@@ -172,7 +172,7 @@
         "Useful endpoints",
         "Investigate unexpected usage"
       ],
-      "excerpt": "Usage and quota views show which clients, providers, models, and upstream accounts are consuming prompt tokens and how routing choices affect account health. What to watch Prompt tokens Track client-side limits and upstream account spending. Context size Watch large prompts that may trigger provider failures or client-limit rejections. Account state Disabled"
+      "excerpt": "Usage and quota views show which clients, providers, models, and upstream accounts are consuming prompt tokens and how routing choices affect account health. Usage views show prompt-token pressure over time before you inspect provider and account details. What to watch Prompt tokens Track client-side limits and upstream account spending. Context size Watch l"
     },
     {
       "title": "Routing and models",

@@ -3,11 +3,12 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
     <title>IO Gateway</title>
     <link rel="icon" href="data:,">
     <meta
       name="description"
-      content="Self-hosted AI account gateway with quota-aware routing, priority account usage, scoped API-key prompt limits, model testing, and dashboard operations."
+      content="Fast Rust self-hosted AI account gateway with /v1, /codex, and /claude endpoints, quota-aware routing, priority account usage, scoped API-key prompt limits, model testing, and dashboard operations."
     >
     <style>
       :root {
@@ -56,9 +57,7 @@
       code,
       pre,
       .mono,
-      .metric strong,
-      .model-chip,
-      .provider-pill,
+      .surface-route code,
       .terminal,
       .brand-mark {
         font-family:
@@ -144,24 +143,29 @@
         color: #d9fff7;
       }
 
+      .mobile-actions {
+        display: none;
+      }
+
       .button:focus-visible,
       .brand:focus-visible,
-      nav a:focus-visible {
+      nav a:focus-visible,
+      .mobile-actions a:focus-visible,
+      .feature-group summary:focus-visible {
         outline: 2px solid var(--accent);
         outline-offset: 3px;
       }
 
       .hero {
         position: relative;
-        min-height: 82svh;
+        min-height: 86svh;
         overflow: hidden;
         padding: 0;
         color: #fff;
         background:
-          linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-          linear-gradient(180deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px),
-          radial-gradient(circle at 78% 30%, rgba(93, 214, 196, 0.18), transparent 38%),
-          linear-gradient(135deg, #050706 0%, #0c1512 52%, #07100e 100%);
+          linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+          linear-gradient(180deg, rgba(255, 255, 255, 0.022) 1px, transparent 1px),
+          linear-gradient(135deg, #040706 0%, #07100e 58%, #050807 100%);
         background-size:
           72px 72px,
           72px 72px,
@@ -175,7 +179,7 @@
         z-index: 0;
         width: 100%;
         height: 100%;
-        opacity: 0.86;
+        opacity: 0.22;
       }
 
       .hero::after {
@@ -184,196 +188,75 @@
         z-index: 1;
         content: "";
         background:
-          linear-gradient(90deg, rgba(5, 7, 6, 0.97) 0%, rgba(5, 7, 6, 0.84) 43%, rgba(5, 7, 6, 0.48) 78%, rgba(5, 7, 6, 0.66) 100%),
-          linear-gradient(180deg, rgba(5, 7, 6, 0.12) 0%, rgba(5, 7, 6, 0.82) 100%);
+          linear-gradient(90deg, rgba(5, 7, 6, 0.98) 0%, rgba(5, 7, 6, 0.9) 38%, rgba(5, 7, 6, 0.42) 72%, rgba(5, 7, 6, 0.76) 100%),
+          linear-gradient(180deg, rgba(5, 7, 6, 0.18) 0%, rgba(5, 7, 6, 0.9) 100%);
         pointer-events: none;
       }
 
-      .hero-stage {
-        position: relative;
-        z-index: 2;
-        width: 100%;
-        min-width: 0;
+      .hero-backdrop {
+        position: absolute;
+        z-index: 1;
+        right: max(24px, calc((100vw - 1160px) / 2));
+        bottom: 124px;
+        width: min(720px, 56vw);
+        opacity: 0.78;
+        transform: perspective(1200px) rotateY(-7deg) rotateX(1.5deg);
+        transform-origin: right center;
         pointer-events: none;
       }
 
-      .product-proof {
-        position: relative;
-        overflow: hidden;
-        border: 1px solid rgba(255, 255, 255, 0.15);
-        border-radius: 10px;
-        background:
-          linear-gradient(140deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.015)),
-          rgba(12, 20, 18, 0.86);
-        box-shadow: 0 38px 120px rgba(0, 0, 0, 0.48);
-        backdrop-filter: blur(14px);
-        animation: proof-float 8s ease-in-out infinite;
-      }
-
-      .proof-bar {
-        display: flex;
-        height: 42px;
-        align-items: center;
-        justify-content: space-between;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-        padding: 0 14px;
-        color: rgba(255, 255, 255, 0.66);
-        font-size: 12px;
-      }
-
-      .proof-dots {
-        display: inline-flex;
-        gap: 7px;
-      }
-
-      .proof-dots span {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: rgba(255, 255, 255, 0.28);
-      }
-
-      .proof-body {
-        display: grid;
-        grid-template-columns: 1fr 1.08fr;
-        gap: 14px;
-        padding: 16px;
-      }
-
-      .proof-panel {
-        min-width: 0;
-        border: 1px solid rgba(255, 255, 255, 0.1);
+      .hero-backdrop::after {
+        position: absolute;
+        inset: 0;
         border-radius: 8px;
-        background: rgba(255, 255, 255, 0.045);
-        padding: 14px;
+        box-shadow: inset 0 0 90px rgba(5, 8, 7, 0.8);
+        content: "";
       }
 
-      .proof-panel h3 {
-        margin: 0 0 12px;
-        color: rgba(255, 255, 255, 0.92);
-        font-size: 14px;
-      }
-
-      .account-row {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 10px;
-        align-items: center;
-        border-top: 1px solid rgba(255, 255, 255, 0.08);
-        padding: 12px 0;
-      }
-
-      .account-row:first-of-type {
-        border-top: 0;
-        padding-top: 0;
-      }
-
-      .account-row b {
+      .hero-backdrop img {
         display: block;
-        overflow: hidden;
-        color: rgba(255, 255, 255, 0.9);
-        font-size: 13px;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        width: 100%;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 8px;
+        box-shadow: 0 34px 120px rgba(0, 0, 0, 0.56);
       }
 
-      .account-row small {
+      .product-shot {
+        margin: 0;
+        min-width: 0;
+      }
+
+      .product-shot-frame {
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 8px;
+        background: #07100e;
+        box-shadow: 0 34px 110px rgba(0, 0, 0, 0.52);
+      }
+
+      .product-shot img {
         display: block;
-        overflow: hidden;
-        color: rgba(255, 255, 255, 0.54);
-        font-size: 12px;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        width: 100%;
+        height: auto;
       }
 
-      .status {
-        border-radius: 999px;
-        padding: 4px 8px;
-        color: #05100d;
-        font-size: 11px;
-        font-weight: 800;
-      }
-
-      .status.ready {
-        background: var(--accent);
-      }
-
-      .status.wait {
-        background: #f0b36a;
-      }
-
-      .test-box {
-        display: grid;
-        gap: 10px;
-      }
-
-      .model-chip {
-        display: inline-flex;
-        width: max-content;
-        max-width: 100%;
-        border: 1px solid rgba(93, 214, 196, 0.34);
-        border-radius: 999px;
-        padding: 6px 10px;
-        color: #c9fff6;
-        font-size: 12px;
-      }
-
-      .prompt-line {
-        border-radius: 7px;
-        background: rgba(255, 255, 255, 0.08);
-        padding: 10px;
-        color: rgba(255, 255, 255, 0.72);
-        font-size: 12px;
-      }
-
-      .response-line {
-        border-radius: 7px;
-        background: rgba(93, 214, 196, 0.13);
-        padding: 10px;
-        color: #d9fff7;
-        font-size: 12px;
-      }
-
-      .quota-bars {
-        display: grid;
-        gap: 9px;
-        margin-top: 14px;
-      }
-
-      .quota-bar span {
-        display: flex;
-        justify-content: space-between;
+      .product-shot figcaption {
+        margin-top: 10px;
         color: rgba(255, 255, 255, 0.58);
-        font-size: 11px;
-      }
-
-      .track {
-        height: 7px;
-        overflow: hidden;
-        border-radius: 999px;
-        background: rgba(255, 255, 255, 0.1);
-      }
-
-      .track i {
-        display: block;
-        height: 100%;
-        border-radius: inherit;
-        background: linear-gradient(90deg, var(--accent), var(--blue));
+        font-size: 12px;
       }
 
       .hero-inner {
         position: relative;
         z-index: 2;
-        display: grid;
-        grid-template-columns: minmax(0, 560px) minmax(520px, 1fr);
-        gap: 48px;
-        min-height: 82svh;
+        display: flex;
+        min-height: 86svh;
         align-items: center;
         padding: 118px 0 150px;
       }
 
       .hero-copy {
-        max-width: 560px;
+        max-width: 720px;
       }
 
       .eyebrow {
@@ -397,16 +280,16 @@
       }
 
       h1 {
-        max-width: 560px;
+        max-width: 760px;
         margin: 0;
-        font-size: 62px;
+        font-size: 58px;
         line-height: 1.02;
         font-weight: 800;
         letter-spacing: 0px;
       }
 
       .lead {
-        max-width: 540px;
+        max-width: 620px;
         margin: 26px 0 0;
         color: rgba(255, 255, 255, 0.82);
         font-size: 19px;
@@ -490,7 +373,7 @@
         color: #fff;
       }
 
-      .metric-strip {
+      .surface-strip {
         position: absolute;
         z-index: 3;
         left: 50%;
@@ -498,6 +381,7 @@
         display: grid;
         width: min(1160px, calc(100% - 32px));
         grid-template-columns: repeat(4, minmax(0, 1fr));
+        margin: 0;
         overflow: hidden;
         border: 1px solid rgba(255, 255, 255, 0.12);
         border-radius: 8px;
@@ -507,25 +391,48 @@
         transform: translateX(-50%);
       }
 
-      .metric {
+      .surface-route {
         min-width: 0;
         border-right: 1px solid rgba(255, 255, 255, 0.1);
         padding: 16px 20px;
       }
 
-      .metric:last-child {
+      .surface-route:last-child {
         border-right: 0;
       }
 
-      .metric strong {
+      .surface-route code {
         display: block;
         color: #fff;
-        font-size: 24px;
+        font-size: 22px;
+        font-weight: 850;
       }
 
-      .metric span {
+      .surface-route span {
+        display: block;
+        margin-top: 4px;
         color: rgba(255, 255, 255, 0.62);
         font-size: 13px;
+      }
+
+      .mobile-proof {
+        position: relative;
+        z-index: 3;
+        display: none;
+        margin-top: 12px;
+        margin-bottom: 20px;
+      }
+
+      .mobile-proof .product-shot-frame {
+        max-height: 190px;
+      }
+
+      .mobile-proof img {
+        display: block;
+        width: 100%;
+        height: 190px;
+        object-fit: cover;
+        object-position: top left;
       }
 
       main {
@@ -556,55 +463,168 @@
         font-size: 18px;
       }
 
-      .workflow-grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 14px;
+      .unique-section {
+        border-bottom: 1px solid var(--line);
+        background: #050807;
       }
 
-      .workflow-card {
+      .unique-head {
+        max-width: 840px;
+      }
+
+      .unique-kicker {
+        display: inline-flex;
+        min-height: 30px;
+        align-items: center;
+        border: 1px solid rgba(93, 214, 196, 0.24);
+        border-radius: 999px;
+        background: rgba(93, 214, 196, 0.11);
+        padding: 0 12px;
+        color: var(--accent-strong);
+        font-size: 12px;
+        font-weight: 850;
+        text-transform: uppercase;
+      }
+
+      .feature-ledger,
+      .endpoint-ledger,
+      .runtime-spec,
+      .workflow-list {
+        display: grid;
+        margin: 0;
+        padding: 0;
+        border-top: 1px solid var(--line);
+        list-style: none;
+      }
+
+      .feature-ledger-row,
+      .endpoint-row,
+      .runtime-row,
+      .workflow-step {
+        display: grid;
         min-width: 0;
+        grid-template-columns: 220px minmax(0, 1fr);
+        gap: 24px;
+        border-bottom: 1px solid var(--line);
+        padding: 18px 0;
+      }
+
+      .feature-ledger-row code,
+      .endpoint-row code,
+      .runtime-row code,
+      .workflow-step code {
+        color: var(--accent-strong);
+      }
+
+      .feature-ledger-row strong,
+      .endpoint-row strong,
+      .runtime-row strong,
+      .workflow-step strong {
+        display: block;
+        color: var(--ink);
+        font-size: 17px;
+      }
+
+      .feature-ledger-row span,
+      .endpoint-row span,
+      .runtime-row span,
+      .workflow-step span {
+        color: var(--muted);
+      }
+
+      .feature-ledger-row p,
+      .endpoint-row p,
+      .runtime-row p,
+      .workflow-step p {
+        margin: 6px 0 0;
+        color: var(--muted);
+      }
+
+      .feature-map {
+        display: grid;
+        gap: 10px;
+        margin-top: 16px;
+      }
+
+      .feature-group {
         border: 1px solid var(--line);
         border-radius: 8px;
         background:
-          linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02)),
+          linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.014)),
           var(--panel);
-        padding: 20px;
-        box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset;
       }
 
-      .workflow-card:nth-child(2n) .step-label {
-        background: rgba(86, 135, 245, 0.11);
-        border-color: rgba(86, 135, 245, 0.2);
-        color: #b9cbff;
+      .feature-group summary {
+        display: flex;
+        gap: 14px;
+        align-items: center;
+        min-height: 58px;
+        padding: 0 18px;
+        cursor: pointer;
+        list-style: none;
       }
 
-      .workflow-card:nth-child(3n) .step-label {
-        background: rgba(201, 130, 44, 0.12);
-        border-color: rgba(201, 130, 44, 0.22);
-        color: #ffd7a8;
+      .feature-group summary::-webkit-details-marker {
+        display: none;
       }
 
-      .step-label {
-        display: inline-flex;
-        margin-bottom: 18px;
-        border-radius: 999px;
-        background: rgba(93, 214, 196, 0.11);
-        border: 1px solid rgba(93, 214, 196, 0.18);
-        padding: 5px 10px;
-        color: var(--accent-strong);
-        font-size: 12px;
-        font-weight: 800;
+      .feature-group summary span {
+        flex: 0 1 auto;
+        color: var(--ink);
+        font-weight: 850;
       }
 
-      .workflow-card h3 {
-        margin: 0 0 10px;
-        font-size: 20px;
-      }
-
-      .workflow-card p {
-        margin: 0;
+      .feature-group summary small {
+        flex: 1 1 auto;
+        text-align: right;
         color: var(--muted);
+      }
+
+      .feature-group summary::after {
+        content: "+";
+        display: grid;
+        flex: 0 0 28px;
+        width: 28px;
+        height: 28px;
+        place-items: center;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 50%;
+        color: var(--accent-strong);
+        font-family:
+          "Adwaita Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo,
+          monospace;
+        font-weight: 900;
+      }
+
+      .feature-group[open] summary::after {
+        content: "-";
+      }
+
+      .feature-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        margin: 0;
+        border-top: 1px solid var(--line);
+        padding: 16px 18px 18px;
+        list-style: none;
+      }
+
+      .feature-list li {
+        min-width: 0;
+        border-left: 3px solid rgba(93, 214, 196, 0.32);
+        padding-left: 12px;
+        color: var(--muted);
+        line-height: 1.48;
+      }
+
+      .feature-list b {
+        display: block;
+        color: var(--ink);
+      }
+
+      .feature-list.compact li {
+        border-left-color: rgba(86, 135, 245, 0.38);
       }
 
       .proof-section {
@@ -620,7 +640,13 @@
         align-items: start;
       }
 
-      .dashboard-window,
+      .product-grid > *,
+      .visual-feature > *,
+      .custom-model-layout > *,
+      .routes > * {
+        min-width: 0;
+      }
+
       .terminal {
         min-width: 0;
         overflow: hidden;
@@ -659,86 +685,187 @@
         background: var(--accent-strong);
       }
 
-      .dashboard-preview {
-        display: grid;
-        gap: 12px;
-        padding: 16px;
-      }
-
-      .preview-topline {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 8px;
-      }
-
-      .mini-stat,
-      .provider-row {
-        min-width: 0;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 7px;
-        background: rgba(255, 255, 255, 0.045);
-        padding: 12px;
-      }
-
-      .mini-stat b {
-        display: block;
-        color: #fff;
-        font-size: 18px;
-      }
-
-      .mini-stat small {
-        color: rgba(255, 255, 255, 0.54);
-      }
-
-      .provider-row {
-        display: grid;
-        grid-template-columns: 1fr auto;
-        gap: 14px;
-        align-items: center;
-      }
-
-      .provider-row b {
-        display: block;
-        color: rgba(255, 255, 255, 0.9);
-      }
-
-      .provider-row small {
-        color: rgba(255, 255, 255, 0.54);
-      }
-
-      .provider-row .track {
-        width: 140px;
-      }
-
       .product-copy {
         display: grid;
         gap: 18px;
       }
 
-      .copy-block {
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        background:
-          linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018)),
-          var(--panel);
-        padding: 20px;
+      .plain-points {
+        display: grid;
+        gap: 12px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
       }
 
-      .copy-block h3 {
-        margin: 0 0 8px;
-        font-size: 18px;
+      .plain-points li {
+        border-left: 2px solid rgba(93, 214, 196, 0.42);
+        padding-left: 12px;
+        color: var(--muted);
       }
 
-      .copy-block p {
+      .plain-points b {
+        display: block;
+        color: var(--ink);
+      }
+
+      .showcase-section {
+        border-bottom: 1px solid var(--line);
+        background: #050807;
+      }
+
+      .visual-stack {
+        display: grid;
+        border-top: 1px solid var(--line);
+      }
+
+      .visual-feature {
+        display: grid;
+        grid-template-columns: minmax(0, 1.08fr) minmax(300px, 0.92fr);
+        gap: 28px;
+        align-items: center;
+        border-bottom: 1px solid var(--line);
+        padding: 28px 0;
+      }
+
+      .visual-shot {
+        margin: 0;
+        min-width: 0;
+      }
+
+      .visual-shot .product-shot-frame {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #09111f;
+      }
+
+      .visual-shot img {
+        display: block;
+        width: auto;
+        max-width: 100%;
+        max-height: 560px;
+      }
+
+      .visual-copy {
+        display: grid;
+        gap: 12px;
+      }
+
+      .visual-copy h3 {
+        margin: 0;
+        color: var(--ink);
+        font-size: 26px;
+        line-height: 1.08;
+        letter-spacing: 0;
+      }
+
+      .visual-copy p {
         margin: 0;
         color: var(--muted);
+        font-size: 17px;
+      }
+
+      .visual-points {
+        display: grid;
+        gap: 9px;
+        margin: 4px 0 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .visual-points li {
+        position: relative;
+        padding-left: 18px;
+        color: var(--muted);
+      }
+
+      .visual-points li::before {
+        position: absolute;
+        top: 0.66em;
+        left: 0;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--accent);
+        content: "";
+      }
+
+      .visual-points li:nth-child(2)::before {
+        background: var(--blue);
+      }
+
+      .visual-points li:nth-child(3)::before {
+        background: var(--amber);
+      }
+
+      .architecture-section {
+        border-bottom: 1px solid var(--line);
+        background: #050807;
+      }
+
+      .architecture-layout {
+        display: grid;
+        grid-template-columns: 0.86fr 1.14fr;
+        gap: 32px;
+        align-items: start;
+      }
+
+      .architecture-layout > * {
+        min-width: 0;
+      }
+
+      .request-stack {
+        display: grid;
+        margin: 0;
+        padding: 0;
+        border-top: 1px solid var(--line);
+        list-style: none;
+      }
+
+      .request-step {
+        display: grid;
+        min-width: 0;
+        grid-template-columns: 74px minmax(0, 1fr);
+        gap: 18px;
+        border-bottom: 1px solid var(--line);
+        padding: 16px 0;
+      }
+
+      .request-step code {
+        color: var(--accent-strong);
+        font-weight: 850;
+      }
+
+      .request-step strong {
+        display: block;
+        color: var(--ink);
+        font-size: 17px;
+      }
+
+      .request-step span {
+        color: var(--muted);
+      }
+
+      .prefix-strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 18px;
+      }
+
+      .prefix-strip code {
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.045);
+        padding: 6px 10px;
+        color: #dffbf5;
+        font-size: 13px;
       }
 
       .custom-models {
         border-bottom: 1px solid var(--line);
-        background:
-          radial-gradient(circle at 12% 18%, rgba(86, 135, 245, 0.12), transparent 28%),
-          #050807;
+        background: #050807;
       }
 
       .custom-model-layout {
@@ -748,172 +875,15 @@
         align-items: start;
       }
 
-      .custom-feature-grid {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 12px;
-      }
-
-      .custom-feature {
-        min-width: 0;
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        background:
-          linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018)),
-          var(--panel);
-        padding: 18px;
-      }
-
-      .custom-feature b {
-        display: block;
-        margin-bottom: 7px;
-        font-size: 16px;
-      }
-
-      .custom-feature span {
-        color: var(--muted);
-        font-size: 14px;
-      }
-
-      .alias-window {
-        min-width: 0;
-        overflow: hidden;
-        border: 1px solid rgba(93, 214, 196, 0.18);
-        border-radius: 8px;
-        background: #0f171a;
-        box-shadow: var(--shadow);
-      }
-
-      .alias-body {
-        display: grid;
-        gap: 14px;
-        padding: 16px;
-      }
-
-      .alias-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-      }
-
-      .alias-title {
-        min-width: 0;
-      }
-
-      .alias-title b {
-        display: block;
-        font-size: 18px;
-      }
-
-      .alias-title span {
-        color: var(--muted);
-        font-size: 13px;
-      }
-
-      .alias-flow {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 10px;
-      }
-
-      .alias-node,
-      .alias-target,
-      .alias-test {
-        min-width: 0;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 7px;
-        background: rgba(255, 255, 255, 0.045);
-        padding: 12px;
-      }
-
-      .alias-node strong,
-      .alias-target strong,
-      .alias-test strong {
-        display: block;
-        margin-bottom: 5px;
-        color: #fff;
-        font-size: 13px;
-      }
-
-      .alias-node span,
-      .alias-target span,
-      .alias-test span {
-        color: var(--muted);
-        font-size: 12px;
-      }
-
-      .alias-targets {
-        display: grid;
-        gap: 8px;
-      }
-
-      .alias-target {
-        display: grid;
-        grid-template-columns: auto minmax(0, 1fr) auto;
-        gap: 12px;
-        align-items: center;
-      }
-
-      .target-order {
-        display: grid;
-        width: 28px;
-        height: 28px;
-        place-items: center;
-        border-radius: 50%;
-        background: rgba(93, 214, 196, 0.12);
-        color: var(--accent-strong);
-        font-size: 12px;
-        font-weight: 800;
-      }
-
-      .target-provider {
-        min-width: 0;
-      }
-
-      .target-provider code {
-        display: block;
-        overflow: hidden;
-        color: #eaf8f5;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      .target-provider small {
-        display: block;
-        overflow: hidden;
-        color: var(--muted);
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      .alias-tests {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 10px;
-      }
-
       .routes {
         display: grid;
-        grid-template-columns: 0.9fr 1.1fr;
+        grid-template-columns: 1fr 1fr;
         gap: 30px;
         align-items: start;
       }
 
-      .provider-cloud {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-      }
-
-      .provider-pill {
-        border: 1px solid var(--line);
-        border-radius: 999px;
-        background: var(--panel-soft);
-        padding: 9px 12px;
-        color: #dce9e5;
-        font-size: 14px;
-        font-weight: 800;
+      #routing {
+        padding: 56px 0;
       }
 
       .terminal pre {
@@ -928,6 +898,27 @@
       .terminal code {
         white-space: pre-wrap;
         overflow-wrap: anywhere;
+      }
+
+      .runtime-section {
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        background: #050807;
+      }
+
+      .runtime-layout {
+        display: grid;
+        grid-template-columns: 0.92fr 1.08fr;
+        gap: 26px;
+        align-items: start;
+      }
+
+      .runtime-layout > * {
+        min-width: 0;
+      }
+
+      .runtime-terminal {
+        background: #101316;
       }
 
       .cta {
@@ -962,17 +953,6 @@
         gap: 16px;
       }
 
-      @keyframes proof-float {
-        0%,
-        100% {
-          transform: translate3d(0, 0, 0) rotateX(0deg) rotateY(0deg);
-        }
-
-        50% {
-          transform: translate3d(0, -10px, 0) rotateX(1deg) rotateY(-1.5deg);
-        }
-      }
-
       @media (max-width: 1040px) {
         .hero {
           min-height: 0;
@@ -984,15 +964,14 @@
             linear-gradient(180deg, rgba(5, 7, 6, 0.08) 0%, rgba(5, 7, 6, 0.84) 100%);
         }
 
-        .hero-stage {
-          width: min(640px, 100%);
-          justify-self: end;
-          opacity: 0.84;
+        .hero-backdrop {
+          right: -64px;
+          bottom: 138px;
+          width: min(680px, 66vw);
+          opacity: 0.54;
         }
 
         .hero-inner {
-          grid-template-columns: 1fr;
-          gap: 32px;
           min-height: 0;
           padding: 104px 0 148px;
         }
@@ -1011,22 +990,55 @@
           font-size: 38px;
         }
 
-        .workflow-grid {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-
         .product-grid,
+        .visual-feature,
         .custom-model-layout,
-        .routes {
+        .routes,
+        .architecture-layout,
+        .runtime-layout {
           grid-template-columns: 1fr;
         }
       }
 
-      @media (max-width: 760px) {
+      @media (max-width: 900px) {
         nav {
           display: none;
         }
 
+        .nav {
+          min-height: 56px;
+          gap: 10px;
+        }
+
+        .mobile-actions {
+          display: flex;
+          min-width: 0;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 6px;
+        }
+
+        .mobile-actions a {
+          display: inline-flex;
+          min-height: 34px;
+          align-items: center;
+          justify-content: center;
+          border-radius: 8px;
+          padding: 0 9px;
+          color: rgba(255, 255, 255, 0.78);
+          font-size: 12px;
+          font-weight: 800;
+          text-decoration: none;
+          white-space: nowrap;
+        }
+
+        .mobile-actions .mobile-release {
+          border: 1px solid rgba(157, 229, 217, 0.34);
+          color: #d9fff7;
+        }
+      }
+
+      @media (max-width: 760px) {
         .hero {
           min-height: 0;
         }
@@ -1041,12 +1053,11 @@
             linear-gradient(180deg, rgba(5, 7, 6, 0.18) 0%, rgba(5, 7, 6, 0.94) 100%);
         }
 
-        .hero-stage {
+        .hero-backdrop {
           display: none;
         }
 
         .hero-inner {
-          display: grid;
           min-height: 0;
           padding: 96px 0 30px;
         }
@@ -1062,12 +1073,14 @@
         }
 
         .lead {
+          margin-top: 22px;
           font-size: 17px;
           line-height: 1.48;
         }
 
         .actions {
           gap: 10px;
+          margin-top: 28px;
         }
 
         .actions .button {
@@ -1076,7 +1089,7 @@
           padding: 0 12px;
         }
 
-        .metric-strip {
+        .surface-strip {
           position: relative;
           left: auto;
           bottom: auto;
@@ -1088,8 +1101,13 @@
           transform: none;
         }
 
-        .metric {
-          padding: 14px 16px;
+        .mobile-proof {
+          display: block;
+          margin-top: -8px;
+        }
+
+        .surface-route {
+          padding: 10px 16px;
         }
 
         .hero-signals {
@@ -1103,7 +1121,7 @@
         }
 
         section {
-          padding: 52px 0;
+          padding: 46px 0;
         }
 
         .section-head {
@@ -1111,7 +1129,7 @@
         }
 
         h2 {
-          font-size: 32px;
+          font-size: 30px;
           line-height: 1.06;
         }
 
@@ -1119,40 +1137,78 @@
           font-size: 16px;
         }
 
-        .workflow-grid,
-        .custom-feature-grid,
-        .alias-flow,
-        .alias-tests,
-        .preview-topline {
+        .feature-list {
           grid-template-columns: 1fr;
         }
 
-        .workflow-card {
-          padding: 18px;
-        }
-
-        .custom-feature {
-          padding: 16px;
-        }
-
-        .alias-body {
-          padding: 14px;
-        }
-
-        .alias-header {
-          align-items: flex-start;
-        }
-
-        .provider-row {
+        .feature-ledger-row,
+        .endpoint-row,
+        .request-step,
+        .runtime-row,
+        .workflow-step {
           grid-template-columns: 1fr;
+          gap: 6px;
+          padding: 14px 0;
         }
 
-        .provider-row .track {
+        .feature-group summary {
+          min-height: 52px;
+          padding: 0 14px;
+        }
+
+        .feature-group summary span {
+          flex: 1 1 auto;
+        }
+
+        .feature-group summary small {
+          display: none;
+        }
+
+        .feature-group summary::after {
+          flex: 0 0 28px;
+        }
+
+        .proof-section .product-copy {
+          order: -1;
+          gap: 14px;
+        }
+
+        .dashboard-shot {
+          display: none;
+        }
+
+        .visual-feature {
+          gap: 16px;
+          padding: 22px 0;
+        }
+
+        .visual-copy h3 {
+          font-size: 23px;
+        }
+
+        .visual-copy p {
+          font-size: 16px;
+        }
+
+        .visual-shot img {
           width: 100%;
+          max-height: none;
         }
 
-        .proof-body {
-          grid-template-columns: 1fr;
+        .custom-models .feature-ledger {
+          display: none;
+        }
+
+        #routing .terminal {
+          display: none;
+        }
+
+        .runtime-terminal {
+          display: none;
+        }
+
+        #routing {
+          padding: 44px 0;
         }
 
         .cta .shell,
@@ -1164,6 +1220,14 @@
       @media (max-width: 360px) {
         .shell {
           width: min(1160px, calc(100% - 28px));
+        }
+
+        .brand-name {
+          display: none;
+        }
+
+        .mobile-actions a {
+          padding: 0 8px;
         }
 
         .hero-inner {
@@ -1198,15 +1262,15 @@
           flex-basis: 100%;
         }
 
-        .metric {
+        .surface-route {
           padding: 10px 12px;
         }
 
-        .metric strong {
+        .surface-route code {
           font-size: 21px;
         }
 
-        .metric span {
+        .surface-route span {
           font-size: 12px;
           line-height: 1.28;
         }
@@ -1228,350 +1292,463 @@
     <header>
       <div class="shell nav">
         <a class="brand" href="#top" aria-label="IO Gateway home">
-          <span class="brand-mark">IO</span>
-          <span>IO Gateway</span>
+          <span class="brand-mark" aria-hidden="true">IO</span>
+          <span class="brand-name">IO Gateway</span>
         </a>
         <nav aria-label="Primary">
-          <a href="#workflow">Workflow</a>
+          <a href="#unique">Features</a>
           <a href="#dashboard">Dashboard</a>
+          <a href="#showcase">Controls</a>
+          <a href="#workflow">Workflow</a>
           <a href="#custom-models">Custom</a>
           <a href="#routing">Routing</a>
+          <a href="#runtime">Runtime</a>
           <a href="/docs/">Docs</a>
           <a href="https://github.com/giofahreza/io-gateway">GitHub</a>
           <a class="nav-cta" href="https://github.com/giofahreza/io-gateway/releases">Releases</a>
         </nav>
+        <div class="mobile-actions" aria-label="Quick links">
+          <a href="#unique">Features</a>
+          <a href="/docs/">Docs</a>
+          <a class="mobile-release" href="https://github.com/giofahreza/io-gateway/releases">Release</a>
+        </div>
       </div>
     </header>
 
-    <section class="hero" id="top">
+    <section class="hero" id="top" aria-labelledby="hero-title">
       <canvas id="routing-canvas" aria-hidden="true"></canvas>
+      <div class="hero-backdrop" aria-hidden="true">
+        <img src="/assets/dashboard-real.png?v=20260728-1703" alt="">
+      </div>
       <div class="shell hero-inner">
         <div class="hero-copy">
-          <p class="eyebrow">Self-hosted AI account gateway</p>
-          <h1>One gateway for every AI account.</h1>
+          <p class="eyebrow">Self-hosted Rust AI gateway</p>
+          <h1 id="hero-title">IO Gateway for /v1, /codex, and /claude.</h1>
           <p class="lead">
-            Route client requests, prioritize the accounts you want used first, enforce
-            prompt-token guardrails, and monitor quota from one dashboard before upstream
-            accounts fail.
+            Run Codex, Claude, Gemini, Qwen, Copilot, GLM, and API-key accounts behind
+            one server. Route traffic, drain priority accounts to quota, and keep client
+            keys bounded without exposing upstream credentials.
           </p>
           <div class="hero-signals" aria-label="Gateway capabilities">
-            <span class="hero-signal">OpenAI-compatible endpoint</span>
-            <span class="hero-signal">Priority account routing</span>
+            <span class="hero-signal">OpenAI-compatible clients</span>
+            <span class="hero-signal">Priority drain mode</span>
             <span class="hero-signal">Per-key prompt limits</span>
           </div>
           <div class="actions">
-            <a class="button primary" href="https://github.com/giofahreza/io-gateway">View GitHub</a>
+            <a class="button primary" href="https://github.com/giofahreza/io-gateway/releases">Download Release</a>
             <a class="button secondary" href="/docs/">Read Docs</a>
           </div>
         </div>
-        <div class="hero-stage" aria-hidden="true">
-          <div class="product-proof">
-            <div class="proof-bar">
-              <span class="proof-dots"><span></span><span></span><span></span></span>
-              <span class="mono">dashboard / test-api</span>
-            </div>
-            <div class="proof-body">
-              <div class="proof-panel">
-                <h3>Account health</h3>
-                <div class="account-row">
-                  <span>
-                    <b>claude-primary</b>
-                    <small>priority until 100% used</small>
-                  </span>
-                  <span class="status ready">priority</span>
-                </div>
-                <div class="account-row">
-                  <span>
-                    <b>codex-work</b>
-                    <small>reset in 38 minutes</small>
-                  </span>
-                  <span class="status wait">cooldown</span>
-                </div>
-                <div class="account-row">
-                  <span>
-                    <b>glm-api</b>
-                    <small>quota snapshot ready</small>
-                  </span>
-                  <span class="status ready">ready</span>
-                </div>
-                <div class="quota-bars">
-                  <div class="quota-bar">
-                    <span><b>input</b><b>72%</b></span>
-                    <div class="track"><i style="width:72%"></i></div>
-                  </div>
-                  <div class="quota-bar">
-                    <span><b>reasoning</b><b>41%</b></span>
-                    <div class="track"><i style="width:41%"></i></div>
-                  </div>
-                </div>
-              </div>
-              <div class="proof-panel test-box">
-                <h3>Control client keys</h3>
-                <span class="model-chip">key: internal-tools</span>
-                <div class="prompt-line">Whole-key, provider, and account prompt-token limits.</div>
-                <div class="response-line">Blocked before dispatch when a prompt is too large</div>
-                <span class="model-chip">codex:label:manual-2 -> Use first</span>
-              </div>
-            </div>
-          </div>
+      </div>
+      <div class="shell mobile-proof" aria-label="Compact dashboard preview">
+        <div class="product-shot-frame">
+          <img src="/assets/dashboard-real.png?v=20260728-1703" alt="">
         </div>
       </div>
-      <div class="metric-strip" aria-label="Highlights">
-        <div class="metric">
-          <strong>10</strong>
-          <span>provider adapters</span>
+      <div class="surface-strip" aria-label="Client endpoint surfaces">
+        <div class="surface-route">
+          <code>/v1</code>
+          <span>OpenAI-compatible SDKs, tools, Responses, Chat Completions, and models.</span>
         </div>
-        <div class="metric">
-          <strong>86</strong>
-          <span>model suggestions</span>
+        <div class="surface-route">
+          <code>/codex</code>
+          <span>Codex-style response sessions with gateway-side account selection.</span>
         </div>
-        <div class="metric">
-          <strong>100%</strong>
-          <span>priority account drain</span>
+        <div class="surface-route">
+          <code>/claude</code>
+          <span>Anthropic-style messages through the same key and routing controls.</span>
         </div>
-        <div class="metric">
-          <strong>3</strong>
-          <span>API-key limit levels</span>
+        <div class="surface-route">
+          <code>ctm:</code>
+          <span>Custom aliases backed by ordered provider targets and fallback rules.</span>
         </div>
       </div>
     </section>
 
     <main>
-      <section id="workflow">
+      <section class="unique-section" id="unique" aria-labelledby="features-title">
         <div class="shell">
-          <div class="section-head">
-            <h2>Built around the actual gateway workflow.</h2>
+          <div class="section-head unique-head">
+            <span class="unique-kicker">Account operations</span>
+            <h2 id="features-title">Account policy before every request.</h2>
             <p>
-              IO Gateway is for operators who run many AI accounts and need predictable routing,
-              account safety, and a direct place to test models.
+              These controls matter when several upstream accounts share one client-facing
+              gateway and traffic needs predictable dispatch rules.
             </p>
           </div>
-          <div class="workflow-grid">
-            <article class="workflow-card">
-              <span class="step-label">1. Connect</span>
-              <h3>Add provider accounts</h3>
-              <p>Save Codex, Claude, Gemini, Copilot, GLM, and other account credentials on your server.</p>
-            </article>
-            <article class="workflow-card">
-              <span class="step-label">2. Route</span>
-              <h3>Choose the accounts used first</h3>
-              <p>Mark one or more accounts as <b>Use first</b> so they receive traffic before normal accounts.</p>
-            </article>
-            <article class="workflow-card">
-              <span class="step-label">3. Test</span>
-              <h3>Try models in the dashboard</h3>
-              <p>Run a quick prompt against any available model without creating a separate client API key.</p>
-            </article>
-            <article class="workflow-card">
-              <span class="step-label">4. Observe</span>
-              <h3>Watch quota and errors</h3>
-              <p>See account health, usage windows, cooldowns, reset timing, and attention states.</p>
-            </article>
-            <article class="workflow-card">
-              <span class="step-label">5. Protect</span>
-              <h3>Issue scoped API keys</h3>
-              <p>Limit each key by whole prompt size, provider prompt size, or specific account prompt size.</p>
-            </article>
-            <article class="workflow-card">
-              <span class="step-label">6. Alert</span>
-              <h3>Notify before failure</h3>
-              <p>Send Telegram or Google Chat alerts when auth, quota, or upstream state needs attention.</p>
-            </article>
+          <div class="feature-ledger" aria-label="IO Gateway operator features">
+            <div class="feature-ledger-row">
+              <strong>Priority drain to quota</strong>
+              <span>Mark one or more accounts as <code>Use first</code>. IO Gateway sends traffic there until the account is disabled, cooling down, unavailable, or fully used.</span>
+            </div>
+            <div class="feature-ledger-row">
+              <strong>Prompt limits at three scopes</strong>
+              <span>Set estimated prompt-token ceilings for a client key globally, per provider, or per upstream account before a request is dispatched.</span>
+            </div>
+            <div class="feature-ledger-row">
+              <strong>Provider-aware account setup</strong>
+              <span>Add Codex, Claude, Gemini, Qwen, Grok, Copilot, GLM, and direct API-key accounts through provider-specific flows.</span>
+            </div>
+            <div class="feature-ledger-row">
+              <strong>Route aliases</strong>
+              <span>Create <code>ctm:</code> models with provider targets, weights, fallback steps, account targeting, and dashboard test checks.</span>
+            </div>
+            <div class="feature-ledger-row">
+              <strong>Operator signals</strong>
+              <span>Use quota snapshots, cooldown state, recent errors, usage history, and notifications as routing and maintenance inputs.</span>
+            </div>
+          </div>
+          <div class="feature-map" aria-label="Expandable IO Gateway feature index">
+            <details class="feature-group">
+              <summary><span>Routing policy</span><small>priority, fallback, cooldowns</small></summary>
+              <ul class="feature-list">
+                <li><b>Use-first accounts</b> Drain selected accounts before the normal pool.</li>
+                <li><b>Disabled account guard</b> Priority is ignored automatically when an account is disabled.</li>
+                <li><b>Quota-aware fallback</b> Skip unavailable, cooling-down, or exhausted routes.</li>
+                <li><b>Weighted custom targets</b> Spread aliases across providers and accounts.</li>
+              </ul>
+            </details>
+            <details class="feature-group">
+              <summary><span>Access control</span><small>client keys and prompt ceilings</small></summary>
+              <ul class="feature-list compact">
+                <li><b>Whole-key limit</b> Cap estimated prompt tokens for everything a key can send.</li>
+                <li><b>Provider limit</b> Apply different ceilings to Codex, Claude, Gemini, and other providers.</li>
+                <li><b>Account limit</b> Protect individual upstream accounts from oversized prompts.</li>
+                <li><b>Scoped routes</b> Restrict keys to specific providers, accounts, or model aliases.</li>
+              </ul>
+            </details>
+            <details class="feature-group">
+              <summary><span>Operator console</span><small>setup, testing, notifications</small></summary>
+              <ul class="feature-list">
+                <li><b>Provider onboarding</b> Keep login, browser-token, and API-key setup in the dashboard.</li>
+                <li><b>Test API workspace</b> Verify provider routes and <code>ctm:</code> aliases before publishing them.</li>
+                <li><b>Usage windows</b> Inspect requests, errors, cache, reasoning, and output usage.</li>
+                <li><b>Notifications</b> Surface quota, cooldown, and provider health events for operators.</li>
+              </ul>
+            </details>
           </div>
         </div>
       </section>
 
-      <section class="proof-section" id="dashboard">
+      <section class="proof-section" id="dashboard" aria-labelledby="dashboard-title">
         <div class="shell product-grid">
-          <div class="dashboard-window" aria-label="Dashboard preview">
-            <div class="window-bar">
-              <span></span><span></span><span></span>
+          <figure class="product-shot dashboard-shot">
+            <div class="product-shot-frame">
+              <img src="/assets/dashboard-real.png?v=20260728-1703" alt="IO Gateway dashboard showing usage totals, context usage chart, custom models, and provider account panels.">
             </div>
-            <div class="dashboard-preview">
-              <div class="preview-topline">
-                <div class="mini-stat"><b>114K</b><small>requests</small></div>
-                <div class="mini-stat"><b>23</b><small>accounts</small></div>
-                <div class="mini-stat"><b>10</b><small>providers</small></div>
-                <div class="mini-stat"><b>13</b><small>attention</small></div>
-              </div>
-              <div class="provider-row">
-                <span><b>Claude</b><small>priority account active, normal pool paused</small></span>
-                <div class="track"><i style="width:68%"></i></div>
-              </div>
-              <div class="provider-row">
-                <span><b>Codex</b><small>Responses API and coding sessions</small></span>
-                <div class="track"><i style="width:54%"></i></div>
-              </div>
-              <div class="provider-row">
-                <span><b>API key</b><small>provider and account prompt-token limits enforced</small></span>
-                <div class="track"><i style="width:84%"></i></div>
-              </div>
-            </div>
-          </div>
+            <figcaption>Real dashboard screenshot from a local IO Gateway instance.</figcaption>
+          </figure>
           <div class="product-copy">
             <div class="section-head">
-              <h2>Dashboard control without exposing provider credentials.</h2>
+              <h2 id="dashboard-title">The dashboard is the control plane.</h2>
               <p>
-                Users call your gateway. Operators keep the upstream accounts private and manage
-                routing, API keys, notifications, and model tests from one place.
+                Users call the gateway. Operators keep provider credentials private and manage
+                accounts, keys, custom models, usage, and notifications from a local UI.
               </p>
             </div>
-            <div class="copy-block">
-              <h3>Model testing is built in</h3>
-              <p>Use Settings -> Test API to send a prompt through any model in the unified catalog.</p>
-            </div>
-            <div class="copy-block">
-              <h3>Routing is explicit</h3>
-              <p>Provider prefixes, custom aliases, and priority account flags make it clear where traffic goes.</p>
-            </div>
-            <div class="copy-block">
-              <h3>Keys have guardrails</h3>
-              <p>Set prompt-token ceilings for an API key globally, by provider, or by account before dispatch.</p>
+            <ul class="plain-points">
+              <li><b>Add accounts</b> OAuth, device login, browser-token fallback, and API-key entry stay inside the operator surface.</li>
+              <li><b>Test before routing</b> The toolbar Test API action sits next to Add account and sends prompts through provider routes or <code>ctm:</code> aliases.</li>
+              <li><b>Bound client access</b> API keys can be scoped by provider, account, and prompt size.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="showcase-section" id="showcase" aria-labelledby="showcase-title">
+        <div class="shell">
+          <div class="section-head">
+            <span class="unique-kicker">Product controls</span>
+            <h2 id="showcase-title">Every routing claim has an operator view.</h2>
+            <p>
+              The dashboard exposes account priority, quota state, key limits, custom routes,
+              and route testing as concrete controls instead of hidden config-only behavior.
+            </p>
+          </div>
+          <div class="visual-stack" aria-label="IO Gateway product screenshots">
+            <article class="visual-feature">
+              <figure class="visual-shot">
+                <div class="product-shot-frame">
+                  <img src="/assets/priority-usage-detail.png?v=20260728-1737" alt="Codex account cards showing enabled, disabled, priority, near-quota, reset limit, and quota bar states.">
+                </div>
+              </figure>
+              <div class="visual-copy">
+                <span class="unique-kicker">Priority usage</span>
+                <h3>Spend selected accounts first, then leave the rest as fallback.</h3>
+                <p>
+                  Priority accounts are visible on the same cards that show quota, disabled
+                  state, reset availability, recent errors, and model availability.
+                </p>
+                <ul class="visual-points">
+                  <li>Use-first accounts show a visible Priority badge.</li>
+                  <li>Disabled accounts stay visible but leave routing automatically.</li>
+                  <li>Quota bars make exhausted and near-limit accounts obvious.</li>
+                </ul>
+              </div>
+            </article>
+            <article class="visual-feature">
+              <figure class="visual-shot">
+                <div class="product-shot-frame">
+                  <img src="/assets/api-key-limits.png?v=20260728-1731" alt="API key settings showing whole-key, provider-level, and account-level prompt token limits.">
+                </div>
+              </figure>
+              <div class="visual-copy">
+                <span class="unique-kicker">Scoped client keys</span>
+                <h3>Limit prompts globally, by provider, or by individual account.</h3>
+                <p>
+                  Managed API keys can expose only the providers and accounts a client should
+                  reach, with prompt ceilings applied before dispatch.
+                </p>
+                <ul class="visual-points">
+                  <li>Whole-key prompt token limit protects every route behind that key.</li>
+                  <li>Provider limits let Codex, Qwen, Claude, and Gemini use different ceilings.</li>
+                  <li>Account limits protect a single upstream account from oversized requests.</li>
+                </ul>
+              </div>
+            </article>
+            <article class="visual-feature">
+              <figure class="visual-shot">
+                <div class="product-shot-frame">
+                  <img src="/assets/custom-model-routing-detail.png?v=20260728-1737" alt="Custom model card showing a ctm alias with weighted provider targets and fallback steps.">
+                </div>
+              </figure>
+              <div class="visual-copy">
+                <span class="unique-kicker">Custom model routes</span>
+                <h3>Publish stable <code>ctm:</code> aliases over changing provider pools.</h3>
+                <p>
+                  A custom model is a route policy: ordered steps, weighted targets, exact
+                  account targeting, exclusions, and provider fallback in one dashboard card.
+                </p>
+                <ul class="visual-points">
+                  <li>Expose a stable alias while changing providers behind it.</li>
+                  <li>Combine Codex, Qwen, Claude, Gemini, and other targets in one route.</li>
+                  <li>Use fallback steps when the first account is cooling down or out of quota.</li>
+                </ul>
+              </div>
+            </article>
+            <article class="visual-feature">
+              <figure class="visual-shot">
+                <div class="product-shot-frame">
+                  <img src="/assets/test-api-workspace.png?v=20260728-1731" alt="Test API panel showing a custom model request and successful response with latency and raw response details.">
+                </div>
+              </figure>
+              <div class="visual-copy">
+                <span class="unique-kicker">Route testing</span>
+                <h3>Send a real prompt through a route before handing it to clients.</h3>
+                <p>
+                  Test API uses the dashboard session to exercise the same routing path clients
+                  use, then returns status, latency, selected model, output, and raw response.
+                </p>
+                <ul class="visual-points">
+                  <li>Test direct provider models or <code>ctm:</code> aliases.</li>
+                  <li>Validate prompt, instructions, and output ceiling from the UI.</li>
+                  <li>Confirm successful routing before publishing client keys.</li>
+                </ul>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="architecture-section" id="architecture" aria-labelledby="architecture-title">
+        <div class="shell architecture-layout">
+          <div class="section-head">
+            <span class="unique-kicker">Request flow</span>
+            <h2 id="architecture-title">Clients never talk to upstream accounts directly.</h2>
+            <p>
+              IO Gateway is the boundary. It receives client traffic, applies key limits and
+              routing policy, then selects an eligible provider account.
+            </p>
+          </div>
+          <div aria-label="Gateway request architecture">
+            <ol class="request-stack">
+              <li class="request-step">
+                <code>01</code>
+                <span><strong>Authenticate the client key</strong> Reject disabled keys and enforce prompt-token ceilings before dispatch.</span>
+              </li>
+              <li class="request-step">
+                <code>02</code>
+                <span><strong>Resolve the requested surface</strong> Normalize <code>/v1</code>, <code>/codex</code>, <code>/claude</code>, and <code>ctm:</code> aliases into route intent.</span>
+              </li>
+              <li class="request-step">
+                <code>03</code>
+                <span><strong>Select an eligible account</strong> Prefer priority accounts, skip disabled accounts automatically, then check quota, cooldown, and route scope.</span>
+              </li>
+              <li class="request-step">
+                <code>04</code>
+                <span><strong>Relay the stream</strong> Send the request upstream and keep usage, error, and notification state tied to the selected account.</span>
+              </li>
+            </ol>
+            <div class="prefix-strip" aria-label="Provider model prefixes">
+              <code>cod:</code>
+              <code>cld:</code>
+              <code>gem:</code>
+              <code>qwn:</code>
+              <code>glm:</code>
+              <code>ctm:</code>
             </div>
           </div>
         </div>
       </section>
 
-      <section class="custom-models" id="custom-models">
+      <section id="workflow" aria-labelledby="workflow-title">
+        <div class="shell">
+          <div class="section-head">
+            <h2 id="workflow-title">Daily operation stays inside the dashboard.</h2>
+            <p>
+              Connect accounts, publish one gateway URL, then keep routing policy and client
+              access inside the dashboard.
+            </p>
+          </div>
+          <ol class="workflow-list" aria-label="Operator workflow">
+            <li class="workflow-step">
+              <code>01</code>
+              <span><strong>Add provider accounts</strong> Save subscription, consumer, and API-key credentials on your own server.</span>
+            </li>
+            <li class="workflow-step">
+              <code>02</code>
+              <span><strong>Choose priority accounts</strong> Mark one or more accounts as <code>Use first</code>; disabled accounts leave the priority path automatically.</span>
+            </li>
+            <li class="workflow-step">
+              <code>03</code>
+              <span><strong>Issue bounded client keys</strong> Set prompt-token ceilings for each key globally, by provider, or by account.</span>
+            </li>
+            <li class="workflow-step">
+              <code>04</code>
+              <span><strong>Watch quota and errors</strong> Use health, usage windows, cooldowns, reset timing, and alerts to act before failures.</span>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="custom-models" id="custom-models" aria-labelledby="custom-models-title">
         <div class="shell custom-model-layout">
           <div>
             <div class="section-head">
-              <h2>Custom models are real gateway routes.</h2>
+              <h2 id="custom-models-title">Custom models are routing rules, not another model list.</h2>
               <p>
-                Create <code>ctm:</code> aliases that hide provider complexity from clients while
-                keeping fallback, account selection, and dashboard testing under operator control.
+                A <code>ctm:</code> alias is a stable client name backed by ordered provider
+                targets, account selection, load balancing, and fallback.
               </p>
             </div>
-            <div class="custom-feature-grid">
-              <div class="custom-feature">
-                <b>Stable alias names</b>
-                <span>Expose names like <code>ctm:research</code> or <code>ctm:coding</code> instead of provider-specific model IDs.</span>
+            <div class="feature-ledger" aria-label="Custom model controls">
+              <div class="feature-ledger-row">
+                <strong>Stable aliases</strong>
+                <span>Expose names like <code>ctm:research</code> or <code>ctm:coding</code> instead of leaking provider-specific model IDs.</span>
               </div>
-              <div class="custom-feature">
-                <b>Ordered fallback</b>
-                <span>Route through the next target when a provider is cooling down, out of quota, or unavailable.</span>
+              <div class="feature-ledger-row">
+                <strong>Ordered fallback</strong>
+                <span>Move to the next target when a provider is cooling down, out of quota, or unavailable.</span>
               </div>
-              <div class="custom-feature">
-                <b>Provider and account targeting</b>
-                <span>Point one alias at selected providers, specific accounts, priority accounts, or a mixed provider chain.</span>
-              </div>
-              <div class="custom-feature">
-                <b>Direct Test API checks</b>
-                <span>Try the alias from the dashboard before clients depend on it, without creating a client API key.</span>
+              <div class="feature-ledger-row">
+                <strong>Account targeting</strong>
+                <span>Point one alias at selected providers, selected accounts, priority pools, or mixed provider chains.</span>
               </div>
             </div>
           </div>
-          <div class="alias-window" aria-label="Custom model routing preview">
+          <div class="terminal" aria-label="Custom model route example">
             <div class="window-bar">
               <span></span><span></span><span></span>
             </div>
-            <div class="alias-body">
-              <div class="alias-header">
-                <div class="alias-title">
-                  <b><code>ctm:research</code></b>
-                  <span>Quota-aware fallback route for research prompts</span>
-                </div>
-                <span class="status ready">active</span>
-              </div>
-              <div class="alias-flow">
-                <div class="alias-node">
-                  <strong>Client model</strong>
-                  <span><code>ctm:research</code></span>
-                </div>
-                <div class="alias-node">
-                  <strong>Policy</strong>
-                  <span>prefer ready accounts</span>
-                </div>
-                <div class="alias-node">
-                  <strong>Result</strong>
-                  <span>same API response shape</span>
-                </div>
-              </div>
-              <div class="alias-targets">
-                <div class="alias-target">
-                  <span class="target-order">1</span>
-                  <span class="target-provider">
-                    <code>cld:claude-sonnet</code>
-                    <small>claude-primary account</small>
-                  </span>
-                  <span class="status ready">ready</span>
-                </div>
-                <div class="alias-target">
-                  <span class="target-order">2</span>
-                  <span class="target-provider">
-                    <code>gem:gemini-pro</code>
-                    <small>gemini-shared fallback</small>
-                  </span>
-                  <span class="status ready">ready</span>
-                </div>
-                <div class="alias-target">
-                  <span class="target-order">3</span>
-                  <span class="target-provider">
-                    <code>glm:glm-4.5</code>
-                    <small>last fallback while others reset</small>
-                  </span>
-                  <span class="status wait">backup</span>
-                </div>
-              </div>
-              <div class="alias-tests">
-                <div class="alias-test">
-                  <strong>Dashboard test</strong>
-                  <span>Prompt the alias directly from Settings -> Test API.</span>
-                </div>
-                <div class="alias-test">
-                  <strong>Scoped key access</strong>
-                  <span>Allow clients to use the alias without seeing upstream credentials.</span>
-                </div>
-              </div>
-            </div>
+            <pre><code>model: ctm:research
+
+1. cld:claude-sonnet
+   account: claude-primary
+   mode: prefer if ready
+
+2. gem:gemini-pro
+   account: gemini-shared
+   mode: fallback
+
+3. glm:glm-4.5
+   mode: last resort</code></pre>
           </div>
         </div>
       </section>
 
-      <section id="routing">
+      <section id="routing" aria-labelledby="routing-title">
         <div class="shell routes">
           <div>
             <div class="section-head">
-              <h2>One endpoint, many upstreams.</h2>
+              <h2 id="routing-title">Three client surfaces, one gateway.</h2>
               <p>
-                Keep client config stable while you move traffic between real accounts, providers,
-                custom model aliases, and priority account pools.
+                Point OpenAI-compatible tools, Codex clients, and Claude clients at the same
+                server while routing providers and accounts behind it.
               </p>
             </div>
-            <div class="provider-cloud" aria-label="Supported model prefixes">
-              <span class="provider-pill">cod: Codex</span>
-              <span class="provider-pill">cld: Claude</span>
-              <span class="provider-pill">gem: Gemini</span>
-              <span class="provider-pill">agw: Antigravity</span>
-              <span class="provider-pill">qwn: Qwen</span>
-              <span class="provider-pill">dsk: DeepSeek</span>
-              <span class="provider-pill">min: MiniMax</span>
-              <span class="provider-pill">cop: Copilot</span>
-              <span class="provider-pill">glm: GLM</span>
-              <span class="provider-pill">ctm: Custom</span>
-              <span class="provider-pill">Use first priority</span>
-              <span class="provider-pill">Prompt-token limits</span>
+            <div class="endpoint-ledger" aria-label="Client endpoint surfaces">
+              <div class="endpoint-row">
+                <code>/v1</code>
+                <span><strong>OpenAI-compatible clients</strong> Responses, Chat Completions, Models, and <code>ctm:</code> aliases from familiar SDKs and tools.</span>
+              </div>
+              <div class="endpoint-row">
+                <code>/codex</code>
+                <span><strong>Codex-style sessions</strong> Codex response and model routes with gateway-side account selection and quota state.</span>
+              </div>
+              <div class="endpoint-row">
+                <code>/claude</code>
+                <span><strong>Claude-compatible clients</strong> Anthropic-style messages through the same account, key, notification, and routing controls.</span>
+              </div>
             </div>
           </div>
-          <div class="terminal" aria-label="Quick start command">
+          <div class="terminal" aria-label="Client base URL examples">
+            <div class="window-bar">
+              <span></span><span></span><span></span>
+            </div>
+            <pre><code>OPENAI_BASE_URL=http://127.0.0.1:8319/v1
+CODEX_BASE_URL=http://127.0.0.1:8319/codex
+ANTHROPIC_BASE_URL=http://127.0.0.1:8319/claude
+
+POST /v1/responses
+POST /codex/responses
+POST /claude/v1/messages</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="runtime-section" id="runtime" aria-labelledby="runtime-title">
+        <div class="shell runtime-layout">
+          <div>
+            <div class="section-head">
+              <span class="unique-kicker">Rust runtime</span>
+              <h2 id="runtime-title">A Rust binary between clients and providers.</h2>
+              <p>
+                IO Gateway runs as a compiled Rust binary on Axum and Tokio, keeping routing,
+                streaming, quota checks, and dashboard operations inside one low-overhead async service.
+              </p>
+            </div>
+            <div class="runtime-spec" aria-label="Rust runtime details">
+              <div class="runtime-row">
+                <code>binary</code>
+                <span><strong>Single compiled server</strong> Deploy the gateway without a Node or Python runtime in the request path.</span>
+              </div>
+              <div class="runtime-row">
+                <code>tokio</code>
+                <span><strong>Async streaming core</strong> Concurrent streams, retries, and upstream calls run through the async runtime.</span>
+              </div>
+              <div class="runtime-row">
+                <code>rustls</code>
+                <span><strong>Rustls upstream HTTP</strong> Reqwest uses a Rustls TLS stack for outbound provider calls.</span>
+              </div>
+            </div>
+          </div>
+          <div class="terminal runtime-terminal" aria-label="Rust deployment command">
             <div class="window-bar">
               <span></span><span></span><span></span>
             </div>
             <pre><code>cargo build --release
-cp config.example.json config.json
 ./target/release/io-gateway
 
-curl http://127.0.0.1:8319/v1/responses \
-  -H "Authorization: Bearer $IO_GATEWAY_KEY" \
-  -d '{"model":"ctm:research","input":"Summarize quota state"}'</code></pre>
+# dashboard + /v1 + /codex + /claude
+# one Rust process on your server</code></pre>
           </div>
         </div>
       </section>
 
-      <section class="cta">
+      <section class="cta" aria-labelledby="cta-title">
         <div class="shell">
           <div>
-            <h2>Run your AI accounts like infrastructure.</h2>
+            <h2 id="cta-title">Run your AI accounts like infrastructure.</h2>
             <p>Deploy IO Gateway, connect accounts, and give clients one stable API surface.</p>
           </div>
           <a class="button primary" href="https://github.com/giofahreza/io-gateway/releases">Download Release</a>

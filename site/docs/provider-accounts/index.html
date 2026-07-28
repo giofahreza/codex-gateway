@@ -3,11 +3,12 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
     <meta name="description" content="Add, enable, refresh, re-auth, and test upstream provider accounts.">
     <title>Provider accounts - IO Gateway Docs</title>
     <link rel="icon" href="data:,">
     <link rel="canonical" href="https://gateway.giofahreza.com/docs/provider-accounts/">
-    <link rel="stylesheet" href="/docs.css?v=20260728d">
+    <link rel="stylesheet" href="/docs.css?v=20260728i">
   </head>
   <body>
 
@@ -147,6 +148,13 @@
           </div>
 
       <p class="docs-lead">Provider accounts are the upstream identities IO Gateway uses when routing model requests. Add at least one healthy account before exposing an API key to clients.</p>
+
+      <figure class="docs-figure">
+        <div class="docs-figure-frame">
+          <img src="/assets/docs-provider-accounts.png?v=20260728i" alt="Provider account cards with enabled, disabled, priority, quota, reset limit, and attention states." loading="lazy">
+        </div>
+        <figcaption>Provider cards make routing eligibility visible before traffic reaches the account pool.</figcaption>
+      </figure>
       <h2>Before you start</h2>
       <ul class="docs-list">
         <li><strong>Credential storage</strong> Confirm <code>auth_dir</code> points to the directory where provider credentials should live.</li>
@@ -190,6 +198,6 @@
       <span>IO Gateway Docs</span>
       <span>giofahreza.com</span>
     </footer>
-    <script src="/docs.js?v=20260728d" defer></script>
+    <script src="/docs.js?v=20260728i" defer></script>
   </body>
 </html>

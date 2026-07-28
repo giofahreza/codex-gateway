@@ -3,11 +3,12 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
     <meta name="description" content="Read usage history, context-token charts, account health, provider quota, and useful admin endpoints.">
     <title>Usage and quota - IO Gateway Docs</title>
     <link rel="icon" href="data:,">
     <link rel="canonical" href="https://gateway.giofahreza.com/docs/usage-and-quota/">
-    <link rel="stylesheet" href="/docs.css?v=20260728d">
+    <link rel="stylesheet" href="/docs.css?v=20260728i">
   </head>
   <body>
 
@@ -147,6 +148,13 @@
           </div>
 
       <p class="docs-lead">Usage and quota views show which clients, providers, models, and upstream accounts are consuming prompt tokens and how routing choices affect account health.</p>
+
+      <figure class="docs-figure">
+        <div class="docs-figure-frame">
+          <img src="/assets/docs-usage-quota.png?v=20260728i" alt="Context usage chart showing input, output, cache, and reasoning token trends across a day." loading="lazy">
+        </div>
+        <figcaption>Usage views show prompt-token pressure over time before you inspect provider and account details.</figcaption>
+      </figure>
       <h2>What to watch</h2>
       <div class="docs-grid">
         <article><h3>Prompt tokens</h3><p>Track client-side limits and upstream account spending.</p></article>
@@ -189,6 +197,6 @@
       <span>IO Gateway Docs</span>
       <span>giofahreza.com</span>
     </footer>
-    <script src="/docs.js?v=20260728d" defer></script>
+    <script src="/docs.js?v=20260728i" defer></script>
   </body>
 </html>

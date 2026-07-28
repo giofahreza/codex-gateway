@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 const outputDir = "site/docs";
 const docsVersion = "v0.1.11+";
 const updated = "July 28, 2026";
-const assetVersion = "20260728d";
+const assetVersion = "20260728i";
 
 const groups = [
   { title: "Tutorials", slug: "tutorials", description: "First-run paths that take an operator from zero to a working gateway." },
@@ -30,6 +30,7 @@ const pages = [
     seeAlso: ["configuration", "provider-accounts", "test-api"],
     body: `
       <p class="docs-lead">Use this tutorial to get IO Gateway running, open the operator dashboard, add upstream credentials, and verify that a model request reaches a provider account.</p>
+      ${docsFigure("docs-dashboard-overview.png", "IO Gateway dashboard populated with usage totals, context chart, custom routes, and provider account cards.", "The dashboard is the first place to verify that the gateway sees accounts, quota, and routes.")}
       <h2>Before you start</h2>
       <ul class="docs-list">
         <li><strong>Repository checkout</strong> Work from the IO Gateway source tree that contains <code>Cargo.toml</code>.</li>
@@ -69,6 +70,7 @@ curl http://127.0.0.1:8319/ready</code></pre>
     seeAlso: ["provider-accounts", "api-keys", "usage-and-quota"],
     body: `
       <p class="docs-lead">The dashboard is the operator console for upstream accounts, model routing, Test API, managed API keys, usage history, and notification settings.</p>
+      ${docsFigure("docs-dashboard-overview.png", "IO Gateway dashboard populated with usage totals, context chart, custom routes, and provider account cards.", "The dashboard surfaces account state, quota, custom routes, Test API, and settings in one operator view.")}
       <h2>Before you start</h2>
       <p>Enable dashboard authentication in <a class="docs-inline-link" href="/docs/configuration/">configuration</a> before exposing the dashboard outside a trusted network.</p>
       <h2>Common tasks</h2>
@@ -104,6 +106,7 @@ curl http://127.0.0.1:8319/ready</code></pre>
     seeAlso: ["dashboard", "priority-routing", "usage-and-quota"],
     body: `
       <p class="docs-lead">Provider accounts are the upstream identities IO Gateway uses when routing model requests. Add at least one healthy account before exposing an API key to clients.</p>
+      ${docsFigure("docs-provider-accounts.png", "Provider account cards with enabled, disabled, priority, quota, reset limit, and attention states.", "Provider cards make routing eligibility visible before traffic reaches the account pool.")}
       <h2>Before you start</h2>
       <ul class="docs-list">
         <li><strong>Credential storage</strong> Confirm <code>auth_dir</code> points to the directory where provider credentials should live.</li>
@@ -142,6 +145,7 @@ curl http://127.0.0.1:8319/ready</code></pre>
     seeAlso: ["provider-accounts", "routing-and-models", "usage-and-quota"],
     body: `
       <p class="docs-lead">Priority routing lets operators choose one or more <a class="docs-inline-link" href="/docs/provider-accounts/">provider accounts</a> that receive traffic before the normal account pool. Use it to spend selected subscriptions, balances, or trials before spreading traffic to the rest of the provider.</p>
+      ${docsFigure("docs-priority-routing.png", "Codex account action menu showing a priority account with quota bars and a remove-priority control.", "Priority membership is managed from the account actions menu and remains visible on the account card.")}
       <h2>Before you start</h2>
       <ul class="docs-list">
         <li><strong>Provider account exists</strong> Add and test the upstream account before marking it as priority.</li>
@@ -181,6 +185,7 @@ curl http://127.0.0.1:8319/ready</code></pre>
     seeAlso: ["routing-and-models", "api-keys", "test-api"],
     body: `
       <p class="docs-lead">Custom models create stable <code>ctm:</code> aliases that can route to one or more provider models, specific accounts, weighted target sets, or fallback chains.</p>
+      ${docsFigure("docs-custom-models.png", "Custom model cards showing ctm aliases with weighted provider targets and fallback steps.", "A custom model is shown as a route card: stable alias, route steps, target count, and provider/account targets.")}
       <h2>Before you start</h2>
       <p>Confirm the target provider accounts are healthy and visible in the <a class="docs-inline-link" href="/docs/dashboard/">dashboard</a>. If the alias will be exposed to clients, decide which <a class="docs-inline-link" href="/docs/api-keys/">API keys</a> may call it.</p>
       <h2>Create an alias</h2>
@@ -224,6 +229,7 @@ curl http://127.0.0.1:8319/ready</code></pre>
     seeAlso: ["dashboard", "custom-models", "usage-and-quota"],
     body: `
       <p class="docs-lead">Test API sends a dashboard-authenticated prompt through the same routing layer used by clients. Use it after account, custom-model, API-key, or priority-routing changes.</p>
+      ${docsFigure("docs-test-api.png", "Test API panel showing a custom model request and a successful response with HTTP status, latency, selected model, and raw response details.", "Use Test API to validate route behavior before giving the route to client keys.")}
       <h2>Before you start</h2>
       <p>Sign in to the <a class="docs-inline-link" href="/docs/dashboard/">dashboard</a> with an operator session. Test API validates routing without requiring a separate managed client key.</p>
       <h2>Run a test</h2>
@@ -335,6 +341,7 @@ ADMIN_AUTH_SECURE_COOKIES=true</code></pre>
     seeAlso: ["dashboard", "routing-and-models", "usage-and-quota"],
     body: `
       <p class="docs-lead">Managed API keys let operators expose only the model routes a client should use and enforce prompt-token limits at the whole-key, provider, and account levels.</p>
+      ${docsFigure("docs-api-key-limits.png", "API key settings showing whole-key, provider-level, and account-level prompt token limits.", "Managed keys can combine route scope with prompt ceilings before any upstream account is selected.")}
       <h2>Access model</h2>
       <ul class="docs-list">
         <li><strong>Whole key</strong> Global limit across every provider and model the key may call.</li>
@@ -374,6 +381,7 @@ ADMIN_AUTH_SECURE_COOKIES=true</code></pre>
     seeAlso: ["priority-routing", "api-keys", "troubleshooting"],
     body: `
       <p class="docs-lead">Usage and quota views show which clients, providers, models, and upstream accounts are consuming prompt tokens and how routing choices affect account health.</p>
+      ${docsFigure("docs-usage-quota.png", "Context usage chart showing input, output, cache, and reasoning token trends across a day.", "Usage views show prompt-token pressure over time before you inspect provider and account details.")}
       <h2>What to watch</h2>
       <div class="docs-grid">
         <article><h3>Prompt tokens</h3><p>Track client-side limits and upstream account spending.</p></article>
@@ -523,6 +531,17 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
+function docsFigure(fileName, alt, caption) {
+  const src = `/assets/${fileName}?v=${assetVersion}`;
+  return `
+      <figure class="docs-figure">
+        <div class="docs-figure-frame">
+          <img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy">
+        </div>
+        <figcaption>${escapeHtml(caption)}</figcaption>
+      </figure>`;
+}
+
 function plainText(value) {
   return String(value)
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -654,6 +673,7 @@ function renderShell({ title, description, canonicalPath, activeSlug = "", artic
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
     <meta name="description" content="${escapeHtml(description)}">
     <title>${escapeHtml(title)}</title>
     <link rel="icon" href="data:,">
