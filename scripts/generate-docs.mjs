@@ -1,0 +1,856 @@
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+
+const outputDir = "site/docs";
+const docsVersion = "v0.1.11+";
+const updated = "July 28, 2026";
+const assetVersion = "20260728d";
+
+const groups = [
+  { title: "Tutorials", slug: "tutorials", description: "First-run paths that take an operator from zero to a working gateway." },
+  { title: "How-to guides", slug: "how-to-guides", description: "Task-oriented procedures for dashboard and routing work." },
+  { title: "Reference", slug: "reference", description: "Stable behavior, fields, limits, storage, and endpoint details." },
+  { title: "Explanation", slug: "explanation", description: "Concepts and tradeoffs behind IO Gateway routing." },
+  { title: "Operations", slug: "operations", description: "Release, deployment, and production operating procedures." },
+  { title: "Troubleshooting", slug: "troubleshooting", description: "Symptom-led diagnosis and recovery checks." },
+];
+
+const pages = [
+  {
+    slug: "quick-start",
+    title: "Quick start",
+    group: "Tutorials",
+    type: "Tutorial",
+    appliesTo: "New local and server installs",
+    introduced: docsVersion,
+    updated,
+    categories: ["Tutorials", "Configuration"],
+    keywords: "setup install local run build config dashboard test api health ready first run",
+    summary: "Build, configure, run, and smoke-test IO Gateway for the first time.",
+    seeAlso: ["configuration", "provider-accounts", "test-api"],
+    body: `
+      <p class="docs-lead">Use this tutorial to get IO Gateway running, open the operator dashboard, add upstream credentials, and verify that a model request reaches a provider account.</p>
+      <h2>Before you start</h2>
+      <ul class="docs-list">
+        <li><strong>Repository checkout</strong> Work from the IO Gateway source tree that contains <code>Cargo.toml</code>.</li>
+        <li><strong>Rust toolchain</strong> Build the app with the installed Rust toolchain used by the server.</li>
+        <li><strong>Provider credential</strong> Prepare at least one upstream account before testing real model calls.</li>
+      </ul>
+      <h2>Install and run</h2>
+      <ol class="docs-steps">
+        <li><span>1</span><div><strong>Build the gateway.</strong><p>Run <code>cargo build --release</code> from the repository root.</p></div></li>
+        <li><span>2</span><div><strong>Create configuration.</strong><p>Start from the <a class="docs-inline-link" href="/docs/configuration/">configuration reference</a> and set <code>listen</code>, <code>proxy_api_key</code>, and <code>auth_dir</code>.</p></div></li>
+        <li><span>3</span><div><strong>Start the service locally.</strong><p>Run the binary with the config you want to test, then open the dashboard host and port from <code>listen</code>.</p></div></li>
+        <li><span>4</span><div><strong>Add a provider account.</strong><p>Use the provider account workflow before sending client traffic.</p></div></li>
+      </ol>
+      <h2>Verify</h2>
+      <pre><code>curl http://127.0.0.1:8319/health
+curl http://127.0.0.1:8319/ready</code></pre>
+      <p>After the health checks pass, use <a class="docs-inline-link" href="/docs/test-api/">Test API</a> from the dashboard to send a short prompt through one model route.</p>
+      <h2>Next steps</h2>
+      <ul class="docs-list">
+        <li><strong>Secure dashboard access</strong> Configure admin auth before exposing the service.</li>
+        <li><strong>Create managed API keys</strong> Replace broad shared-key access with scoped keys and prompt-token limits.</li>
+        <li><strong>Plan routing</strong> Use priority routing or custom models when traffic should prefer specific accounts.</li>
+      </ul>
+    `,
+  },
+  {
+    slug: "dashboard",
+    title: "Dashboard",
+    group: "How-to guides",
+    type: "How-to guide",
+    appliesTo: "Authenticated operators",
+    introduced: docsVersion,
+    updated,
+    categories: ["How-to guides", "Accounts", "API access"],
+    keywords: "dashboard login providers settings overview custom models api keys usage history admin",
+    summary: "Use the operator dashboard for accounts, testing, custom models, keys, and history.",
+    seeAlso: ["provider-accounts", "api-keys", "usage-and-quota"],
+    body: `
+      <p class="docs-lead">The dashboard is the operator console for upstream accounts, model routing, Test API, managed API keys, usage history, and notification settings.</p>
+      <h2>Before you start</h2>
+      <p>Enable dashboard authentication in <a class="docs-inline-link" href="/docs/configuration/">configuration</a> before exposing the dashboard outside a trusted network.</p>
+      <h2>Common tasks</h2>
+      <ol class="docs-steps compact">
+        <li><span>1</span><div><strong>Add provider accounts.</strong><p>Open the provider account section and add OAuth or API-key credentials for each upstream provider.</p></div></li>
+        <li><span>2</span><div><strong>Test a model route.</strong><p>Use <a class="docs-inline-link" href="/docs/test-api/">Test API</a> after adding credentials or changing route rules.</p></div></li>
+        <li><span>3</span><div><strong>Create custom models.</strong><p>Build <code>ctm:</code> aliases when clients need stable names, weights, account targeting, or fallback chains.</p></div></li>
+        <li><span>4</span><div><strong>Manage API keys.</strong><p>Scope keys by provider, account, or alias and set prompt-token limits.</p></div></li>
+      </ol>
+      <h2>Operator checks</h2>
+      <div class="docs-grid">
+        <article><h3>Account health</h3><p>Look for disabled, cooling-down, failed, and quota-exhausted accounts before blaming client requests.</p></article>
+        <article><h3>Usage history</h3><p>Use provider and account history to confirm routing behavior after changes.</p></article>
+        <article><h3>Custom aliases</h3><p>Confirm aliases appear in the model catalog before publishing them to clients.</p></article>
+        <article><h3>Notifications</h3><p>Send a notification test after changing Telegram or Google Chat settings.</p></article>
+      </div>
+      <h2>Verify changes</h2>
+      <p>After each dashboard change, send one Test API request and inspect <a class="docs-inline-link" href="/docs/usage-and-quota/">usage and quota</a> to confirm which provider account handled it.</p>
+    `,
+  },
+  {
+    slug: "provider-accounts",
+    title: "Provider accounts",
+    group: "How-to guides",
+    type: "How-to guide",
+    appliesTo: "Upstream account management",
+    storage: "auths/",
+    introduced: docsVersion,
+    updated,
+    categories: ["How-to guides", "Accounts"],
+    keywords: "provider accounts codex gemini claude qwen glm grok copilot oauth api key auth_dir disable refresh reauth",
+    summary: "Add, enable, refresh, re-auth, and test upstream provider accounts.",
+    seeAlso: ["dashboard", "priority-routing", "usage-and-quota"],
+    body: `
+      <p class="docs-lead">Provider accounts are the upstream identities IO Gateway uses when routing model requests. Add at least one healthy account before exposing an API key to clients.</p>
+      <h2>Before you start</h2>
+      <ul class="docs-list">
+        <li><strong>Credential storage</strong> Confirm <code>auth_dir</code> points to the directory where provider credentials should live.</li>
+        <li><strong>Provider support</strong> Use provider-specific account flows for Claude, Gemini, Codex, Qwen, GLM, Grok, Copilot, or other enabled providers.</li>
+      </ul>
+      <h2>Add or maintain an account</h2>
+      <ol class="docs-steps compact">
+        <li><span>1</span><div><strong>Open the dashboard provider section.</strong><p>Select the provider that should receive traffic.</p></div></li>
+        <li><span>2</span><div><strong>Add the credential.</strong><p>Use the provider-specific OAuth or API-key flow.</p></div></li>
+        <li><span>3</span><div><strong>Test the account.</strong><p>Run a short Test API prompt to prove the account can serve traffic.</p></div></li>
+        <li><span>4</span><div><strong>Watch state changes.</strong><p>Disabled, failed, cooling-down, and quota-exhausted accounts are skipped by routing.</p></div></li>
+      </ol>
+      <h2>Account operations</h2>
+      <div class="docs-table-wrap"><table class="docs-table"><thead><tr><th>Operation</th><th>Use when</th></tr></thead><tbody>
+        <tr><td>Disable</td><td>Remove an account from routing without deleting its credential.</td></tr>
+        <tr><td>Refresh</td><td>Reload health, quota, or provider-side state.</td></tr>
+        <tr><td>Re-authenticate</td><td>Repair expired OAuth or invalid provider credentials.</td></tr>
+        <tr><td>Delete</td><td>Remove the account and prune routing state such as priority membership.</td></tr>
+      </tbody></table></div>
+      <h2>Verify routing</h2>
+      <p>Use <a class="docs-inline-link" href="/docs/usage-and-quota/">usage history</a> to confirm that traffic reaches the expected account. For deliberate account draining, enable <a class="docs-inline-link" href="/docs/priority-routing/">priority routing</a>.</p>
+    `,
+  },
+  {
+    slug: "priority-routing",
+    title: "Priority routing",
+    group: "How-to guides",
+    type: "How-to guide",
+    appliesTo: "Provider account routing",
+    storage: "auths/account-routing.json",
+    introduced: docsVersion,
+    updated,
+    categories: ["How-to guides", "Routing", "Accounts"],
+    keywords: "priority account use first drain quota disabled auto remove routing provider account-routing",
+    summary: "Prioritize one or more provider accounts so they are used first until unavailable or fully drained.",
+    seeAlso: ["provider-accounts", "routing-and-models", "usage-and-quota"],
+    body: `
+      <p class="docs-lead">Priority routing lets operators choose one or more <a class="docs-inline-link" href="/docs/provider-accounts/">provider accounts</a> that receive traffic before the normal account pool. Use it to spend selected subscriptions, balances, or trials before spreading traffic to the rest of the provider.</p>
+      <h2>Before you start</h2>
+      <ul class="docs-list">
+        <li><strong>Provider account exists</strong> Add and test the upstream account before marking it as priority.</li>
+        <li><strong>Account remains eligible</strong> Priority does not bypass disabled, failed, cooling-down, or quota-exhausted states.</li>
+        <li><strong>Scope is provider-local</strong> A prioritized Claude account affects Claude routing only, not Gemini, GLM, Codex, or other providers.</li>
+      </ul>
+      <h2>Enable priority</h2>
+      <ol class="docs-steps compact">
+        <li><span>1</span><div><strong>Open a provider account card.</strong><p>Use the <a class="docs-inline-link" href="/docs/dashboard/">dashboard</a> provider section for the account you want to spend first.</p></div></li>
+        <li><span>2</span><div><strong>Open the account actions menu.</strong><p>The priority control appears as the <em>Use first</em> action on eligible accounts.</p></div></li>
+        <li><span>3</span><div><strong>Choose <em>Use first</em>.</strong><p>The account joins the provider priority set and receives traffic before normal accounts.</p></div></li>
+        <li><span>4</span><div><strong>Repeat for additional accounts.</strong><p>Use this when several accounts should drain together before the rest of the pool.</p></div></li>
+      </ol>
+      <h2>Verify behavior</h2>
+      <div class="docs-table-wrap"><table class="docs-table"><thead><tr><th>Check</th><th>Expected result</th></tr></thead><tbody>
+        <tr><td><code>GET /admin/account-routing</code></td><td>The account appears in the provider priority list.</td></tr>
+        <tr><td>Dashboard account card</td><td>The card reflects the current priority state.</td></tr>
+        <tr><td>Usage history</td><td>Requests for that provider hit priority accounts before normal accounts while they remain eligible.</td></tr>
+        <tr><td>Disable account</td><td>The account is removed from priority and no longer receives traffic.</td></tr>
+      </tbody></table></div>
+      <h2>Automatic removal</h2>
+      <p>Priority is removed automatically when an account is disabled or deleted. IO Gateway prunes <code>auths/account-routing.json</code> so stale priority entries cannot keep routing to disabled accounts.</p>
+      <div class="docs-note"><strong>Best use</strong><p>Use priority for deliberate account draining. For permanent tenant isolation, create scoped <a class="docs-inline-link" href="/docs/api-keys/">API keys</a> or <a class="docs-inline-link" href="/docs/custom-models/">custom models</a> with account rules.</p></div>
+    `,
+  },
+  {
+    slug: "custom-models",
+    title: "Custom models",
+    group: "How-to guides",
+    type: "How-to guide",
+    appliesTo: "Model alias routing",
+    introduced: docsVersion,
+    updated,
+    categories: ["How-to guides", "Routing"],
+    keywords: "custom models ctm alias targets weights fallback account targeting exclusion provider chain",
+    summary: "Create ctm: aliases with provider targets, specific accounts, weights, and fallback chains.",
+    seeAlso: ["routing-and-models", "api-keys", "test-api"],
+    body: `
+      <p class="docs-lead">Custom models create stable <code>ctm:</code> aliases that can route to one or more provider models, specific accounts, weighted target sets, or fallback chains.</p>
+      <h2>Before you start</h2>
+      <p>Confirm the target provider accounts are healthy and visible in the <a class="docs-inline-link" href="/docs/dashboard/">dashboard</a>. If the alias will be exposed to clients, decide which <a class="docs-inline-link" href="/docs/api-keys/">API keys</a> may call it.</p>
+      <h2>Create an alias</h2>
+      <ol class="docs-steps">
+        <li><span>1</span><div><strong>Open Custom Models in the dashboard.</strong><p>This section manages aliases that clients call as <code>ctm:name</code>.</p></div></li>
+        <li><span>2</span><div><strong>Choose a stable name.</strong><p>Use an operational name such as <code>ctm:workhorse</code>, <code>ctm:research</code>, or <code>ctm:fast</code>.</p></div></li>
+        <li><span>3</span><div><strong>Add provider targets.</strong><p>Each target points to a provider model and can optionally select a specific account.</p></div></li>
+        <li><span>4</span><div><strong>Set weights and fallback order.</strong><p>Use weighting for distribution and fallback order for controlled failover.</p></div></li>
+        <li><span>5</span><div><strong>Save and test.</strong><p>Run a <a class="docs-inline-link" href="/docs/test-api/">Test API</a> prompt before publishing the alias.</p></div></li>
+      </ol>
+      <h2>Supported behavior</h2>
+      <ul class="docs-list">
+        <li><strong>Multiple provider targets</strong> Route one alias to several providers or models.</li>
+        <li><strong>Specific account targeting</strong> Pin a target to one upstream account when needed.</li>
+        <li><strong>Account exclusion</strong> Use every account except a selected account for maintenance or isolation.</li>
+        <li><strong>Weighted load balancing</strong> Give preferred targets more traffic while keeping backups available.</li>
+        <li><strong>Fallback chains</strong> Try another target when a provider fails, cools down, or runs out of quota.</li>
+      </ul>
+      <h2>Example</h2>
+      <pre><code>{
+  "model": "ctm:research",
+  "targets": [
+    { "model": "cld:claude-sonnet-4", "weight": 3 },
+    { "model": "gem:gemini-3-pro", "weight": 1 },
+    { "model": "glm:glm-4.5", "weight": 1 }
+  ]
+}</code></pre>
+    `,
+  },
+  {
+    slug: "test-api",
+    title: "Test API",
+    group: "How-to guides",
+    type: "How-to guide",
+    appliesTo: "Dashboard route validation",
+    introduced: docsVersion,
+    updated,
+    categories: ["How-to guides", "API access"],
+    keywords: "test api dashboard settings model validate route prompt admin session smoke test",
+    summary: "Validate models and routes from the dashboard without creating a separate client API key.",
+    seeAlso: ["dashboard", "custom-models", "usage-and-quota"],
+    body: `
+      <p class="docs-lead">Test API sends a dashboard-authenticated prompt through the same routing layer used by clients. Use it after account, custom-model, API-key, or priority-routing changes.</p>
+      <h2>Before you start</h2>
+      <p>Sign in to the <a class="docs-inline-link" href="/docs/dashboard/">dashboard</a> with an operator session. Test API validates routing without requiring a separate managed client key.</p>
+      <h2>Run a test</h2>
+      <ol class="docs-steps">
+        <li><span>1</span><div><strong>Open Test API.</strong><p>Use the dashboard action near account and model management.</p></div></li>
+        <li><span>2</span><div><strong>Select a model.</strong><p>Choose a provider model or a <code>ctm:</code> alias.</p></div></li>
+        <li><span>3</span><div><strong>Send a short prompt.</strong><p>Use a small request when validating credentials, quota, or routing behavior.</p></div></li>
+        <li><span>4</span><div><strong>Inspect the result.</strong><p>Check response status, account selection, and provider error details.</p></div></li>
+      </ol>
+      <h2>What a passing result proves</h2>
+      <ul class="docs-list">
+        <li><strong>Credentials work</strong> The selected provider account can authenticate upstream.</li>
+        <li><strong>Route exists</strong> The selected model or custom alias is known to IO Gateway.</li>
+        <li><strong>Limits allow the prompt</strong> Prompt-token and scope checks did not reject the request.</li>
+      </ul>
+      <div class="docs-note"><strong>Client keys are still separate</strong><p>Test API proves the route works for operators. To prove a client integration, send a request with the actual managed API key and inspect usage history.</p></div>
+    `,
+  },
+  {
+    slug: "notifications",
+    title: "Notifications",
+    group: "How-to guides",
+    type: "How-to guide",
+    appliesTo: "Operational alerts",
+    introduced: docsVersion,
+    updated,
+    categories: ["How-to guides", "Notifications"],
+    keywords: "notifications telegram google chat webhook alerts auth upstream quota test failures",
+    summary: "Configure Telegram or Google Chat alerts for auth errors, upstream failures, and quota events.",
+    seeAlso: ["dashboard", "troubleshooting", "usage-and-quota"],
+    body: `
+      <p class="docs-lead">Notifications help operators catch upstream auth errors, provider failures, quota events, and service issues without watching dashboard state continuously.</p>
+      <h2>Before you start</h2>
+      <ul class="docs-list">
+        <li><strong>Destination exists</strong> Prepare a Telegram bot/chat or Google Chat webhook.</li>
+        <li><strong>Secrets are protected</strong> Store notification tokens with the same care as provider credentials.</li>
+      </ul>
+      <h2>Configure alerts</h2>
+      <ol class="docs-steps">
+        <li><span>1</span><div><strong>Open notification settings.</strong><p>Use the dashboard settings section.</p></div></li>
+        <li><span>2</span><div><strong>Select a provider.</strong><p>Choose Telegram or Google Chat and paste the required token or webhook URL.</p></div></li>
+        <li><span>3</span><div><strong>Send a test message.</strong><p>Confirm the destination receives a test before relying on alerts.</p></div></li>
+        <li><span>4</span><div><strong>Review noise.</strong><p>Keep alerts actionable so real failures are not ignored.</p></div></li>
+      </ol>
+      <h2>Event types</h2>
+      <ul class="docs-list">
+        <li><strong>Authentication failures</strong> Provider credentials expired, revoked, or rejected upstream.</li>
+        <li><strong>Quota and usage events</strong> Accounts approach or hit provider limits.</li>
+        <li><strong>Provider failures</strong> Upstream provider errors, cooldowns, and repeated request failures.</li>
+      </ul>
+      <h2>Troubleshoot delivery</h2>
+      <p>If a test notification does not arrive, verify the destination secret, outbound network access, and dashboard logs before testing provider traffic again.</p>
+    `,
+  },
+  {
+    slug: "configuration",
+    title: "Configuration",
+    group: "Reference",
+    type: "Reference",
+    appliesTo: "Server configuration",
+    storage: "config.json and environment variables",
+    introduced: docsVersion,
+    updated,
+    categories: ["Reference", "Configuration"],
+    keywords: "config json env admin auth proxy api key totp secure cookies trusted proxy",
+    summary: "Core config.json fields, environment overrides, dashboard auth, and proxy safety settings.",
+    seeAlso: ["quick-start", "deployment", "troubleshooting"],
+    body: `
+      <p class="docs-lead">Configuration controls the HTTP listener, upstream defaults, credential directory, dashboard authentication, proxy trust, and retention settings.</p>
+      <h2>Minimal config</h2>
+      <pre><code>{
+  "listen": "0.0.0.0:8319",
+  "upstream_base": "https://chatgpt.com/backend-api/codex",
+  "proxy_api_key": "your-shared-proxy-key",
+  "tokens": [],
+  "auth_dir": "./auths"
+}</code></pre>
+      <h2>Important fields</h2>
+      <div class="docs-table-wrap"><table class="docs-table"><thead><tr><th>Field</th><th>Purpose</th></tr></thead><tbody>
+        <tr><td><code>listen</code></td><td>Socket address for the dashboard and API server.</td></tr>
+        <tr><td><code>proxy_api_key</code></td><td>Shared key for client API requests unless managed API keys are used.</td></tr>
+        <tr><td><code>auth_dir</code></td><td>Directory where provider credential files are stored.</td></tr>
+        <tr><td><code>disabled_files</code></td><td>Credential files that should load but start disabled.</td></tr>
+        <tr><td><code>admin_auth</code></td><td>Dashboard key, TOTP secret, cookie security, and session lifetime.</td></tr>
+        <tr><td><code>trusted_proxy</code></td><td>Enable only behind a reverse proxy that sanitizes forwarded IP headers.</td></tr>
+        <tr><td><code>history_retention_days</code></td><td>How long usage history remains available for charts and summaries.</td></tr>
+      </tbody></table></div>
+      <h2>Admin auth environment overrides</h2>
+      <pre><code>ADMIN_AUTH_ENABLED=true
+ADMIN_AUTH_API_KEY=your-admin-key
+ADMIN_AUTH_TOTP_SECRET=BASE32_SECRET
+ADMIN_AUTH_SESSION_TTL_SECONDS=43200
+ADMIN_AUTH_SECURE_COOKIES=true</code></pre>
+      <h2>Security notes</h2>
+      <div class="docs-note warning"><strong>Use secure cookies behind HTTPS</strong><p>Set <code>ADMIN_AUTH_SECURE_COOKIES=true</code> when the dashboard is served through HTTPS.</p></div>
+    `,
+  },
+  {
+    slug: "api-keys",
+    title: "API keys",
+    group: "Reference",
+    type: "Reference",
+    appliesTo: "Client API access",
+    introduced: docsVersion,
+    updated,
+    categories: ["Reference", "API access", "Limits"],
+    keywords: "api keys managed scopes provider account prompt token limits whole key custom aliases access rules",
+    summary: "Create managed keys with provider/account scopes and prompt-token limits at whole, provider, and account levels.",
+    seeAlso: ["dashboard", "routing-and-models", "usage-and-quota"],
+    body: `
+      <p class="docs-lead">Managed API keys let operators expose only the model routes a client should use and enforce prompt-token limits at the whole-key, provider, and account levels.</p>
+      <h2>Access model</h2>
+      <ul class="docs-list">
+        <li><strong>Whole key</strong> Global limit across every provider and model the key may call.</li>
+        <li><strong>Provider</strong> Limit usage for one upstream provider such as Claude, Gemini, or Codex.</li>
+        <li><strong>Account</strong> Limit usage for a specific provider account.</li>
+        <li><strong>Model scope</strong> Allow raw provider prefixes or specific <code>ctm:</code> aliases.</li>
+      </ul>
+      <h2>Create a managed key</h2>
+      <ol class="docs-steps compact">
+        <li><span>1</span><div><strong>Open API Keys in the dashboard.</strong><p>Use an authenticated operator session.</p></div></li>
+        <li><span>2</span><div><strong>Choose route scope.</strong><p>Select providers, accounts, model prefixes, or custom aliases.</p></div></li>
+        <li><span>3</span><div><strong>Set prompt-token limits.</strong><p>Use whole-key, provider, and account limits where needed.</p></div></li>
+        <li><span>4</span><div><strong>Test with the client key.</strong><p>Send a request with the generated key and verify usage history.</p></div></li>
+      </ol>
+      <h2>Limit fields</h2>
+      <div class="docs-table-wrap"><table class="docs-table"><thead><tr><th>Limit</th><th>Meaning</th></tr></thead><tbody>
+        <tr><td>Whole prompt-token limit</td><td>Maximum prompt tokens the key may spend across all allowed routes.</td></tr>
+        <tr><td>Provider prompt-token limit</td><td>Maximum prompt tokens the key may spend on one provider.</td></tr>
+        <tr><td>Account prompt-token limit</td><td>Maximum prompt tokens the key may spend on one upstream account.</td></tr>
+        <tr><td>Scope allow-list</td><td>Providers, models, accounts, or aliases this key can call.</td></tr>
+      </tbody></table></div>
+      <h2>Operational advice</h2>
+      <div class="docs-note"><strong>Prefer managed keys for clients</strong><p>Use managed keys instead of the broad shared proxy key when exposing IO Gateway to applications or users.</p></div>
+    `,
+  },
+  {
+    slug: "usage-and-quota",
+    title: "Usage and quota",
+    group: "Reference",
+    type: "Reference",
+    appliesTo: "Usage history and quota checks",
+    introduced: docsVersion,
+    updated,
+    categories: ["Reference", "Limits", "Accounts"],
+    keywords: "usage quota history context tokens account health endpoints dashboard json account-routing",
+    summary: "Read usage history, context-token charts, account health, provider quota, and useful admin endpoints.",
+    seeAlso: ["priority-routing", "api-keys", "troubleshooting"],
+    body: `
+      <p class="docs-lead">Usage and quota views show which clients, providers, models, and upstream accounts are consuming prompt tokens and how routing choices affect account health.</p>
+      <h2>What to watch</h2>
+      <div class="docs-grid">
+        <article><h3>Prompt tokens</h3><p>Track client-side limits and upstream account spending.</p></article>
+        <article><h3>Context size</h3><p>Watch large prompts that may trigger provider failures or client-limit rejections.</p></article>
+        <article><h3>Account state</h3><p>Disabled, cooling-down, failed, and exhausted accounts are excluded from normal routing.</p></article>
+        <article><h3>Route selection</h3><p>Compare expected priority or custom-model behavior against observed account usage.</p></article>
+      </div>
+      <h2>Useful endpoints</h2>
+      <div class="docs-table-wrap"><table class="docs-table"><thead><tr><th>Endpoint</th><th>Use</th></tr></thead><tbody>
+        <tr><td><code>GET /health</code></td><td>Basic process health.</td></tr>
+        <tr><td><code>GET /ready</code></td><td>Readiness check for dependencies and route serving.</td></tr>
+        <tr><td><code>GET /admin/account-routing</code></td><td>Inspect priority-routing configuration.</td></tr>
+        <tr><td><code>GET /api-docs/openapi.json</code></td><td>Runtime OpenAPI JSON from the gateway app.</td></tr>
+      </tbody></table></div>
+      <h2>Investigate unexpected usage</h2>
+      <ol class="docs-steps compact">
+        <li><span>1</span><div><strong>Check the managed API key.</strong><p>Confirm the key allows the provider, account, or alias being used.</p></div></li>
+        <li><span>2</span><div><strong>Check priority routing.</strong><p>Priority accounts should receive traffic before normal accounts while eligible.</p></div></li>
+        <li><span>3</span><div><strong>Check fallback behavior.</strong><p>Provider failures can move traffic to another target in a custom model.</p></div></li>
+      </ol>
+    `,
+  },
+  {
+    slug: "routing-and-models",
+    title: "Routing and models",
+    group: "Explanation",
+    type: "Explanation",
+    appliesTo: "Model routing",
+    introduced: docsVersion,
+    updated,
+    categories: ["Explanation", "Routing"],
+    keywords: "routing models v1 responses chat completions claude messages prefix ctm alias failover",
+    summary: "Understand gateway endpoints, model prefixes, custom aliases, failover, and routing rules.",
+    seeAlso: ["custom-models", "priority-routing", "api-keys"],
+    body: `
+      <p class="docs-lead">IO Gateway routes OpenAI-compatible requests to upstream providers by model prefix, custom alias, account health, key scope, and provider availability.</p>
+      <h2>Routing inputs</h2>
+      <ul class="docs-list">
+        <li><strong>Endpoint shape</strong> OpenAI-compatible routes, Claude Messages routes, and runtime OpenAPI docs are served by the app.</li>
+        <li><strong>Model prefix</strong> Prefixes such as <code>cld:</code>, <code>gem:</code>, <code>glm:</code>, or <code>ctm:</code> select provider or alias behavior.</li>
+        <li><strong>API-key scope</strong> Managed keys can restrict which routes a client may call.</li>
+        <li><strong>Account state</strong> Disabled, failed, cooling-down, and exhausted accounts are skipped.</li>
+      </ul>
+      <h2>How selection works</h2>
+      <ol class="docs-steps compact">
+        <li><span>1</span><div><strong>Resolve the requested model.</strong><p>Raw provider prefixes route directly; <code>ctm:</code> aliases resolve to configured targets.</p></div></li>
+        <li><span>2</span><div><strong>Apply client access rules.</strong><p>The managed API key must allow the provider, account, model, or alias.</p></div></li>
+        <li><span>3</span><div><strong>Prefer priority accounts.</strong><p>Eligible priority accounts for that provider are tried before the normal pool.</p></div></li>
+        <li><span>4</span><div><strong>Fallback when needed.</strong><p>Custom-model fallback can move traffic to another target when a provider route fails.</p></div></li>
+      </ol>
+      <h2>Tradeoffs</h2>
+      <p>Use <a class="docs-inline-link" href="/docs/priority-routing/">priority routing</a> for temporary account draining. Use <a class="docs-inline-link" href="/docs/custom-models/">custom models</a> for stable client-facing aliases and cross-provider failover. Use <a class="docs-inline-link" href="/docs/api-keys/">API keys</a> for tenant or client access boundaries.</p>
+    `,
+  },
+  {
+    slug: "deployment",
+    title: "Deployment",
+    group: "Operations",
+    type: "Operations",
+    appliesTo: "Release and GitHub Pages deployment",
+    introduced: docsVersion,
+    updated,
+    categories: ["Operations", "Deployment"],
+    keywords: "deployment release tags github actions pages health ready artifact systemd ci cd",
+    summary: "Release with tag-triggered app deployment and push-triggered GitHub Pages deployment.",
+    seeAlso: ["configuration", "troubleshooting", "quick-start"],
+    body: `
+      <p class="docs-lead">The release process should build a clean app artifact, deploy it to the server, restart the service, and verify readiness. Static product pages deploy separately from app releases.</p>
+      <h2>Pipeline triggers</h2>
+      <ul class="docs-list">
+        <li><strong>App release</strong> Pushing a <code>v*</code> tag runs the app release workflow and production deployment when app paths changed.</li>
+        <li><strong>Pages deployment</strong> Pushes to <code>master</code> or <code>main</code> deploy GitHub Pages when <code>site/</code> or the Pages workflow changed.</li>
+        <li><strong>No duplicate release</strong> Branch pushes should not run app release deployment, and release tags should not deploy GitHub Pages.</li>
+      </ul>
+      <h2>Release deployment flow</h2>
+      <ol class="docs-steps">
+        <li><span>1</span><div><strong>Push a release tag or run the workflow manually.</strong><p>The app deploy workflow runs for <code>v*</code> tags and manual dispatch only.</p></div></li>
+        <li><span>2</span><div><strong>Run checks in GitHub Actions.</strong><p>CI should run formatting, dashboard JavaScript syntax checks, tests, and release build.</p></div></li>
+        <li><span>3</span><div><strong>Upload the built artifact.</strong><p>The server should receive the GitHub-built binary, not build from a dirty local checkout.</p></div></li>
+        <li><span>4</span><div><strong>Install and restart.</strong><p>Back up the live binary, install the new one, and restart <code>io-gateway.service</code>.</p></div></li>
+        <li><span>5</span><div><strong>Verify readiness.</strong><p>Check <code>/health</code>, <code>/ready</code>, service state, and revision metadata.</p></div></li>
+      </ol>
+      <h2>Production checks</h2>
+      <pre><code>curl http://127.0.0.1:8319/health
+curl http://127.0.0.1:8319/ready</code></pre>
+      <h2>Rollback</h2>
+      <p>Keep the previous binary during deployment. If readiness fails after restart, restore the previous binary, restart the service, and check <a class="docs-inline-link" href="/docs/troubleshooting/">troubleshooting</a> before creating a new tag.</p>
+    `,
+  },
+  {
+    slug: "troubleshooting",
+    title: "Troubleshooting",
+    group: "Troubleshooting",
+    type: "Troubleshooting",
+    appliesTo: "Operational diagnosis",
+    introduced: docsVersion,
+    updated,
+    categories: ["Troubleshooting", "Configuration"],
+    keywords: "troubleshooting ready 401 custom model provider auth logs quota access rules notifications",
+    summary: "Diagnose readiness failures, 401s, provider auth errors, custom-model misses, and notification failures.",
+    seeAlso: ["usage-and-quota", "configuration", "deployment"],
+    body: `
+      <p class="docs-lead">Use this page when IO Gateway starts but requests, dashboard actions, provider accounts, or release checks do not behave as expected.</p>
+      <h2>Diagnostic order</h2>
+      <ol class="docs-steps compact">
+        <li><span>1</span><div><strong>Check process health.</strong><p>Start with <code>/health</code>, <code>/ready</code>, and service logs.</p></div></li>
+        <li><span>2</span><div><strong>Check authentication.</strong><p>Separate dashboard auth failures from client API-key failures.</p></div></li>
+        <li><span>3</span><div><strong>Check provider accounts.</strong><p>Look for disabled, expired, cooling-down, failed, or quota-exhausted accounts.</p></div></li>
+        <li><span>4</span><div><strong>Check routing rules.</strong><p>Inspect custom models, managed-key scopes, priority routing, and fallback behavior.</p></div></li>
+      </ol>
+      <h2>Common symptoms</h2>
+      <div class="docs-table-wrap"><table class="docs-table"><thead><tr><th>Symptom</th><th>Likely check</th></tr></thead><tbody>
+        <tr><td><code>401</code> from client request</td><td>Wrong shared proxy key or managed API key.</td></tr>
+        <tr><td>Dashboard login fails</td><td>Admin auth key, TOTP secret, cookie security, or session settings.</td></tr>
+        <tr><td>Model alias not found</td><td>Custom model name, <code>ctm:</code> prefix, or saved alias state.</td></tr>
+        <tr><td>Unexpected account used</td><td>Priority routing, account health, key scope, or custom-model fallback.</td></tr>
+        <tr><td>Notification missing</td><td>Destination token/webhook, outbound network access, or dashboard notification settings.</td></tr>
+      </tbody></table></div>
+      <h2>Useful commands</h2>
+      <pre><code>curl http://127.0.0.1:8319/health
+curl http://127.0.0.1:8319/ready
+curl http://127.0.0.1:8319/api-docs/openapi.json</code></pre>
+    `,
+  },
+];
+
+const topicCategories = [
+  { title: "Routing", slug: "routing", description: "Priority routing, custom models, model prefixes, fallback, and account selection." },
+  { title: "Accounts", slug: "accounts", description: "Upstream provider credentials, account health, quota use, and priority membership." },
+  { title: "Limits", slug: "limits", description: "Prompt-token limits, usage history, quota views, and managed API-key controls." },
+  { title: "Deployment", slug: "deployment", description: "Release tags, production service updates, GitHub Pages deployment, and rollback." },
+  { title: "Notifications", slug: "notifications", description: "Telegram and Google Chat alerts for provider, quota, and operational events." },
+  { title: "Configuration", slug: "configuration", description: "Config files, environment overrides, dashboard auth, and proxy safety." },
+  { title: "API access", slug: "api-access", description: "Managed API keys, Test API, runtime API docs, and client-facing model access." },
+];
+
+const categoryDefinitions = [
+  ...groups.map((group) => ({ ...group, kind: "Documentation type", match: (page) => page.group === group.title })),
+  ...topicCategories.map((category) => ({ ...category, kind: "Topic", match: (page) => page.categories.includes(category.title) })),
+];
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function plainText(value) {
+  return String(value)
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function pageUrl(page) {
+  return `/docs/${page.slug}/`;
+}
+
+function categoryUrl(category) {
+  return `/docs/category/${category.slug}/`;
+}
+
+function renderHeader(active = "docs") {
+  return `
+    <a class="skip-link" href="#docs-content">Skip to docs content</a>
+    <header class="site-header">
+      <div class="site-header-inner">
+        <a class="brand" href="/" aria-label="IO Gateway home">
+          <span class="brand-mark">IO</span>
+          <span>IO Gateway</span>
+        </a>
+        <nav aria-label="Site navigation">
+          <a href="/">Home</a>
+          <a href="/#dashboard">Dashboard</a>
+          <a href="/#custom-models">Custom</a>
+          <a href="/docs/"${active === "docs" ? ' aria-current="page"' : ""}>Docs</a>
+          <a href="https://github.com/giofahreza/io-gateway">GitHub</a>
+          <a class="nav-action" href="https://github.com/giofahreza/io-gateway/releases">Releases</a>
+        </nav>
+      </div>
+    </header>`;
+}
+
+function renderSidebar(activeSlug = "") {
+  const groupsHtml = groups
+    .map((group) => {
+      const groupPages = pages.filter((page) => page.group === group.title);
+      return `
+            <div class="docs-nav-group">
+              <p class="docs-toc-label">${escapeHtml(group.title)}</p>
+              ${groupPages.map((page) => renderSidebarLink(page, activeSlug)).join("\n")}
+            </div>`;
+    })
+    .join("\n");
+
+  return `
+        <aside class="docs-toc" aria-label="Docs pages">
+          <label class="docs-search" for="docs-search">
+            <span>Search docs</span>
+            <input id="docs-search" type="search" autocomplete="off" placeholder="Search docs">
+          </label>
+          <div id="docs-search-results" class="docs-search-results" aria-live="polite"></div>
+          <a class="docs-home-link${activeSlug === "" ? " is-active" : ""}" href="/docs/"${activeSlug === "" ? ' aria-current="page"' : ""}>Docs home</a>
+          ${groupsHtml}
+          <div class="docs-nav-group docs-nav-group-compact">
+            <p class="docs-toc-label">Browse topics</p>
+            ${topicCategories.map((category) => `<a href="${categoryUrl(category)}" data-title="${escapeHtml(category.title)}" data-category="Topic" data-summary="${escapeHtml(category.description)}" data-keywords="${escapeHtml(category.title.toLowerCase())}"><span>${escapeHtml(category.title)}</span><small>${escapeHtml(category.description)}</small></a>`).join("\n")}
+          </div>
+        </aside>`;
+}
+
+function renderSidebarLink(page, activeSlug) {
+  const active = page.slug === activeSlug;
+  return `
+              <a href="${pageUrl(page)}" data-title="${escapeHtml(page.title)}" data-category="${escapeHtml(page.group)}" data-summary="${escapeHtml(page.summary)}" data-keywords="${escapeHtml(page.keywords)}"${active ? ' aria-current="page" class="is-active"' : ""}>
+                <span>${escapeHtml(page.title)}</span>
+                <small>${escapeHtml(page.summary)}</small>
+              </a>`;
+}
+
+function renderMeta(page) {
+  const rows = [
+    ["Type", page.type],
+    ["Applies to", page.appliesTo],
+    page.storage ? ["Storage", `<code>${escapeHtml(page.storage)}</code>`] : null,
+    ["Docs version", page.introduced],
+    ["Updated", page.updated],
+  ].filter(Boolean);
+
+  return `<dl class="docs-meta">${rows.map(([dt, dd]) => `<div><dt>${escapeHtml(dt)}</dt><dd>${dd}</dd></div>`).join("")}</dl>`;
+}
+
+function renderArticle(page) {
+  return `
+        <article id="docs-content" class="docs-content docs-article" data-page-slug="${escapeHtml(page.slug)}">
+          <div class="docs-heading">
+            <p class="eyebrow">${escapeHtml(page.group)}</p>
+            <h1>${escapeHtml(page.title)}</h1>
+            ${renderMeta(page)}
+          </div>
+          ${page.body}
+          ${renderSeeAlso(page)}
+        </article>`;
+}
+
+function renderSeeAlso(page) {
+  if (!page.seeAlso?.length) return "";
+  const links = page.seeAlso
+    .map((slug) => pages.find((item) => item.slug === slug))
+    .filter(Boolean)
+    .map((item) => `<li><a href="${pageUrl(item)}">${escapeHtml(item.title)}</a> - ${escapeHtml(item.summary)}</li>`)
+    .join("\n");
+
+  return `
+          <section class="docs-related" aria-labelledby="see-also">
+            <h2 id="see-also">See also</h2>
+            <ul class="docs-link-list">
+              ${links}
+            </ul>
+          </section>`;
+}
+
+function renderRightOutline() {
+  return `
+        <aside class="docs-on-page" aria-label="On this page">
+          <p class="docs-toc-label">On this page</p>
+          <nav id="on-this-page"></nav>
+        </aside>`;
+}
+
+function renderShell({ title, description, canonicalPath, activeSlug = "", article }) {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="${escapeHtml(description)}">
+    <title>${escapeHtml(title)}</title>
+    <link rel="icon" href="data:,">
+    <link rel="canonical" href="https://gateway.giofahreza.com${canonicalPath}">
+    <link rel="stylesheet" href="/docs.css?v=${assetVersion}">
+  </head>
+  <body>
+${renderHeader("docs")}
+    <main class="docs-page-shell">
+      <div class="docs-layout">
+${renderSidebar(activeSlug)}
+${article}
+${renderRightOutline()}
+      </div>
+    </main>
+    <footer class="site-footer">
+      <span>IO Gateway Docs</span>
+      <span>giofahreza.com</span>
+    </footer>
+    <script src="/docs.js?v=${assetVersion}" defer></script>
+  </body>
+</html>
+`;
+}
+
+function renderMainPage() {
+  const commonTasks = ["quick-start", "provider-accounts", "api-keys", "priority-routing", "custom-models", "deployment"]
+    .map((slug) => pages.find((page) => page.slug === slug));
+
+  const article = `
+        <article id="docs-content" class="docs-content docs-article docs-index-page" data-page-slug="">
+          <div class="docs-heading">
+            <p class="eyebrow">Product documentation</p>
+            <h1>Documentation</h1>
+            <dl class="docs-meta">
+              <div><dt>Product</dt><dd>IO Gateway</dd></div>
+              <div><dt>Docs version</dt><dd>${docsVersion}</dd></div>
+              <div><dt>Updated</dt><dd>${updated}</dd></div>
+            </dl>
+          </div>
+          <p class="docs-lead">IO Gateway is a self-hosted AI account gateway for managing upstream accounts, routing traffic, enforcing API-key limits, prioritizing account usage, and operating releases. Use the landing page for product overview and screenshots; use these docs for setup and operation.</p>
+          <section aria-labelledby="what-is-io-gateway">
+            <h2 id="what-is-io-gateway">What is IO Gateway</h2>
+            <p>IO Gateway sits between clients and upstream AI providers. It centralizes provider credentials, model routing, custom aliases, prompt-token limits, priority account usage, Test API, notifications, usage history, and deployment operations.</p>
+          </section>
+          <section class="docs-overview" aria-labelledby="common-tasks">
+            <h2 id="common-tasks">Common tasks</h2>
+            <ul class="docs-page-list compact">
+              ${commonTasks.map((page) => `<li><a href="${pageUrl(page)}"><span>${escapeHtml(page.title)}</span><small>${escapeHtml(page.summary)}</small></a></li>`).join("\n")}
+            </ul>
+          </section>
+          <section aria-labelledby="documentation-map">
+            <h2 id="documentation-map">Documentation map</h2>
+            ${groups.map((group) => renderGroupBlock(group)).join("\n")}
+          </section>
+          <section aria-labelledby="product-areas">
+            <h2 id="product-areas">Product areas</h2>
+            <ul class="docs-page-list compact">
+              ${topicCategories.map((category) => `<li><a href="${categoryUrl(category)}"><span>${escapeHtml(category.title)}</span><small>${escapeHtml(category.description)}</small></a></li>`).join("\n")}
+            </ul>
+          </section>
+          <section aria-labelledby="release-status">
+            <h2 id="release-status">Release and status</h2>
+            <p>For downloadable releases and server deployment status, use <a class="docs-inline-link" href="https://github.com/giofahreza/io-gateway/releases">GitHub Releases</a> and the deployment workflow. Static product pages deploy from <code>site/</code> changes; app deployment runs from release tags.</p>
+          </section>
+        </article>`;
+
+  return renderShell({
+    title: "Documentation - IO Gateway Docs",
+    description: "IO Gateway product documentation for setup, provider accounts, routing, API-key limits, priority account usage, deployment, and troubleshooting.",
+    canonicalPath: "/docs/",
+    activeSlug: "",
+    article,
+  });
+}
+
+function renderGroupBlock(group) {
+  const groupPages = pages.filter((page) => page.group === group.title);
+  return `
+            <section class="docs-category" aria-labelledby="category-${group.slug}">
+              <h3 id="category-${group.slug}"><a href="/docs/category/${group.slug}/">${escapeHtml(group.title)}</a></h3>
+              <p>${escapeHtml(group.description)}</p>
+              <ul class="docs-link-list">
+                ${groupPages.map((page) => `<li><a href="${pageUrl(page)}">${escapeHtml(page.title)}</a> - ${escapeHtml(page.summary)}</li>`).join("\n")}
+              </ul>
+            </section>`;
+}
+
+function renderCategoryPage(category) {
+  const categoryPages = pages.filter(category.match);
+  const article = `
+        <article id="docs-content" class="docs-content docs-article docs-category-page" data-page-slug="category-${escapeHtml(category.slug)}">
+          <div class="docs-heading">
+            <p class="eyebrow">${escapeHtml(category.kind)}</p>
+            <h1>${escapeHtml(category.title)}</h1>
+            <dl class="docs-meta">
+              <div><dt>Pages</dt><dd>${categoryPages.length}</dd></div>
+              <div><dt>Docs version</dt><dd>${docsVersion}</dd></div>
+              <div><dt>Updated</dt><dd>${updated}</dd></div>
+            </dl>
+          </div>
+          <p class="docs-lead">${escapeHtml(category.description)}</p>
+          <section aria-labelledby="pages-in-${category.slug}">
+            <h2 id="pages-in-${category.slug}">Pages in this category</h2>
+            <ul class="docs-page-list">
+              ${categoryPages.map((page) => `<li><a href="${pageUrl(page)}"><span>${escapeHtml(page.title)}</span><small>${escapeHtml(page.summary)}</small></a></li>`).join("\n")}
+            </ul>
+          </section>
+          <section aria-labelledby="related-categories">
+            <h2 id="related-categories">Related categories</h2>
+            <ul class="docs-link-list">
+              ${categoryDefinitions
+                .filter((item) => item.slug !== category.slug)
+                .filter((item) => categoryPages.some((page) => item.match(page)))
+                .slice(0, 6)
+                .map((item) => `<li><a href="${categoryUrl(item)}">${escapeHtml(item.title)}</a> - ${escapeHtml(item.description)}</li>`)
+                .join("\n")}
+            </ul>
+          </section>
+        </article>`;
+
+  return renderShell({
+    title: `${category.title} - IO Gateway Docs`,
+    description: category.description,
+    canonicalPath: categoryUrl(category),
+    activeSlug: `category-${category.slug}`,
+    article,
+  });
+}
+
+function buildSearchIndex() {
+  const articleRecords = pages.map((page) => ({
+    title: page.title,
+    category: page.group,
+    type: page.type,
+    summary: page.summary,
+    href: pageUrl(page),
+    keywords: page.keywords,
+    headings: [...page.body.matchAll(/<h[23][^>]*>(.*?)<\/h[23]>/g)].map((match) => plainText(match[1])),
+    excerpt: plainText(page.body).slice(0, 360),
+  }));
+
+  const categoryRecords = categoryDefinitions.map((category) => ({
+    title: category.title,
+    category: category.kind,
+    type: "Category",
+    summary: category.description,
+    href: categoryUrl(category),
+    keywords: `${category.title} ${category.kind}`,
+    headings: ["Pages in this category", "Related categories"],
+    excerpt: category.description,
+  }));
+
+  return {
+    generatedAt: "2026-07-28",
+    docsVersion,
+    pages: [
+      {
+        title: "Documentation",
+        category: "Product documentation",
+        type: "Main page",
+        summary: "IO Gateway documentation home for setup, routing, limits, deployment, operations, and troubleshooting.",
+        href: "/docs/",
+        keywords: "docs documentation main page io gateway product overview setup routing limits deployment",
+        headings: ["What is IO Gateway", "Common tasks", "Documentation map", "Product areas", "Release and status"],
+        excerpt: "IO Gateway is a self-hosted AI account gateway for managing upstream accounts, routing traffic, enforcing API-key limits, prioritizing account usage, and operating releases.",
+      },
+      ...articleRecords,
+      ...categoryRecords,
+    ],
+  };
+}
+
+function writeOutput(path, content) {
+  const target = join("site", path);
+  mkdirSync(dirname(target), { recursive: true });
+  const normalized = content.replace(/[ \t]+$/gm, "").replace(/\n*$/, "\n");
+  writeFileSync(target, normalized);
+}
+
+rmSync(outputDir, { recursive: true, force: true });
+mkdirSync(outputDir, { recursive: true });
+
+writeOutput("docs/index.html", renderMainPage());
+
+pages.forEach((page) => {
+  writeOutput(`docs/${page.slug}/index.html`, renderShell({
+    title: `${page.title} - IO Gateway Docs`,
+    description: page.summary,
+    canonicalPath: pageUrl(page),
+    activeSlug: page.slug,
+    article: renderArticle(page),
+  }));
+});
+
+categoryDefinitions.forEach((category) => {
+  writeOutput(`docs/category/${category.slug}/index.html`, renderCategoryPage(category));
+});
+
+writeOutput("docs/search-index.json", `${JSON.stringify(buildSearchIndex(), null, 2)}\n`);

@@ -1,0 +1,390 @@
+{
+  "generatedAt": "2026-07-28",
+  "docsVersion": "v0.1.11+",
+  "pages": [
+    {
+      "title": "Documentation",
+      "category": "Product documentation",
+      "type": "Main page",
+      "summary": "IO Gateway documentation home for setup, routing, limits, deployment, operations, and troubleshooting.",
+      "href": "/docs/",
+      "keywords": "docs documentation main page io gateway product overview setup routing limits deployment",
+      "headings": [
+        "What is IO Gateway",
+        "Common tasks",
+        "Documentation map",
+        "Product areas",
+        "Release and status"
+      ],
+      "excerpt": "IO Gateway is a self-hosted AI account gateway for managing upstream accounts, routing traffic, enforcing API-key limits, prioritizing account usage, and operating releases."
+    },
+    {
+      "title": "Quick start",
+      "category": "Tutorials",
+      "type": "Tutorial",
+      "summary": "Build, configure, run, and smoke-test IO Gateway for the first time.",
+      "href": "/docs/quick-start/",
+      "keywords": "setup install local run build config dashboard test api health ready first run",
+      "headings": [
+        "Before you start",
+        "Install and run",
+        "Verify",
+        "Next steps"
+      ],
+      "excerpt": "Use this tutorial to get IO Gateway running, open the operator dashboard, add upstream credentials, and verify that a model request reaches a provider account. Before you start Repository checkout Work from the IO Gateway source tree that contains Cargo.toml . Rust toolchain Build the app with the installed Rust toolchain used by the server. Provider credent"
+    },
+    {
+      "title": "Dashboard",
+      "category": "How-to guides",
+      "type": "How-to guide",
+      "summary": "Use the operator dashboard for accounts, testing, custom models, keys, and history.",
+      "href": "/docs/dashboard/",
+      "keywords": "dashboard login providers settings overview custom models api keys usage history admin",
+      "headings": [
+        "Before you start",
+        "Common tasks",
+        "Operator checks",
+        "Account health",
+        "Usage history",
+        "Custom aliases",
+        "Notifications",
+        "Verify changes"
+      ],
+      "excerpt": "The dashboard is the operator console for upstream accounts, model routing, Test API, managed API keys, usage history, and notification settings. Before you start Enable dashboard authentication in configuration before exposing the dashboard outside a trusted network. Common tasks 1 Add provider accounts. Open the provider account section and add OAuth or AP"
+    },
+    {
+      "title": "Provider accounts",
+      "category": "How-to guides",
+      "type": "How-to guide",
+      "summary": "Add, enable, refresh, re-auth, and test upstream provider accounts.",
+      "href": "/docs/provider-accounts/",
+      "keywords": "provider accounts codex gemini claude qwen glm grok copilot oauth api key auth_dir disable refresh reauth",
+      "headings": [
+        "Before you start",
+        "Add or maintain an account",
+        "Account operations",
+        "Verify routing"
+      ],
+      "excerpt": "Provider accounts are the upstream identities IO Gateway uses when routing model requests. Add at least one healthy account before exposing an API key to clients. Before you start Credential storage Confirm auth_dir points to the directory where provider credentials should live. Provider support Use provider-specific account flows for Claude, Gemini, Codex, "
+    },
+    {
+      "title": "Priority routing",
+      "category": "How-to guides",
+      "type": "How-to guide",
+      "summary": "Prioritize one or more provider accounts so they are used first until unavailable or fully drained.",
+      "href": "/docs/priority-routing/",
+      "keywords": "priority account use first drain quota disabled auto remove routing provider account-routing",
+      "headings": [
+        "Before you start",
+        "Enable priority",
+        "Verify behavior",
+        "Automatic removal"
+      ],
+      "excerpt": "Priority routing lets operators choose one or more provider accounts that receive traffic before the normal account pool. Use it to spend selected subscriptions, balances, or trials before spreading traffic to the rest of the provider. Before you start Provider account exists Add and test the upstream account before marking it as priority. Account remains el"
+    },
+    {
+      "title": "Custom models",
+      "category": "How-to guides",
+      "type": "How-to guide",
+      "summary": "Create ctm: aliases with provider targets, specific accounts, weights, and fallback chains.",
+      "href": "/docs/custom-models/",
+      "keywords": "custom models ctm alias targets weights fallback account targeting exclusion provider chain",
+      "headings": [
+        "Before you start",
+        "Create an alias",
+        "Supported behavior",
+        "Example"
+      ],
+      "excerpt": "Custom models create stable ctm: aliases that can route to one or more provider models, specific accounts, weighted target sets, or fallback chains. Before you start Confirm the target provider accounts are healthy and visible in the dashboard . If the alias will be exposed to clients, decide which API keys may call it. Create an alias 1 Open Custom Models i"
+    },
+    {
+      "title": "Test API",
+      "category": "How-to guides",
+      "type": "How-to guide",
+      "summary": "Validate models and routes from the dashboard without creating a separate client API key.",
+      "href": "/docs/test-api/",
+      "keywords": "test api dashboard settings model validate route prompt admin session smoke test",
+      "headings": [
+        "Before you start",
+        "Run a test",
+        "What a passing result proves"
+      ],
+      "excerpt": "Test API sends a dashboard-authenticated prompt through the same routing layer used by clients. Use it after account, custom-model, API-key, or priority-routing changes. Before you start Sign in to the dashboard with an operator session. Test API validates routing without requiring a separate managed client key. Run a test 1 Open Test API. Use the dashboard "
+    },
+    {
+      "title": "Notifications",
+      "category": "How-to guides",
+      "type": "How-to guide",
+      "summary": "Configure Telegram or Google Chat alerts for auth errors, upstream failures, and quota events.",
+      "href": "/docs/notifications/",
+      "keywords": "notifications telegram google chat webhook alerts auth upstream quota test failures",
+      "headings": [
+        "Before you start",
+        "Configure alerts",
+        "Event types",
+        "Troubleshoot delivery"
+      ],
+      "excerpt": "Notifications help operators catch upstream auth errors, provider failures, quota events, and service issues without watching dashboard state continuously. Before you start Destination exists Prepare a Telegram bot/chat or Google Chat webhook. Secrets are protected Store notification tokens with the same care as provider credentials. Configure alerts 1 Open "
+    },
+    {
+      "title": "Configuration",
+      "category": "Reference",
+      "type": "Reference",
+      "summary": "Core config.json fields, environment overrides, dashboard auth, and proxy safety settings.",
+      "href": "/docs/configuration/",
+      "keywords": "config json env admin auth proxy api key totp secure cookies trusted proxy",
+      "headings": [
+        "Minimal config",
+        "Important fields",
+        "Admin auth environment overrides",
+        "Security notes"
+      ],
+      "excerpt": "Configuration controls the HTTP listener, upstream defaults, credential directory, dashboard authentication, proxy trust, and retention settings. Minimal config { \"listen\": \"0.0.0.0:8319\", \"upstream_base\": \"https://chatgpt.com/backend-api/codex\", \"proxy_api_key\": \"your-shared-proxy-key\", \"tokens\": [], \"auth_dir\": \"./auths\" } Important fields Field Purpose li"
+    },
+    {
+      "title": "API keys",
+      "category": "Reference",
+      "type": "Reference",
+      "summary": "Create managed keys with provider/account scopes and prompt-token limits at whole, provider, and account levels.",
+      "href": "/docs/api-keys/",
+      "keywords": "api keys managed scopes provider account prompt token limits whole key custom aliases access rules",
+      "headings": [
+        "Access model",
+        "Create a managed key",
+        "Limit fields",
+        "Operational advice"
+      ],
+      "excerpt": "Managed API keys let operators expose only the model routes a client should use and enforce prompt-token limits at the whole-key, provider, and account levels. Access model Whole key Global limit across every provider and model the key may call. Provider Limit usage for one upstream provider such as Claude, Gemini, or Codex. Account Limit usage for a specifi"
+    },
+    {
+      "title": "Usage and quota",
+      "category": "Reference",
+      "type": "Reference",
+      "summary": "Read usage history, context-token charts, account health, provider quota, and useful admin endpoints.",
+      "href": "/docs/usage-and-quota/",
+      "keywords": "usage quota history context tokens account health endpoints dashboard json account-routing",
+      "headings": [
+        "What to watch",
+        "Prompt tokens",
+        "Context size",
+        "Account state",
+        "Route selection",
+        "Useful endpoints",
+        "Investigate unexpected usage"
+      ],
+      "excerpt": "Usage and quota views show which clients, providers, models, and upstream accounts are consuming prompt tokens and how routing choices affect account health. What to watch Prompt tokens Track client-side limits and upstream account spending. Context size Watch large prompts that may trigger provider failures or client-limit rejections. Account state Disabled"
+    },
+    {
+      "title": "Routing and models",
+      "category": "Explanation",
+      "type": "Explanation",
+      "summary": "Understand gateway endpoints, model prefixes, custom aliases, failover, and routing rules.",
+      "href": "/docs/routing-and-models/",
+      "keywords": "routing models v1 responses chat completions claude messages prefix ctm alias failover",
+      "headings": [
+        "Routing inputs",
+        "How selection works",
+        "Tradeoffs"
+      ],
+      "excerpt": "IO Gateway routes OpenAI-compatible requests to upstream providers by model prefix, custom alias, account health, key scope, and provider availability. Routing inputs Endpoint shape OpenAI-compatible routes, Claude Messages routes, and runtime OpenAPI docs are served by the app. Model prefix Prefixes such as cld: , gem: , glm: , or ctm: select provider or al"
+    },
+    {
+      "title": "Deployment",
+      "category": "Operations",
+      "type": "Operations",
+      "summary": "Release with tag-triggered app deployment and push-triggered GitHub Pages deployment.",
+      "href": "/docs/deployment/",
+      "keywords": "deployment release tags github actions pages health ready artifact systemd ci cd",
+      "headings": [
+        "Pipeline triggers",
+        "Release deployment flow",
+        "Production checks",
+        "Rollback"
+      ],
+      "excerpt": "The release process should build a clean app artifact, deploy it to the server, restart the service, and verify readiness. Static product pages deploy separately from app releases. Pipeline triggers App release Pushing a v* tag runs the app release workflow and production deployment when app paths changed. Pages deployment Pushes to master or main deploy Git"
+    },
+    {
+      "title": "Troubleshooting",
+      "category": "Troubleshooting",
+      "type": "Troubleshooting",
+      "summary": "Diagnose readiness failures, 401s, provider auth errors, custom-model misses, and notification failures.",
+      "href": "/docs/troubleshooting/",
+      "keywords": "troubleshooting ready 401 custom model provider auth logs quota access rules notifications",
+      "headings": [
+        "Diagnostic order",
+        "Common symptoms",
+        "Useful commands"
+      ],
+      "excerpt": "Use this page when IO Gateway starts but requests, dashboard actions, provider accounts, or release checks do not behave as expected. Diagnostic order 1 Check process health. Start with /health , /ready , and service logs. 2 Check authentication. Separate dashboard auth failures from client API-key failures. 3 Check provider accounts. Look for disabled, expi"
+    },
+    {
+      "title": "Tutorials",
+      "category": "Documentation type",
+      "type": "Category",
+      "summary": "First-run paths that take an operator from zero to a working gateway.",
+      "href": "/docs/category/tutorials/",
+      "keywords": "Tutorials Documentation type",
+      "headings": [
+        "Pages in this category",
+        "Related categories"
+      ],
+      "excerpt": "First-run paths that take an operator from zero to a working gateway."
+    },
+    {
+      "title": "How-to guides",
+      "category": "Documentation type",
+      "type": "Category",
+      "summary": "Task-oriented procedures for dashboard and routing work.",
+      "href": "/docs/category/how-to-guides/",
+      "keywords": "How-to guides Documentation type",
+      "headings": [
+        "Pages in this category",
+        "Related categories"
+      ],
+      "excerpt": "Task-oriented procedures for dashboard and routing work."
+    },
+    {
+      "title": "Reference",
+      "category": "Documentation type",
+      "type": "Category",
+      "summary": "Stable behavior, fields, limits, storage, and endpoint details.",
+      "href": "/docs/category/reference/",
+      "keywords": "Reference Documentation type",
+      "headings": [
+        "Pages in this category",
+        "Related categories"
+      ],
+      "excerpt": "Stable behavior, fields, limits, storage, and endpoint details."
+    },
+    {
+      "title": "Explanation",
+      "category": "Documentation type",
+      "type": "Category",
+      "summary": "Concepts and tradeoffs behind IO Gateway routing.",
+      "href": "/docs/category/explanation/",
+      "keywords": "Explanation Documentation type",
+      "headings": [
+        "Pages in this category",
+        "Related categories"
+      ],
+      "excerpt": "Concepts and tradeoffs behind IO Gateway routing."
+    },
+    {
+      "title": "Operations",
+      "category": "Documentation type",
+      "type": "Category",
+      "summary": "Release, deployment, and production operating procedures.",
+      "href": "/docs/category/operations/",
+      "keywords": "Operations Documentation type",
+      "headings": [
+        "Pages in this category",
+        "Related categories"
+      ],
+      "excerpt": "Release, deployment, and production operating procedures."
+    },
+    {
+      "title": "Troubleshooting",
+      "category": "Documentation type",
+      "type": "Category",
+      "summary": "Symptom-led diagnosis and recovery checks.",
+      "href": "/docs/category/troubleshooting/",
+      "keywords": "Troubleshooting Documentation type",
+      "headings": [
+        "Pages in this category",
+        "Related categories"
+      ],
+      "excerpt": "Symptom-led diagnosis and recovery checks."
+    },
+    {
+      "title": "Routing",
+      "category": "Topic",
+      "type": "Category",
+      "summary": "Priority routing, custom models, model prefixes, fallback, and account selection.",
+      "href": "/docs/category/routing/",
+      "keywords": "Routing Topic",
+      "headings": [
+        "Pages in this category",
+        "Related categories"
+      ],
+      "excerpt": "Priority routing, custom models, model prefixes, fallback, and account selection."
+    },
+    {
+      "title": "Accounts",
+      "category": "Topic",
+      "type": "Category",
+      "summary": "Upstream provider credentials, account health, quota use, and priority membership.",
+      "href": "/docs/category/accounts/",
+      "keywords": "Accounts Topic",
+      "headings": [
+        "Pages in this category",
+        "Related categories"
+      ],
+      "excerpt": "Upstream provider credentials, account health, quota use, and priority membership."
+    },
+    {
+      "title": "Limits",
+      "category": "Topic",
+      "type": "Category",
+      "summary": "Prompt-token limits, usage history, quota views, and managed API-key controls.",
+      "href": "/docs/category/limits/",
+      "keywords": "Limits Topic",
+      "headings": [
+        "Pages in this category",
+        "Related categories"
+      ],
+      "excerpt": "Prompt-token limits, usage history, quota views, and managed API-key controls."
+    },
+    {
+      "title": "Deployment",
+      "category": "Topic",
+      "type": "Category",
+      "summary": "Release tags, production service updates, GitHub Pages deployment, and rollback.",
+      "href": "/docs/category/deployment/",
+      "keywords": "Deployment Topic",
+      "headings": [
+        "Pages in this category",
+        "Related categories"
+      ],
+      "excerpt": "Release tags, production service updates, GitHub Pages deployment, and rollback."
+    },
+    {
+      "title": "Notifications",
+      "category": "Topic",
+      "type": "Category",
+      "summary": "Telegram and Google Chat alerts for provider, quota, and operational events.",
+      "href": "/docs/category/notifications/",
+      "keywords": "Notifications Topic",
+      "headings": [
+        "Pages in this category",
+        "Related categories"
+      ],
+      "excerpt": "Telegram and Google Chat alerts for provider, quota, and operational events."
+    },
+    {
+      "title": "Configuration",
+      "category": "Topic",
+      "type": "Category",
+      "summary": "Config files, environment overrides, dashboard auth, and proxy safety.",
+      "href": "/docs/category/configuration/",
+      "keywords": "Configuration Topic",
+      "headings": [
+        "Pages in this category",
+        "Related categories"
+      ],
+      "excerpt": "Config files, environment overrides, dashboard auth, and proxy safety."
+    },
+    {
+      "title": "API access",
+      "category": "Topic",
+      "type": "Category",
+      "summary": "Managed API keys, Test API, runtime API docs, and client-facing model access.",
+      "href": "/docs/category/api-access/",
+      "keywords": "API access Topic",
+      "headings": [
+        "Pages in this category",
+        "Related categories"
+      ],
+      "excerpt": "Managed API keys, Test API, runtime API docs, and client-facing model access."
+    }
+  ]
+}
