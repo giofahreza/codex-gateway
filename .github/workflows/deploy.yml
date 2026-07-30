@@ -15,13 +15,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-  DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-  REMOTE_STAGE_DIR: ${{ secrets.DEPLOY_REMOTE_STAGE_DIR }}
-  LIVE_BINARY: ${{ secrets.DEPLOY_LIVE_BINARY }}
-  SERVICE_NAME: ${{ secrets.DEPLOY_SERVICE_NAME }}
-  HEALTH_URL: ${{ secrets.DEPLOY_HEALTH_URL }}
-  READY_URL: ${{ secrets.DEPLOY_READY_URL }}
 
 jobs:
   changes:
@@ -140,6 +133,15 @@ jobs:
       - changes
       - build
     if: needs.changes.outputs.app == 'true' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DEPLOY_REMOTE_STAGE_DIR: ${{ secrets.DEPLOY_REMOTE_STAGE_DIR }}
+      DEPLOY_LIVE_BINARY: ${{ secrets.DEPLOY_LIVE_BINARY }}
+      DEPLOY_SERVICE_NAME: ${{ secrets.DEPLOY_SERVICE_NAME }}
+      DEPLOY_HEALTH_URL: ${{ secrets.DEPLOY_HEALTH_URL }}
+      DEPLOY_READY_URL: ${{ secrets.DEPLOY_READY_URL }}
 
     steps:
       - name: Download release binary
@@ -148,15 +150,35 @@ jobs:
           name: io-gateway-linux-x86_64
           path: ./release
 
-      - name: Configure SSH
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      - name: Validate deployment secrets
         run: |
           set -euo pipefail
-          if [ -z "${DEPLOY_SSH_KEY}" ]; then
-            echo "DEPLOY_SSH_KEY secret is required for deployment." >&2
+          missing=false
+          for name in \
+            DEPLOY_HOST \
+            DEPLOY_USER \
+            DEPLOY_SSH_KEY \
+            DEPLOY_REMOTE_STAGE_DIR \
+            DEPLOY_LIVE_BINARY \
+            DEPLOY_SERVICE_NAME \
+            DEPLOY_HEALTH_URL \
+            DEPLOY_READY_URL
+          do
+            if [ -n "${!name}" ]; then
+              echo "::add-mask::${!name}"
+            fi
+            if [ -z "${!name}" ]; then
+              echo "::error title=Missing deployment secret::${name} is required for deployment."
+              missing=true
+            fi
+          done
+          if [ "${missing}" = "true" ]; then
             exit 1
           fi
+
+      - name: Configure SSH
+        run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           printf '%s\n' "${DEPLOY_SSH_KEY}" > ~/.ssh/deploy_key
@@ -173,7 +195,7 @@ jobs:
             exit 1
           fi
           SHORT_SHA="${GITHUB_SHA::12}"
-          STAGED_BINARY="${REMOTE_STAGE_DIR}/io-gateway.${SHORT_SHA}"
+          STAGED_BINARY="${DEPLOY_REMOTE_STAGE_DIR}/io-gateway.${SHORT_SHA}"
           scp \
             -i ~/.ssh/deploy_key \
             -o BatchMode=yes \
@@ -191,7 +213,7 @@ jobs:
             -o BatchMode=yes \
             -o StrictHostKeyChecking=yes \
             "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "DEPLOY_COMMIT='${GITHUB_SHA}' DEPLOY_REF='${GITHUB_REF_NAME}' STAGED_BINARY='${STAGED_BINARY}' LIVE_BINARY='${LIVE_BINARY}' SERVICE_NAME='${SERVICE_NAME}' HEALTH_URL='${HEALTH_URL}' READY_URL='${READY_URL}' EXPECTED_SHA256='${EXPECTED_SHA256}' bash -s" <<'REMOTE'
+            "DEPLOY_COMMIT='${GITHUB_SHA}' DEPLOY_REF='${GITHUB_REF_NAME}' STAGED_BINARY='${STAGED_BINARY}' LIVE_BINARY='${DEPLOY_LIVE_BINARY}' SERVICE_NAME='${DEPLOY_SERVICE_NAME}' HEALTH_URL='${DEPLOY_HEALTH_URL}' READY_URL='${DEPLOY_READY_URL}' EXPECTED_SHA256='${EXPECTED_SHA256}' bash -s" <<'REMOTE'
           set -euo pipefail
 
           test -x "${STAGED_BINARY}"

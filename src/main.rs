@@ -3539,6 +3539,26 @@ async fn dashboard() -> impl IntoResponse {
         'glm'
       ];
       const PROVIDER_ROW_CARD_WIDTH = 390;
+      const dashboardDateFormatter = new Intl.DateTimeFormat('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric'
+      });
+      const dashboardTimeFormatter = new Intl.DateTimeFormat('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23'
+      });
+      const dashboardDateTimeFormatter = new Intl.DateTimeFormat('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23'
+      });
       let pendingCredentialAction = null;
       const modalIds = [
         'addModal',
@@ -4172,10 +4192,45 @@ async fn dashboard() -> impl IntoResponse {
         var value = document.getElementById('testApiOutput')?.textContent || '';
         await copyTextToClipboard(value, 'Test output copied');
       }
+      function parseDateTimeValue(value) {
+        if (value == null || value === '') return null;
+        if (value instanceof Date) {
+          return Number.isFinite(value.getTime()) ? value : null;
+        }
+        var date;
+        if (typeof value === 'number') {
+          var millis = Math.abs(value) < 100000000000 ? value * 1000 : value;
+          date = new Date(millis);
+        } else {
+          var text = String(value).trim();
+          if (!text) return null;
+          if (/^-?\d+(?:\.\d+)?$/.test(text)) {
+            var numeric = Number(text);
+            var numericMillis = Math.abs(numeric) < 100000000000 ? numeric * 1000 : numeric;
+            date = new Date(numericMillis);
+          } else {
+            date = new Date(text);
+          }
+        }
+        return Number.isFinite(date.getTime()) ? date : null;
+      }
+      function formatDashboardDate(value, fallback) {
+        if (value == null || value === '') return fallback || '';
+        var date = parseDateTimeValue(value);
+        return date ? dashboardDateFormatter.format(date) : String(value);
+      }
+      function formatDashboardTime(value, fallback) {
+        if (value == null || value === '') return fallback || '';
+        var date = parseDateTimeValue(value);
+        return date ? dashboardTimeFormatter.format(date) : String(value);
+      }
+      function formatDashboardDateTime(value, fallback) {
+        if (value == null || value === '') return fallback || '';
+        var date = parseDateTimeValue(value);
+        return date ? dashboardDateTimeFormatter.format(date) : String(value);
+      }
       function formatSettingsDateTime(value, fallback) {
-        if (!value) return fallback || 'Never';
-        var date = new Date(value);
-        return isNaN(date.getTime()) ? value : date.toLocaleString();
+        return formatDashboardDateTime(value, fallback || 'Never');
       }
 	      function apiKeySourceLabel(source) {
 	        return source === 'legacy_config' ? 'Legacy config' : 'Managed';
@@ -4799,14 +4854,14 @@ async fn dashboard() -> impl IntoResponse {
           items.push({
             key: 'expired tokens',
             title: 'Saved token expired',
-            detail: 'Saved token expired at ' + account.expired_at + '. Re-authenticate this account before using it.'
+            detail: 'Saved token expired at ' + formatDashboardDateTime(account.expired_at, account.expired_at) + '. Re-authenticate this account before using it.'
           });
         }
         if (hasCurrentError(account)) {
           var errorDetail = 'Total recorded errors: ' + formatNumber(account.errors || 0) + '.';
-          if (account.last_error_at) errorDetail += ' Last error: ' + account.last_error_at + '.';
+          if (account.last_error_at) errorDetail += ' Last error: ' + formatDashboardDateTime(account.last_error_at, account.last_error_at) + '.';
           if (account.last_error_message) errorDetail += ' Detail: ' + account.last_error_message + '.';
-          if (account.last_success_at) errorDetail += ' Last success: ' + account.last_success_at + '.';
+          if (account.last_success_at) errorDetail += ' Last success: ' + formatDashboardDateTime(account.last_success_at, account.last_success_at) + '.';
           items.push({
             key: 'errors',
             title: 'Current errors',
@@ -5512,9 +5567,8 @@ async fn dashboard() -> impl IntoResponse {
       }
       function formatResetCreditExpiry(credit) {
         if (!credit || !credit.expires_at) return 'No expiration';
-        var ts = Date.parse(credit.expires_at);
-        if (!Number.isFinite(ts)) return 'Expires at ' + credit.expires_at;
-        return 'Expires at ' + new Date(ts).toLocaleString();
+        var formatted = formatDashboardDateTime(credit.expires_at, credit.expires_at);
+        return 'Expires at ' + formatted;
       }
       function resetCreditDisplayName(credit) {
         if (!credit) return 'Usage limit reset';
@@ -5734,6 +5788,10 @@ async fn dashboard() -> impl IntoResponse {
           + (code ? '<code>' + escapeHtml(value) + '</code>' : escapeHtml(value))
           + '</div>';
       }
+      function renderDateTimeMetaLine(label, value) {
+        if (value == null || value === '') return '';
+        return renderMetaLine(label, formatDashboardDateTime(value, ''), false);
+      }
       function renderLongMetaLine(label, value) {
         if (value == null || value === '') return '';
         var text = String(value);
@@ -5766,10 +5824,10 @@ async fn dashboard() -> impl IntoResponse {
         rows.push(renderMetaLine('resource URL', firstPresent(a, ['resource_url', 'base_url', 'api_base_url']), true));
         rows.push(renderMetaLine('openai base URL', firstPresent(a, ['openai_base_url']), true));
         rows.push(renderMetaLine('anthropic base URL', firstPresent(a, ['anthropic_base_url']), true));
-        rows.push(renderMetaLine('saved token expiry', firstPresent(a, ['expired_at']), false));
-        rows.push(renderMetaLine('copilot token expiry', firstPresent(a, ['copilot_expires_at']), false));
-        rows.push(renderMetaLine('last success', firstPresent(a, ['last_success_at']), false));
-        rows.push(renderMetaLine('last error', firstPresent(a, ['last_error_at']), false));
+        rows.push(renderDateTimeMetaLine('saved token expiry', firstPresent(a, ['expired_at'])));
+        rows.push(renderDateTimeMetaLine('copilot token expiry', firstPresent(a, ['copilot_expires_at'])));
+        rows.push(renderDateTimeMetaLine('last success', firstPresent(a, ['last_success_at'])));
+        rows.push(renderDateTimeMetaLine('last error', firstPresent(a, ['last_error_at'])));
         rows.push(renderLongMetaLine('last error detail', firstPresent(a, ['last_error_message'])));
         rows.push(renderMetaLine('user id', firstPresent(a, ['user_id']), true));
         rows.push(renderMetaLine('team id', a && a.team_id ? a.team_id + (a.team_blocked ? ' (blocked)' : '') : '', true));
@@ -10380,7 +10438,10 @@ async fn notification_test_route(State(state): State<AppState>, headers: HeaderM
         return response;
     }
     let settings = state.notification_settings.lock().unwrap().clone();
-    let text = format!("IO Gateway test notification\nTime: {}", now_rfc3339());
+    let text = format!(
+        "IO Gateway test notification\nTime: {}",
+        notifications::display_datetime(&now_rfc3339())
+    );
     match notifications::send_notification(&state.client, &settings, &text).await {
         Ok(()) => axum::Json(serde_json::json!({
             "ok": true,
@@ -11650,7 +11711,11 @@ async fn context_history_route(
     }
 
     let mut labels = Vec::with_capacity(num_buckets);
-    let label_format = if hours > 48 { "%m-%d %H:%M" } else { "%H:%M" };
+    let label_format = if hours > 48 {
+        "%b %-d, %Y, %H:%M:%S"
+    } else {
+        "%H:%M:%S"
+    };
     for i in 0..num_buckets {
         let bucket_start = start_ts + (i as i64 * bucket_secs as i64);
         let dt = chrono::DateTime::from_timestamp(bucket_start, 0)

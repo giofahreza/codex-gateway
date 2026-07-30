@@ -310,10 +310,25 @@ fn normalize_channel(value: &str) -> String {
     }
 }
 
+pub(crate) fn display_datetime(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    chrono::DateTime::parse_from_rfc3339(trimmed)
+        .map(|datetime| {
+            datetime
+                .with_timezone(&chrono::Local)
+                .format("%b %-d, %Y, %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|_| trimmed.to_string())
+}
+
 fn error_message_text(context: &crate::UsageContext, message: &str, observed_at: &str) -> String {
     let mut lines = vec![
         "IO Gateway account alert".to_string(),
-        format!("Time: {}", observed_at),
+        format!("Time: {}", display_datetime(observed_at)),
         format!("Provider: {}", context.provider_name),
         format!("Account: {}", display_account(context)),
     ];
@@ -809,7 +824,7 @@ fn model_quota_event_text(
     };
     let mut lines = vec![
         "IO Gateway model quota alert".to_string(),
-        format!("Time: {}", observed_at),
+        format!("Time: {}", display_datetime(observed_at)),
         format!("Provider: {}", snapshot.provider_label),
         format!("Account: {}", display_snapshot_account(snapshot)),
         format!("Model: {}", snapshot.model_label),
