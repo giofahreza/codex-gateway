@@ -34,6 +34,7 @@ use utoipa_swagger_ui::Config;
         crate::source::codex::models_doc,
         crate::source::codex::responses_doc,
         crate::source::claude::models_doc,
+        crate::source::claude::models_v1_doc,
         crate::source::claude::messages_doc,
         crate::source::claude::responses_doc
     ),

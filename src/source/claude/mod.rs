@@ -15,6 +15,17 @@ pub fn route_to_target(
     body: Bytes,
 ) -> Result<RoutedRequest, RouteError> {
     let upstream_path = route::resolve(path, method)?;
+    if (*method == Method::GET || *method == Method::HEAD)
+        && (upstream_path == "models" || upstream_path == "v1/models")
+    {
+        return Ok(crate::source::v1::provider::convert(
+            crate::source::TargetModel::UnifiedV1Models,
+            "models".to_string(),
+            uri,
+            body,
+        ));
+    }
+
     if is_messages_path(&upstream_path) && *method == Method::POST {
         if crate::source::v1::provider::target_from_request_body(&body) == Some(TargetModel::Custom)
         {
@@ -243,6 +254,71 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&routed.upstream_body).unwrap();
         assert_eq!(body["model"], "claude-sonnet-4-20250514");
     }
+
+    #[test]
+    fn claude_models_routes_to_unified_catalog() {
+        let uri: Uri = "/claude/models".parse().unwrap();
+        let routed = route_to_target(
+            "/claude/models",
+            &uri,
+            &Method::GET,
+            &HeaderMap::new(),
+            Bytes::new(),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::UnifiedV1Models);
+        assert_eq!(routed.upstream_path, "models");
+    }
+
+    #[test]
+    fn claude_v1_models_routes_to_unified_catalog() {
+        let uri: Uri = "/claude/v1/models".parse().unwrap();
+        let routed = route_to_target(
+            "/claude/v1/models",
+            &uri,
+            &Method::GET,
+            &HeaderMap::new(),
+            Bytes::new(),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::UnifiedV1Models);
+        assert_eq!(routed.upstream_path, "models");
+    }
+
+    #[test]
+    fn claude_v1_models_supports_head_method() {
+        let uri: Uri = "/claude/v1/models".parse().unwrap();
+        let routed = route_to_target(
+            "/claude/v1/models",
+            &uri,
+            &Method::HEAD,
+            &HeaderMap::new(),
+            Bytes::new(),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::UnifiedV1Models);
+        assert_eq!(routed.upstream_path, "models");
+    }
+
+    #[test]
+    fn claude_v1_models_preserves_query_string() {
+        let uri: Uri = "/claude/v1/models?cursor=abc&limit=50".parse().unwrap();
+        let routed = route_to_target(
+            "/claude/v1/models",
+            &uri,
+            &Method::GET,
+            &HeaderMap::new(),
+            Bytes::new(),
+        )
+        .unwrap();
+
+        assert_eq!(routed.target, TargetModel::UnifiedV1Models);
+        assert_eq!(routed.upstream_path, "models");
+        assert_eq!(routed.upstream_query.as_deref(), Some("cursor=abc&limit=50"));
+    }
 }
 
 /// Lists models through the Claude-prefixed compatibility surface.
@@ -265,6 +341,27 @@ mod tests {
 )]
 #[allow(dead_code)]
 pub(crate) fn models_doc() {}
+
+/// Lists models through the Claude-prefixed, versioned compatibility surface.
+#[utoipa::path(
+    get,
+    path = "/claude/v1/models",
+    security(("bearer_auth" = [])),
+    responses(
+        (
+            status = 200,
+            description = "Raw model list",
+            body = crate::source::openapi::UpstreamModelListResponse
+        ),
+        (
+            status = 401,
+            description = "Missing or invalid proxy API key",
+            body = String
+        )
+    )
+)]
+#[allow(dead_code)]
+pub(crate) fn models_v1_doc() {}
 
 /// Accepts a Claude-style messages payload and bridges it to the Codex responses backend.
 #[utoipa::path(
