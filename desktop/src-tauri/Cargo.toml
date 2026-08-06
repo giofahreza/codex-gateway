@@ -1,0 +1,21 @@
+[package]
+name = "io-gateway-desktop"
+version = "0.1.0"
+description = "Desktop usage monitor for IO Gateway"
+authors = ["IO Gateway"]
+edition = "2021"
+
+[lib]
+name = "io_gateway_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.4", features = [] }
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2.8", features = [] }
+tokio = { version = "1", features = ["sync"] }
+url = "2.5"

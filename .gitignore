@@ -2,3 +2,7 @@
 config.json
 /auths/*.json
 *.log
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/gen/
+desktop/src-tauri/target/
