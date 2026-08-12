@@ -317,7 +317,10 @@ mod tests {
 
         assert_eq!(routed.target, TargetModel::UnifiedV1Models);
         assert_eq!(routed.upstream_path, "models");
-        assert_eq!(routed.upstream_query.as_deref(), Some("cursor=abc&limit=50"));
+        assert_eq!(
+            routed.upstream_query.as_deref(),
+            Some("cursor=abc&limit=50")
+        );
     }
 }
 

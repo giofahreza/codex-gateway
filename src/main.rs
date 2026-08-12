@@ -19104,6 +19104,8 @@ fn augment_codex_models_json(body: &Bytes, state: &AppState) -> Bytes {
         .and_then(|value| value.as_array_mut())
         .expect("models was initialized as an array");
 
+    append_prefixed_codex_model_aliases(models);
+
     let mut existing = models
         .iter()
         .filter_map(|model| model.get("slug").and_then(|value| value.as_str()))
@@ -19122,6 +19124,42 @@ fn augment_codex_models_json(body: &Bytes, state: &AppState) -> Bytes {
     serde_json::to_vec(&value)
         .map(Bytes::from)
         .unwrap_or_else(|_| body.clone())
+}
+
+fn append_prefixed_codex_model_aliases(models: &mut Vec<serde_json::Value>) {
+    let mut existing = models
+        .iter()
+        .filter_map(|model| model.get("slug").and_then(|value| value.as_str()))
+        .map(|slug| slug.to_string())
+        .collect::<HashSet<_>>();
+
+    let aliases = models
+        .iter()
+        .filter_map(|model| {
+            let slug = model.get("slug").and_then(|value| value.as_str())?;
+            if slug.contains(':') {
+                return None;
+            }
+
+            let prefixed_slug = format!("cod:{}", slug);
+            if !existing.insert(prefixed_slug.clone()) {
+                return None;
+            }
+
+            let mut alias = model.clone();
+            let object = alias.as_object_mut()?;
+            object.insert(
+                "slug".to_string(),
+                serde_json::Value::String(prefixed_slug.clone()),
+            );
+            if object.contains_key("id") {
+                object.insert("id".to_string(), serde_json::Value::String(prefixed_slug));
+            }
+            Some(alias)
+        })
+        .collect::<Vec<_>>();
+
+    models.extend(aliases);
 }
 
 fn codex_provider_model_metadata(state: &AppState) -> Vec<serde_json::Value> {
@@ -19466,7 +19504,37 @@ fn codex_provider_model(
 
 #[cfg(test)]
 mod codex_provider_model_tests {
-    use super::codex_provider_model;
+    use super::{append_prefixed_codex_model_aliases, codex_provider_model};
+
+    #[test]
+    fn codex_models_include_prefixed_and_unprefixed_aliases() {
+        let mut models = vec![
+            serde_json::json!({
+                "id": "gpt-5.4",
+                "slug": "gpt-5.4",
+                "display_name": "GPT-5.4"
+            }),
+            serde_json::json!({
+                "slug": "cod:gpt-5.3",
+                "display_name": "GPT-5.3"
+            }),
+        ];
+
+        append_prefixed_codex_model_aliases(&mut models);
+
+        let slugs = models
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(|value| value.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(slugs, vec!["gpt-5.4", "cod:gpt-5.3", "cod:gpt-5.4"]);
+
+        let alias = models
+            .iter()
+            .find(|model| model["slug"] == "cod:gpt-5.4")
+            .unwrap();
+        assert_eq!(alias["id"], "cod:gpt-5.4");
+        assert_eq!(alias["display_name"], "GPT-5.4");
+    }
 
     #[test]
     fn provider_model_advertises_image_input_when_supported() {
