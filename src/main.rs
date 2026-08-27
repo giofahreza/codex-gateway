@@ -20,7 +20,7 @@ use std::{
     sync::{mpsc, Arc, Mutex, OnceLock, RwLock},
     time::Duration,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 mod admin_auth;
 mod api_keys;
@@ -57,6 +57,47 @@ const QUOTA_REFRESH_SECONDS: u64 = 60;
 const EXHAUSTED_QUOTA_REFRESH_SECONDS: u64 = 60 * 60;
 const MODEL_PROVIDER_PREFIXES: [&str; 10] = [
     "cod", "agw", "gem", "qwn", "dsk", "grk", "min", "cop", "cld", "glm",
+];
+const MOBILE_QUOTA_SCALAR_KEYS: [&str; 25] = [
+    "label",
+    "email",
+    "login",
+    "name",
+    "file_name",
+    "account_id",
+    "organization_uuid",
+    "display_name",
+    "limit_name",
+    "model_id",
+    "model",
+    "scope",
+    "used_percent",
+    "usage_percent",
+    "percent_used",
+    "usedPercent",
+    "remaining_percent",
+    "limit",
+    "remaining",
+    "used",
+    "reset_label",
+    "used_text",
+    "limit_text",
+    "user_id",
+    "team_id",
+];
+const MOBILE_QUOTA_CONTAINER_KEYS: [&str; 12] = [
+    "code_generation",
+    "code_review",
+    "five_hour",
+    "weekly",
+    "additional_rate_limits",
+    "models",
+    "current",
+    "quota",
+    "limit",
+    "groups",
+    "limits",
+    "current_window",
 ];
 
 #[derive(Clone)]
@@ -108,6 +149,7 @@ struct AppState {
     api_keys: Arc<Mutex<api_keys::ApiKeyStore>>,
     api_key_cache: Arc<RwLock<HashMap<String, ApiKeyCacheEntry>>>,
     api_key_last_used: Arc<Mutex<HashMap<String, String>>>,
+    request_api_key_id: Option<String>,
     internal_proxy_secret: Arc<String>,
     notification_settings: Arc<Mutex<notifications::NotificationSettings>>,
     account_routing: Arc<Mutex<AccountRoutingSettings>>,
@@ -529,6 +571,7 @@ async fn main() {
         api_keys: Arc::new(Mutex::new(api_key_store)),
         api_key_cache: Arc::new(RwLock::new(HashMap::new())),
         api_key_last_used: Arc::new(Mutex::new(HashMap::new())),
+        request_api_key_id: None,
         internal_proxy_secret: Arc::new(Uuid::new_v4().simple().to_string()),
         notification_settings: Arc::new(Mutex::new(notification_settings)),
         account_routing: Arc::new(Mutex::new(account_routing)),
@@ -616,6 +659,11 @@ async fn main() {
         .route("/notifications/settings", any(notification_settings_route))
         .route("/notifications/test", any(notification_test_route))
         .route("/usage/summary.json", any(usage_summary_route))
+        .route("/usage/mobile.json", any(mobile_usage_route))
+        .route(
+            "/usage/filter-summary.json",
+            any(usage_filter_summary_route),
+        )
         .route("/usage/history.json", any(usage_history_route))
         .route("/usage/context-history.json", any(context_history_route))
         .route("/temp-files/:name", any(temp_file_route))
@@ -9676,7 +9724,7 @@ async fn admin_test_api_route(
                     "model": payload.model.trim(),
                     "message": err.message
                 }),
-            )
+            );
         }
     };
 
@@ -9757,7 +9805,7 @@ async fn admin_test_response_from_upstream(
                     "duration_ms": elapsed.as_millis(),
                     "message": format!("failed to read upstream response body: {}", err)
                 }),
-            )
+            );
         }
     };
 
@@ -10036,7 +10084,7 @@ async fn model_catalog_refresh_route(
                 [("Content-Type", "application/json")],
                 openai_error_body("Unknown model provider", "invalid_request_error", None),
             )
-                .into_response()
+                .into_response();
         }
         None => None,
     };
@@ -10242,7 +10290,7 @@ async fn custom_models_save_route(
                 }))
                 .unwrap_or_default(),
             )
-                .into_response()
+                .into_response();
         }
     };
     if let Err(err) = custom_models::validate_model(&model) {
@@ -10327,7 +10375,7 @@ async fn custom_models_delete_route(
                 }))
                 .unwrap_or_default(),
             )
-                .into_response()
+                .into_response();
         }
     };
     let saved_models = {
@@ -11500,6 +11548,10 @@ async fn usage_summary_route(State(state): State<AppState>, headers: HeaderMap) 
     if let Some(response) = require_admin_session_json(&state, &headers) {
         return response;
     }
+    axum::Json(usage_summary_json(&state)).into_response()
+}
+
+fn usage_summary_json(state: &AppState) -> serde_json::Value {
     let persisted = state.persisted_stats.lock().unwrap().clone();
     let mut codex = persisted
         .codex
@@ -11561,7 +11613,7 @@ async fn usage_summary_route(State(state): State<AppState>, headers: HeaderMap) 
     copilot.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     claude.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     glm.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
-    axum::Json(serde_json::json!({
+    serde_json::json!({
         "totals": {
             "requests": persisted.total_requests,
             "errors": persisted.total_errors,
@@ -11587,8 +11639,267 @@ async fn usage_summary_route(State(state): State<AppState>, headers: HeaderMap) 
             "claude": claude,
             "glm": glm
         }
+    })
+}
+
+async fn mobile_usage_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+
+    let quota = |provider: &str| {
+        serde_json::json!({
+            "accounts": quota_snapshot(&state, provider)
+                .iter()
+                .map(compact_mobile_quota_value)
+                .collect::<Vec<_>>()
+        })
+    };
+    let grok_accounts = compact_mobile_grok_quota_accounts(&state);
+    axum::Json(serde_json::json!({
+        "generated_at": now_rfc3339(),
+        "session": {
+            "enabled": admin_auth::is_enabled(&state.cfg.admin_auth),
+            "configured": admin_auth::is_configured(&state.cfg.admin_auth),
+            "authenticated": true
+        },
+        "summary": compact_mobile_usage_summary(usage_summary_json(&state)),
+        "quotas": {
+            "codex": quota("codex"),
+            "agw": quota("antigravity"),
+            "gemini": quota("gemini"),
+            "qwen": quota("qwen"),
+            "deepseek": quota("deepseek"),
+            "minimax": quota("minimax"),
+            "grok": { "accounts": grok_accounts },
+            "copilot": quota("copilot"),
+            "claude": quota("claude"),
+            "glm": quota("glm")
+        }
     }))
     .into_response()
+}
+
+fn compact_mobile_usage_summary(summary: serde_json::Value) -> serde_json::Value {
+    let totals = summary
+        .get("totals")
+        .map(compact_scalar_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let mut providers = serde_json::Map::new();
+    if let Some(source) = summary
+        .get("providers")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (provider, accounts) in source {
+            let compact_accounts = accounts
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|account| {
+                    let source = account.as_object()?;
+                    let mut compact = serde_json::Map::new();
+                    for key in ["key", "label", "model", "account"] {
+                        if let Some(value) = source.get(key).filter(|value| is_json_scalar(value)) {
+                            compact.insert(key.to_string(), value.clone());
+                        }
+                    }
+                    if let Some(usage) = source.get("usage") {
+                        compact.insert("usage".to_string(), compact_scalar_object(usage));
+                    }
+                    Some(serde_json::Value::Object(compact))
+                })
+                .collect::<Vec<_>>();
+            providers.insert(provider.clone(), serde_json::Value::Array(compact_accounts));
+        }
+    }
+    serde_json::json!({
+        "totals": totals,
+        "providers": providers
+    })
+}
+
+fn compact_mobile_grok_quota_accounts(state: &AppState) -> Vec<serde_json::Value> {
+    let source = target::grok::admin::cached_quota_json(state);
+    let Some(account) = source.get("account").and_then(serde_json::Value::as_object) else {
+        return Vec::new();
+    };
+    let mut normalized = account.clone();
+    let limits = source
+        .pointer("/kinds/DEFAULT_TEXT/rate_limits")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(scope, bucket)| {
+            let mut compact = compact_mobile_quota_value(bucket).as_object()?.clone();
+            compact.insert(
+                "label".to_string(),
+                serde_json::Value::String(scope.clone()),
+            );
+            Some(serde_json::Value::Object(compact))
+        })
+        .collect::<Vec<_>>();
+    if !limits.is_empty() {
+        normalized.insert("limits".to_string(), serde_json::Value::Array(limits));
+    }
+    vec![compact_mobile_quota_value(&serde_json::Value::Object(
+        normalized,
+    ))]
+}
+
+fn compact_mobile_quota_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(compact_mobile_quota_value).collect())
+        }
+        serde_json::Value::Object(source) => {
+            let mut compact = serde_json::Map::new();
+            for (key, value) in source {
+                if MOBILE_QUOTA_SCALAR_KEYS.contains(&key.as_str()) && is_json_scalar(value) {
+                    compact.insert(key.clone(), value.clone());
+                } else if MOBILE_QUOTA_CONTAINER_KEYS.contains(&key.as_str()) {
+                    compact.insert(key.clone(), compact_mobile_quota_value(value));
+                } else if key == "kinds" || key == "rate_limits" {
+                    let children = value
+                        .as_object()
+                        .map(|children| {
+                            children
+                                .iter()
+                                .map(|(name, child)| {
+                                    (name.clone(), compact_mobile_quota_value(child))
+                                })
+                                .collect::<serde_json::Map<_, _>>()
+                        })
+                        .unwrap_or_default();
+                    compact.insert(key.clone(), serde_json::Value::Object(children));
+                }
+            }
+            serde_json::Value::Object(compact)
+        }
+        _ => value.clone(),
+    }
+}
+
+fn compact_scalar_object(value: &serde_json::Value) -> serde_json::Value {
+    serde_json::Value::Object(
+        value
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(_, value)| is_json_scalar(value))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    )
+}
+
+fn is_json_scalar(value: &serde_json::Value) -> bool {
+    matches!(
+        value,
+        serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_)
+    )
+}
+
+#[cfg(test)]
+mod mobile_usage_tests {
+    use super::{compact_mobile_quota_value, compact_mobile_usage_summary};
+
+    #[test]
+    fn compact_summary_keeps_scalar_usage_and_drops_nested_history() {
+        let compact = compact_mobile_usage_summary(serde_json::json!({
+            "totals": {
+                "requests": 12,
+                "total_tokens": 345,
+                "nested": { "unused": true }
+            },
+            "providers": {
+                "codex": [{
+                    "key": "account.json",
+                    "usage": {
+                        "requests": 4,
+                        "total_tokens": 99,
+                        "models": { "gpt": { "requests": 4 } }
+                    },
+                    "unused": "drop"
+                }]
+            }
+        }));
+
+        assert_eq!(compact["totals"]["requests"], 12);
+        assert!(compact["totals"].get("nested").is_none());
+        assert_eq!(compact["providers"]["codex"][0]["key"], "account.json");
+        assert_eq!(
+            compact["providers"]["codex"][0]["usage"]["total_tokens"],
+            99
+        );
+        assert!(compact["providers"]["codex"][0]["usage"]
+            .get("models")
+            .is_none());
+    }
+
+    #[test]
+    fn compact_quota_keeps_mobile_bars_and_removes_private_fields() {
+        let compact = compact_mobile_quota_value(&serde_json::json!({
+            "label": "Primary",
+            "access_token": "secret",
+            "code_generation": {
+                "five_hour": {
+                    "used_percent": 42.5,
+                    "reset_label": "2h",
+                    "raw": { "unused": true }
+                }
+            },
+            "kinds": {
+                "DEFAULT_TEXT": {
+                    "rate_limits": {
+                        "requests": {
+                            "limit": 100,
+                            "remaining": 75
+                        }
+                    }
+                }
+            }
+        }));
+
+        assert_eq!(compact["label"], "Primary");
+        assert!(compact.get("access_token").is_none());
+        assert_eq!(
+            compact["code_generation"]["five_hour"]["used_percent"],
+            42.5
+        );
+        assert_eq!(
+            compact["kinds"]["DEFAULT_TEXT"]["rate_limits"]["requests"]["limit"],
+            100
+        );
+    }
+}
+
+async fn usage_filter_summary_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<usage_store::UsageFilterSummaryQuery>,
+) -> Response {
+    if let Some(response) = require_admin_session_json(&state, &headers) {
+        return response;
+    }
+    let cfg = state.cfg.clone();
+    let summary =
+        match tokio::task::spawn_blocking(move || usage_store::summarize_filtered(&cfg, &query))
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => Err(format!("usage summary worker failed: {}", err)),
+        };
+    match summary {
+        Ok(summary) => axum::Json(serde_json::json!({ "summary": summary })).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [("Content-Type", "application/json")],
+            openai_error_body(&err, "server_error", None),
+        )
+            .into_response(),
+    }
 }
 
 async fn usage_history_route(
@@ -12321,24 +12632,44 @@ async fn proxy(
             (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
         };
     };
+    let mut state = state;
+    state.request_api_key_id = authenticated.id.clone();
+
+    let content_length = valid_content_length(&headers);
+    if content_length.is_some_and(|length| length > state.cfg.max_request_body_bytes as u64) {
+        warn!(
+            path = %raw_path,
+            content_length,
+            max_request_body_bytes = state.cfg.max_request_body_bytes,
+            "rejecting oversized request body from Content-Length"
+        );
+        return oversized_request_body_response(
+            source_api,
+            state.cfg.max_request_body_bytes,
+            content_length,
+        );
+    }
 
     // Read full body (small/simple proxy)
     let body_bytes = match axum::body::to_bytes(body, state.cfg.max_request_body_bytes).await {
         Ok(b) => b,
-        Err(_) => {
-            return if matches!(source_api, SourceApi::V1) {
-                (
-                    StatusCode::BAD_REQUEST,
-                    [(
-                        axum::http::header::CONTENT_TYPE.as_str(),
-                        "application/json",
-                    )],
-                    openai_error_body("Invalid request body", "invalid_request_error", None),
-                )
-                    .into_response()
+        Err(err) => {
+            if is_length_limit_error(&err) {
+                warn!(
+                    path = %raw_path,
+                    content_length,
+                    max_request_body_bytes = state.cfg.max_request_body_bytes,
+                    "rejecting request body that exceeded the streaming limit"
+                );
+                return oversized_request_body_response(
+                    source_api,
+                    state.cfg.max_request_body_bytes,
+                    content_length,
+                );
             } else {
-                (StatusCode::BAD_REQUEST, "invalid body").into_response()
-            };
+                warn!(path = %raw_path, error = %err, "request body read failed");
+                return invalid_request_body_response(source_api);
+            }
         }
     };
 
@@ -13019,6 +13350,188 @@ async fn proxy(
         );
     }
     (status, out_headers, body).into_response()
+}
+
+fn valid_content_length(headers: &HeaderMap) -> Option<u64> {
+    let mut parsed = None;
+    for value in headers
+        .get_all(axum::http::header::CONTENT_LENGTH)
+        .iter()
+    {
+        let value = value.to_str().ok()?;
+        for item in value.split(',') {
+            let item = item.trim();
+            if item.is_empty() || !item.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let length = item.parse::<u64>().ok()?;
+            if parsed.is_some_and(|previous| previous != length) {
+                return None;
+            }
+            parsed = Some(length);
+        }
+    }
+    parsed
+}
+
+fn is_length_limit_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if error.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        current = error.source();
+    }
+    false
+}
+
+fn oversized_request_body_response(
+    source_api: SourceApi,
+    limit: usize,
+    content_length: Option<u64>,
+) -> Response {
+    let message = match content_length {
+        Some(content_length) if content_length > limit as u64 => format!(
+            "Request body is too large: Content-Length is {content_length} bytes, but the configured maximum is {limit} bytes. Reduce inline images or attachments, or continue in a clean session."
+        ),
+        Some(content_length) => format!(
+            "Request body exceeded the configured maximum of {limit} bytes while streaming. Content-Length reported {content_length} bytes. Reduce inline images or attachments, or continue in a clean session."
+        ),
+        None => format!(
+            "Request body is too large: it exceeded the configured maximum of {limit} bytes while streaming. Reduce inline images or attachments, or continue in a clean session."
+        ),
+    };
+
+    if matches!(source_api, SourceApi::V1) {
+        let mut details = serde_json::Map::new();
+        details.insert("limit_bytes".to_string(), serde_json::json!(limit));
+        if let Some(content_length) = content_length {
+            details.insert(
+                "content_length_bytes".to_string(),
+                serde_json::json!(content_length),
+            );
+        }
+        let body = serde_json::json!({
+            "error": {
+                "message": message,
+                "type": "invalid_request_error",
+                "param": serde_json::Value::Null,
+                "code": "request_body_too_large",
+                "details": details,
+            }
+        });
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            [(
+                axum::http::header::CONTENT_TYPE.as_str(),
+                "application/json",
+            )],
+            Bytes::from(serde_json::to_vec(&body).unwrap_or_default()),
+        )
+            .into_response()
+    } else {
+        (StatusCode::PAYLOAD_TOO_LARGE, message).into_response()
+    }
+}
+
+fn invalid_request_body_response(source_api: SourceApi) -> Response {
+    if matches!(source_api, SourceApi::V1) {
+        (
+            StatusCode::BAD_REQUEST,
+            [(
+                axum::http::header::CONTENT_TYPE.as_str(),
+                "application/json",
+            )],
+            openai_error_body("Invalid request body", "invalid_request_error", None),
+        )
+            .into_response()
+    } else {
+        (StatusCode::BAD_REQUEST, "invalid body").into_response()
+    }
+}
+
+#[cfg(test)]
+mod request_body_limit_tests {
+    use super::{
+        invalid_request_body_response, is_length_limit_error, oversized_request_body_response,
+        valid_content_length, SourceApi,
+    };
+    use axum::{
+        body::{to_bytes, Body},
+        http::{header::CONTENT_LENGTH, HeaderMap, HeaderValue, StatusCode},
+    };
+
+    #[test]
+    fn content_length_is_used_only_when_valid_and_unambiguous() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("16777217"));
+        assert_eq!(valid_content_length(&headers), Some(16_777_217));
+
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("42, 42"));
+        assert_eq!(valid_content_length(&headers), Some(42));
+
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("42, 43"));
+        assert_eq!(valid_content_length(&headers), None);
+
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("unknown"));
+        assert_eq!(valid_content_length(&headers), None);
+    }
+
+    #[tokio::test]
+    async fn streaming_limit_accepts_the_boundary_and_classifies_only_overflow() {
+        let accepted = to_bytes(Body::from(vec![0_u8; 8]), 8).await.unwrap();
+        assert_eq!(accepted.len(), 8);
+
+        let overflow = to_bytes(Body::from(vec![0_u8; 9]), 8)
+            .await
+            .unwrap_err();
+        assert!(is_length_limit_error(&overflow));
+
+        let unrelated = std::io::Error::new(std::io::ErrorKind::Other, "body read failed");
+        assert!(!is_length_limit_error(&unrelated));
+    }
+
+    #[tokio::test]
+    async fn v1_oversized_response_is_structured_and_actionable() {
+        let response = oversized_request_body_response(SourceApi::V1, 16, Some(17));
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(value["error"]["code"], "request_body_too_large");
+        assert_eq!(value["error"]["details"]["limit_bytes"], 16);
+        assert_eq!(
+            value["error"]["details"]["content_length_bytes"],
+            17
+        );
+        assert!(value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("continue in a clean session"));
+    }
+
+    #[tokio::test]
+    async fn codex_oversized_response_is_actionable_text() {
+        let response = oversized_request_body_response(SourceApi::Codex, 16, None);
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(text.contains("maximum of 16 bytes"));
+        assert!(text.contains("continue in a clean session"));
+    }
+
+    #[test]
+    fn unrelated_body_read_errors_remain_bad_request() {
+        assert_eq!(
+            invalid_request_body_response(SourceApi::V1).status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            invalid_request_body_response(SourceApi::Codex).status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
 }
 
 fn codex_live_stream_response(
@@ -18814,6 +19327,7 @@ fn record_request_error_with_health(
                 credential_file: context.credential_file.clone(),
                 model: context.model.clone(),
                 request_path: context.request_path.clone(),
+                api_key_id: state.request_api_key_id.clone(),
                 success: false,
                 error: true,
                 request_total: 1,
@@ -18865,6 +19379,7 @@ fn record_usage_success(state: &AppState, context: &UsageContext, metrics: &Usag
                 credential_file: context.credential_file.clone(),
                 model: context.model.clone(),
                 request_path: context.request_path.clone(),
+                api_key_id: state.request_api_key_id.clone(),
                 success: true,
                 error: false,
                 request_total: 1,

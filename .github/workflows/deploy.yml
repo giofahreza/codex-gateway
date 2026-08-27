@@ -115,7 +115,9 @@ jobs:
         run: cargo build --release --locked
 
       - name: Record checksum
-        run: sha256sum target/release/io-gateway > target/release/io-gateway.sha256
+        run: |
+          sha256sum target/release/io-gateway > target/release/io-gateway.sha256
+          sha256sum target/release/iogw > target/release/iogw.sha256
 
       - name: Upload release binary
         uses: actions/upload-artifact@v4
@@ -124,6 +126,8 @@ jobs:
           path: |
             target/release/io-gateway
             target/release/io-gateway.sha256
+            target/release/iogw
+            target/release/iogw.sha256
           if-no-files-found: error
 
   deploy:

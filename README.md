@@ -188,6 +188,16 @@ Swagger API docs:
 http://127.0.0.1:8319/docs/
 ```
 
+Terminal management client:
+
+```bash
+./target/release/iogw status
+./target/release/iogw login
+./target/release/iogw
+```
+
+`iogw` opens the interactive terminal UI by default. `iogw tui` is the explicit equivalent, and direct commands such as `iogw accounts list`, `iogw quota --refresh`, `iogw keys list`, `iogw models list`, and `iogw usage history` are available for scripts or remote administration.
+
 ## Example Client Config
 
 Codex CLI:

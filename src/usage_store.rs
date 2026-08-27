@@ -21,6 +21,8 @@ pub struct UsageHistoryEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub request_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_id: Option<String>,
     pub success: bool,
     pub error: bool,
     pub request_total: u64,
@@ -44,7 +46,38 @@ pub struct UsageHistoryQuery {
     pub limit: Option<usize>,
     pub provider: Option<String>,
     pub account_key: Option<String>,
+    pub api_key_id: Option<String>,
     pub model: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+pub struct UsageFilterSummaryQuery {
+    pub start_at: Option<String>,
+    pub end_at: Option<String>,
+    pub providers: Option<String>,
+    pub provider: Option<String>,
+    pub account_keys: Option<String>,
+    pub account_key: Option<String>,
+    pub api_key_ids: Option<String>,
+    pub api_key_id: Option<String>,
+}
+
+#[derive(Default, Serialize)]
+pub struct UsageFilterSummary {
+    pub requests: u64,
+    pub successes: u64,
+    pub errors: u64,
+    pub prompt_total: u64,
+    pub prompt_errors: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cache_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub input_chars: u64,
+    pub prompt_items: u64,
+    pub first_recorded_at: Option<String>,
+    pub last_recorded_at: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,10 +112,10 @@ pub fn append_batch(cfg: &crate::Config, entries: &[UsageHistoryEntry]) -> Resul
                     credential_file, model, request_path, success, error,
                     request_total, prompt_total, prompt_error_total, input_tokens,
                     output_tokens, total_tokens, cache_tokens, reasoning_tokens,
-                    input_chars, prompt_items, error_message, raw_usage
+                    input_chars, prompt_items, error_message, raw_usage, api_key_id
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                    ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+                    ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23
                 )",
             )
             .map_err(|err| err.to_string())?;
@@ -110,6 +143,10 @@ pub fn load(
     if let Some(account_key) = normalized_filter(query.account_key.as_deref()) {
         clauses.push("account_key = ?");
         values.push(account_key.to_string());
+    }
+    if let Some(api_key_id) = normalized_filter(query.api_key_id.as_deref()) {
+        clauses.push("api_key_id = ?");
+        values.push(api_key_id.to_string());
     }
     if let Some(model) = normalized_filter(query.model.as_deref()) {
         clauses.push("model = ?");
@@ -147,6 +184,91 @@ pub fn load(
         entries.reverse();
     }
     Ok(entries)
+}
+
+pub fn summarize_filtered(
+    cfg: &crate::Config,
+    query: &UsageFilterSummaryQuery,
+) -> Result<UsageFilterSummary, String> {
+    let connection = open_connection(cfg)?;
+    let mut clauses = Vec::new();
+    let mut values = Vec::<String>::new();
+
+    if let Some(start_at) = normalized_filter(query.start_at.as_deref()) {
+        clauses.push("recorded_at >= ?".to_string());
+        values.push(start_at.to_string());
+    }
+    if let Some(end_at) = normalized_filter(query.end_at.as_deref()) {
+        clauses.push("recorded_at <= ?".to_string());
+        values.push(end_at.to_string());
+    }
+    push_list_clause(
+        &mut clauses,
+        &mut values,
+        "lower(provider)",
+        query.providers.as_deref().or(query.provider.as_deref()),
+        true,
+    );
+    push_list_clause(
+        &mut clauses,
+        &mut values,
+        "account_key",
+        query
+            .account_keys
+            .as_deref()
+            .or(query.account_key.as_deref()),
+        false,
+    );
+    push_list_clause(
+        &mut clauses,
+        &mut values,
+        "api_key_id",
+        query.api_key_ids.as_deref().or(query.api_key_id.as_deref()),
+        false,
+    );
+
+    let mut sql = "SELECT
+            COALESCE(SUM(request_total), 0),
+            COALESCE(SUM(CASE WHEN success != 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN error != 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(prompt_total), 0),
+            COALESCE(SUM(prompt_error_total), 0),
+            COALESCE(SUM(input_tokens), 0),
+            COALESCE(SUM(output_tokens), 0),
+            COALESCE(SUM(total_tokens), 0),
+            COALESCE(SUM(cache_tokens), 0),
+            COALESCE(SUM(reasoning_tokens), 0),
+            COALESCE(SUM(input_chars), 0),
+            COALESCE(SUM(prompt_items), 0),
+            MIN(recorded_at),
+            MAX(recorded_at)
+        FROM usage_history"
+        .to_string();
+    if !clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&clauses.join(" AND "));
+    }
+
+    connection
+        .query_row(&sql, params_from_iter(values.iter()), |row| {
+            Ok(UsageFilterSummary {
+                requests: row.get::<_, i64>(0)?.max(0) as u64,
+                successes: row.get::<_, i64>(1)?.max(0) as u64,
+                errors: row.get::<_, i64>(2)?.max(0) as u64,
+                prompt_total: row.get::<_, i64>(3)?.max(0) as u64,
+                prompt_errors: row.get::<_, i64>(4)?.max(0) as u64,
+                input_tokens: row.get::<_, i64>(5)?.max(0) as u64,
+                output_tokens: row.get::<_, i64>(6)?.max(0) as u64,
+                total_tokens: row.get::<_, i64>(7)?.max(0) as u64,
+                cache_tokens: row.get::<_, i64>(8)?.max(0) as u64,
+                reasoning_tokens: row.get::<_, i64>(9)?.max(0) as u64,
+                input_chars: row.get::<_, i64>(10)?.max(0) as u64,
+                prompt_items: row.get::<_, i64>(11)?.max(0) as u64,
+                first_recorded_at: row.get(12)?,
+                last_recorded_at: row.get(13)?,
+            })
+        })
+        .map_err(|err| err.to_string())
 }
 
 pub fn aggregate_context(
@@ -282,7 +404,7 @@ pub fn prune(cfg: &crate::Config, retention_days: u64, max_entries: usize) -> Re
 const HISTORY_COLUMNS: &str = "recorded_at, provider, account_key, account_label, account_id,
     credential_file, model, request_path, success, error, request_total, prompt_total,
     prompt_error_total, input_tokens, output_tokens, total_tokens, cache_tokens,
-    reasoning_tokens, input_chars, prompt_items, error_message, raw_usage";
+    reasoning_tokens, input_chars, prompt_items, error_message, raw_usage, api_key_id";
 
 fn open_connection(cfg: &crate::Config) -> Result<Connection, String> {
     let path = history_db_path(cfg);
@@ -320,7 +442,8 @@ fn open_connection(cfg: &crate::Config) -> Result<Connection, String> {
                 input_chars INTEGER NOT NULL,
                 prompt_items INTEGER NOT NULL,
                 error_message TEXT,
-                raw_usage TEXT
+                raw_usage TEXT,
+                api_key_id TEXT
              );
              CREATE TABLE IF NOT EXISTS usage_metadata (
                 key TEXT PRIMARY KEY,
@@ -340,8 +463,33 @@ fn open_connection(cfg: &crate::Config) -> Result<Connection, String> {
                 ON usage_history(account_key, success, recorded_at);",
         )
         .map_err(|err| err.to_string())?;
+    ensure_optional_columns(&connection)?;
     import_legacy_jsonl_once(cfg, &mut connection)?;
     Ok(connection)
+}
+
+fn ensure_optional_columns(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(usage_history)")
+        .map_err(|err| err.to_string())?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|err| err.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    if !columns.iter().any(|column| column == "api_key_id") {
+        connection
+            .execute("ALTER TABLE usage_history ADD COLUMN api_key_id TEXT", [])
+            .map_err(|err| err.to_string())?;
+    }
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_api_key_recorded_at
+                ON usage_history(api_key_id, recorded_at)",
+            [],
+        )
+        .map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 fn import_legacy_jsonl_once(
@@ -371,7 +519,7 @@ fn import_legacy_jsonl_once(
             .prepare_cached(&format!(
                 "INSERT INTO usage_history ({}) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                    ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+                    ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23
                 )",
                 HISTORY_COLUMNS
             ))
@@ -423,6 +571,7 @@ fn insert_entry(
             entry.prompt_items as i64,
             &entry.error_message,
             &raw_usage,
+            &entry.api_key_id,
         ])
         .map(|_| ())
         .map_err(|err| err.to_string())
@@ -455,7 +604,42 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageHistoryEntry> 
         prompt_items: row.get::<_, i64>(19)?.max(0) as u64,
         error_message: row.get(20)?,
         raw_usage,
+        api_key_id: row.get(22)?,
     })
+}
+
+fn push_list_clause(
+    clauses: &mut Vec<String>,
+    values: &mut Vec<String>,
+    column: &str,
+    raw: Option<&str>,
+    lowercase: bool,
+) {
+    let items = split_filter_list(raw);
+    if items.is_empty() {
+        return;
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(items.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    clauses.push(format!("{} IN ({})", column, placeholders));
+    values.extend(items.into_iter().map(|item| {
+        if lowercase {
+            item.to_ascii_lowercase()
+        } else {
+            item
+        }
+    }));
+}
+
+fn split_filter_list(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn read_legacy_jsonl(cfg: &crate::Config) -> Result<Vec<UsageHistoryEntry>, String> {
@@ -527,6 +711,7 @@ mod tests {
             credential_file: None,
             model: Some(model.to_string()),
             request_path: "/responses".to_string(),
+            api_key_id: None,
             success: true,
             error: false,
             request_total: 1,
@@ -570,6 +755,7 @@ mod tests {
             &UsageHistoryQuery {
                 provider: Some("CODEX".to_string()),
                 account_key: Some("a".to_string()),
+                api_key_id: None,
                 limit: Some(1),
                 model: None,
             },
@@ -641,6 +827,44 @@ mod tests {
         assert_eq!(rows[0].model.as_deref(), Some("gpt-a"));
         assert_eq!(rows[0].request_count, 2);
         assert_eq!(rows[0].total_tokens, 30);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn filtered_summary_combines_datetime_provider_account_and_api_key_filters() {
+        let dir = temp_dir();
+        let cfg = test_config(&dir);
+        let mut first = entry("2026-01-01T00:00:00Z", "codex", "a", "gpt-a");
+        first.api_key_id = Some("key-one".to_string());
+        let mut second = entry("2026-01-01T00:10:00Z", "codex", "b", "gpt-b");
+        second.api_key_id = Some("key-two".to_string());
+        let mut third = entry("2026-01-01T00:20:00Z", "gemini", "a", "gemini-a");
+        third.api_key_id = Some("key-one".to_string());
+        third.error = true;
+        third.success = false;
+        third.prompt_error_total = 1;
+        append_batch(&cfg, &[first, second, third]).unwrap();
+
+        let summary = summarize_filtered(
+            &cfg,
+            &UsageFilterSummaryQuery {
+                start_at: Some("2026-01-01T00:00:01Z".to_string()),
+                end_at: Some("2026-01-01T00:30:00Z".to_string()),
+                providers: Some("codex,gemini".to_string()),
+                account_keys: Some("a".to_string()),
+                api_key_ids: Some("key-one".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.requests, 1);
+        assert_eq!(summary.errors, 1);
+        assert_eq!(summary.total_tokens, 15);
+        assert_eq!(
+            summary.first_recorded_at.as_deref(),
+            Some("2026-01-01T00:20:00Z")
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

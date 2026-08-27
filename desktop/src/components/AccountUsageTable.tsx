@@ -34,7 +34,6 @@ type MergedRow = {
   lastSuccessAt?: string | null;
   lastErrorMessage?: string | null;
   quota: QuotaAccount | null;
-  usageOnly: boolean;
 };
 
 const PROVIDERS = ['codex', 'agw', 'gemini', 'qwen', 'deepseek', 'grok', 'minimax', 'copilot', 'claude', 'glm'];
@@ -114,7 +113,7 @@ export function AccountUsageTable({ accounts, snapshot, compact }: Props) {
                 <td data-label="Status">
                   <span className={`row-status ${row.lastErrorMessage ? 'bad' : 'ok'}`}>
                     {row.lastErrorMessage ? <AlertTriangle size={14} /> : <CheckCircle2 size={14} />}
-                    {row.lastErrorMessage || row.lastSuccessAt || (row.usageOnly ? 'No activity' : 'Quota only')}
+                    {row.lastErrorMessage || row.lastSuccessAt || (row.quota ? 'Quota only' : 'No activity')}
                   </span>
                 </td>
               </tr>
@@ -183,42 +182,26 @@ type AccountProfile = {
 
 function mergeRows(accounts: AccountUsage[], quotaAccounts: QuotaAccount[], profiles: AccountProfile[]): MergedRow[] {
   const usedQuota = new Set<number>();
-  const rows: MergedRow[] = accounts.map((account) => {
-    const quotaIndex = bestQuotaIndex(account, quotaAccounts, usedQuota);
+  const usedUsage = new Set<number>();
+  const rows: MergedRow[] = profiles.map((profile) => {
+    const usage = aggregateUsageForProfile(profile, accounts, usedUsage);
+    const key = profile.keys[0] || profile.displayName;
+    const quotaIndex = bestQuotaIndexForKeys(profile.provider, profile.keys, quotaAccounts, usedQuota);
     const quota = quotaIndex == null ? null : quotaAccounts[quotaIndex];
-    const profile = bestProfile(account, profiles);
     if (quotaIndex != null) usedQuota.add(quotaIndex);
-    const displayName = profile?.displayName || quota?.label || readableAccountName(account.key);
     return {
-      provider: normalizeProvider(account.provider),
-      key: account.key,
-      displayName,
-      requests: account.requests,
-      errors: account.errors,
-      totalTokens: account.totalTokens,
-      inputTokens: account.inputTokens,
-      outputTokens: account.outputTokens,
-      lastSuccessAt: account.lastSuccessAt,
-      lastErrorMessage: account.lastErrorMessage,
+      provider: profile.provider,
+      key,
+      displayName: profile.displayName || quota?.label || readableAccountName(key),
+      requests: usage?.requests ?? 0,
+      errors: usage?.errors ?? 0,
+      totalTokens: usage?.totalTokens ?? 0,
+      inputTokens: usage?.inputTokens ?? 0,
+      outputTokens: usage?.outputTokens ?? 0,
+      lastSuccessAt: usage?.lastSuccessAt,
+      lastErrorMessage: usage?.lastErrorMessage,
       quota,
-      usageOnly: true,
     };
-  });
-
-  quotaAccounts.forEach((quota, index) => {
-    if (usedQuota.has(index)) return;
-    rows.push({
-      provider: quota.provider,
-      key: quota.label,
-      displayName: quota.label,
-      requests: 0,
-      errors: 0,
-      totalTokens: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      quota,
-      usageOnly: false,
-    });
   });
 
   return rows.sort((a, b) => b.totalTokens - a.totalTokens || b.requests - a.requests || a.provider.localeCompare(b.provider));
@@ -236,23 +219,78 @@ function groupRows(rows: MergedRow[]): Array<{ provider: string; rows: MergedRow
     .map(([provider, groupRows]) => ({ provider, rows: groupRows }));
 }
 
-function bestQuotaIndex(account: AccountUsage, rows: QuotaAccount[], used: Set<number>): number | null {
-  const provider = normalizeProvider(account.provider);
-  const accountKey = normalize(account.key);
+function bestQuotaIndexForKeys(provider: string, keys: string[], rows: QuotaAccount[], used: Set<number>): number | null {
+  const accountKeys = normalizedMatchKeys(keys);
   const providerRows = rows
     .map((row, index) => ({ row, index }))
     .filter(({ row, index }) => row.provider === provider && !used.has(index));
   if (providerRows.length === 0) return null;
-  const exact = providerRows.find(({ row }) => row.keys.some((key) => normalize(key) === accountKey));
+  const exact = providerRows.find(({ row }) => normalizedMatchKeys(row.keys).some((key) => accountKeys.includes(key)));
   if (exact) return exact.index;
   const fuzzy = providerRows.find(({ row }) =>
-    row.keys.some((key) => {
-      const normalized = normalize(key);
-      return Boolean(normalized && accountKey && (normalized.includes(accountKey) || accountKey.includes(normalized)));
-    }),
+    normalizedMatchKeys(row.keys).some((key) => accountKeys.some((accountKey) => fuzzyKeyMatch(key, accountKey))),
   );
   if (fuzzy) return fuzzy.index;
   return providerRows.length === 1 ? providerRows[0].index : null;
+}
+
+function aggregateUsageForProfile(profile: AccountProfile, accounts: AccountUsage[], used: Set<number>): AccountUsage | null {
+  const matches = bestUsageIndexes(profile, accounts, used);
+  matches.forEach((index) => used.add(index));
+  if (matches.length === 0) return null;
+
+  let lastErrorAt: string | null = null;
+  let lastErrorMessage: string | null = null;
+  const usage = matches.reduce<AccountUsage>(
+    (total, index) => {
+      const account = accounts[index];
+      total.requests += account.requests;
+      total.errors += account.errors;
+      total.inputTokens += account.inputTokens;
+      total.outputTokens += account.outputTokens;
+      total.totalTokens += account.totalTokens;
+      total.cacheTokens += account.cacheTokens;
+      total.reasoningTokens += account.reasoningTokens;
+      total.lastSuccessAt = latestTimestamp(total.lastSuccessAt, account.lastSuccessAt);
+      if (account.lastErrorAt && (!lastErrorAt || account.lastErrorAt > lastErrorAt)) {
+        lastErrorAt = account.lastErrorAt;
+        lastErrorMessage = account.lastErrorMessage ?? null;
+      } else if (!lastErrorMessage && account.lastErrorMessage) {
+        lastErrorMessage = account.lastErrorMessage;
+      }
+      return total;
+    },
+    {
+      key: profile.keys[0] || profile.displayName,
+      provider: profile.provider,
+      requests: 0,
+      errors: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      cacheTokens: 0,
+      reasoningTokens: 0,
+      lastSuccessAt: null,
+      lastErrorAt: null,
+      lastErrorMessage: null,
+    },
+  );
+  usage.lastErrorAt = lastErrorAt;
+  usage.lastErrorMessage = lastErrorMessage;
+  return usage;
+}
+
+function bestUsageIndexes(profile: AccountProfile, accounts: AccountUsage[], used: Set<number>): number[] {
+  const provider = normalizeProvider(profile.provider);
+  const profileKeys = normalizedMatchKeys(profile.keys);
+  const providerRows = accounts
+    .map((account, index) => ({ account, index }))
+    .filter(({ account, index }) => normalizeProvider(account.provider) === provider && !used.has(index));
+  const exact = providerRows.filter(({ account }) => profileKeys.includes(normalize(account.key)));
+  if (exact.length > 0) return exact.map(({ index }) => index);
+  return providerRows
+    .filter(({ account }) => profileKeys.some((key) => fuzzyKeyMatch(key, normalize(account.key))))
+    .map(({ index }) => index);
 }
 
 function allQuotaAccounts(snapshot: DashboardSnapshot | null): QuotaAccount[] {
@@ -328,20 +366,6 @@ function quotaAccount(provider: string, item: unknown): QuotaAccount {
     bars: quotaBars(normalizedProvider, record),
     status: firstString(record, ['status_msg', 'message', 'status', 'note', 'balance_note']),
   };
-}
-
-function bestProfile(account: AccountUsage, profiles: AccountProfile[]): AccountProfile | null {
-  const provider = normalizeProvider(account.provider);
-  const accountKey = normalize(account.key);
-  const providerProfiles = profiles.filter((profile) => profile.provider === provider);
-  const exact = providerProfiles.find((profile) => profile.keys.some((key) => normalize(key) === accountKey));
-  if (exact) return exact;
-  return providerProfiles.find((profile) =>
-    profile.keys.some((key) => {
-      const normalized = normalize(key);
-      return Boolean(normalized && accountKey && (normalized.includes(accountKey) || accountKey.includes(normalized)));
-    }),
-  ) ?? null;
 }
 
 function quotaBars(provider: string, quota: Record<string, unknown>): QuotaBar[] {
@@ -620,6 +644,19 @@ function stringOrNumber(value: unknown): string | null {
 
 function normalize(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function normalizedMatchKeys(values: string[]): string[] {
+  return uniqueStrings(values.map((value) => normalize(value)).filter((value) => value.length >= 3));
+}
+
+function fuzzyKeyMatch(a: string, b: string): boolean {
+  return Boolean(a.length >= 6 && b.length >= 6 && (a.includes(b) || b.includes(a)));
+}
+
+function latestTimestamp(current?: string | null, incoming?: string | null): string | null {
+  if (current && incoming) return current > incoming ? current : incoming;
+  return current || incoming || null;
 }
 
 function clamp(value: number) {
