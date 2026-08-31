@@ -7637,7 +7637,7 @@ async fn dashboard() -> impl IntoResponse {
     <div id="addGeminiModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="addGeminiTitle" aria-hidden="true" style="display:none;">
       <div class="modal-card">
         <h2 id="addGeminiTitle" style="margin-top:0;">Add Gemini Account</h2>
-        <p>Click start, complete Google OAuth, then paste the final callback URL below. If your Google account has multiple Cloud projects, provide one project ID.</p>
+        <p>Click start, complete Google OAuth, then paste the final callback URL below. Individual accounts should leave Project ID empty so Google can provide a managed Code Assist project.</p>
         <button onclick="startGeminiLogin()">Start Login</button>
         <div id="geminiStatus" class="muted" style="margin-top:8px;"></div>
         <pre id="geminiAuthUrl" class="auth-url"></pre>
@@ -7645,8 +7645,8 @@ async fn dashboard() -> impl IntoResponse {
           <label for="geminiRedirectInput">Callback URL</label>
           <input id="geminiRedirectInput" name="redirect_url" placeholder="http://localhost:8085/oauth2callback?code=...&state=...">
           <label for="geminiProjectInput" style="margin-top:12px;">Project ID</label>
-          <input id="geminiProjectInput" name="project_id" placeholder="optional, but recommended when multiple GCP projects exist">
-          <div class="muted" style="margin-top:8px;">Leave Project ID empty to let the gateway use the detected project. If multiple projects exist and no default is exposed, login will ask you to retry with one explicit project ID.</div>
+          <input id="geminiProjectInput" name="project_id" placeholder="required only for Workspace or subscription accounts">
+          <div class="muted" style="margin-top:8px;">Provide a Project ID only when your organization or Gemini Code Assist subscription requires one. The project must already have the required API and IAM access.</div>
           <div class="modal-actions" style="margin-top:8px;">
             <button type="submit">Submit</button>
             <button type="button" id="closeGeminiModalBtn" class="secondary-button">Close</button>
@@ -13354,10 +13354,7 @@ async fn proxy(
 
 fn valid_content_length(headers: &HeaderMap) -> Option<u64> {
     let mut parsed = None;
-    for value in headers
-        .get_all(axum::http::header::CONTENT_LENGTH)
-        .iter()
-    {
+    for value in headers.get_all(axum::http::header::CONTENT_LENGTH).iter() {
         let value = value.to_str().ok()?;
         for item in value.split(',') {
             let item = item.trim();
@@ -13482,9 +13479,7 @@ mod request_body_limit_tests {
         let accepted = to_bytes(Body::from(vec![0_u8; 8]), 8).await.unwrap();
         assert_eq!(accepted.len(), 8);
 
-        let overflow = to_bytes(Body::from(vec![0_u8; 9]), 8)
-            .await
-            .unwrap_err();
+        let overflow = to_bytes(Body::from(vec![0_u8; 9]), 8).await.unwrap_err();
         assert!(is_length_limit_error(&overflow));
 
         let unrelated = std::io::Error::new(std::io::ErrorKind::Other, "body read failed");
@@ -13500,10 +13495,7 @@ mod request_body_limit_tests {
 
         assert_eq!(value["error"]["code"], "request_body_too_large");
         assert_eq!(value["error"]["details"]["limit_bytes"], 16);
-        assert_eq!(
-            value["error"]["details"]["content_length_bytes"],
-            17
-        );
+        assert_eq!(value["error"]["details"]["content_length_bytes"], 17);
         assert!(value["error"]["message"]
             .as_str()
             .unwrap()

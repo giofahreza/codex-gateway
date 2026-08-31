@@ -195,16 +195,9 @@ async fn fetch_tier_info(
     access_token: &str,
     project_id: &str,
 ) -> Result<TierInfo, String> {
-    let mut body = json!({
-        "metadata": {
-            "ideType": "IDE_UNSPECIFIED",
-            "platform": "PLATFORM_UNSPECIFIED",
-            "pluginType": "GEMINI"
-        }
-    });
-    if !project_id.trim().is_empty() {
-        body["cloudaicompanionProject"] = serde_json::Value::String(project_id.to_string());
-    }
+    let body = super::auth::build_load_code_assist_request(
+        (!project_id.trim().is_empty()).then_some(project_id),
+    );
 
     let value = post_gemini_json(client, access_token, "v1internal:loadCodeAssist", &body).await?;
     let current = value

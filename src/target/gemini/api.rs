@@ -64,7 +64,8 @@ pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) ->
         }
     };
 
-    match fetch_models(&state.client, &access_token).await {
+    let project_id = super::auth::request_project_id(&account);
+    match fetch_models(&state.client, &access_token, &project_id).await {
         Ok(body) => (StatusCode::OK, [("Content-Type", "application/json")], body).into_response(),
         Err(err) => {
             let data = MODEL_FALLBACKS
@@ -267,12 +268,24 @@ pub async fn responses(
         .into_response()
 }
 
-async fn fetch_models(client: &reqwest::Client, access_token: &str) -> Result<Vec<u8>, String> {
+async fn fetch_models(
+    client: &reqwest::Client,
+    access_token: &str,
+    project_id: &str,
+) -> Result<Vec<u8>, String> {
+    let body = if project_id.trim().is_empty() {
+        json!({})
+    } else {
+        json!({ "project": project_id })
+    };
     let resp = super::auth::gemini_headers(
         client
-            .post("https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels")
+            .post(format!(
+                "{}/v1internal:fetchAvailableModels",
+                super::auth::gemini_cli_base_url()
+            ))
             .header("Content-Type", "application/json")
-            .body("{}")
+            .body(body.to_string())
             .timeout(Duration::from_secs(30)),
         access_token,
     )
@@ -321,7 +334,10 @@ async fn send_generate_request(
 ) -> Result<serde_json::Value, (StatusCode, String)> {
     let resp = super::auth::gemini_headers(
         client
-            .post("https://cloudcode-pa.googleapis.com/v1internal:generateContent")
+            .post(format!(
+                "{}/v1internal:generateContent",
+                super::auth::gemini_cli_base_url()
+            ))
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
             .body(payload.to_string())

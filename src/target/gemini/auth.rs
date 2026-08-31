@@ -1,6 +1,6 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use rand::Rng;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::time::Duration;
 use url::Url;
 
@@ -8,13 +8,13 @@ use super::super::oauth::{provider_config, OAuthProvider};
 use super::accounts::GeminiAccount;
 
 const GOOGLE_USER_INFO_URL: &str = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json";
-const GOOGLE_PROJECTS_URL: &str = "https://cloudresourcemanager.googleapis.com/v1/projects";
-const SERVICE_USAGE_URL: &str = "https://serviceusage.googleapis.com";
 const GEMINI_CLI_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
 const GEMINI_CLI_USER_AGENT: &str = "google-api-nodejs-client/9.15.1";
 const GEMINI_CLI_API_CLIENT: &str = "gl-node/22.17.0";
 const GEMINI_CLI_CLIENT_METADATA: &str =
     "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI";
+const GEMINI_FREE_TIER_ID: &str = "free-tier";
+const GEMINI_LEGACY_TIER_ID: &str = "legacy-tier";
 
 #[derive(Deserialize)]
 pub struct TokenResponse {
@@ -24,17 +24,10 @@ pub struct TokenResponse {
     pub expires_in: i64,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-pub struct GcpProject {
-    #[serde(rename = "projectId")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeminiSetup {
     pub project_id: String,
-    pub name: String,
-}
-
-#[derive(Deserialize)]
-struct ProjectsResponse {
-    #[serde(default)]
-    projects: Vec<GcpProject>,
+    pub auto_project: bool,
 }
 
 pub fn build_auth_url() -> Result<(String, String), String> {
@@ -187,213 +180,232 @@ pub async fn get_user_email(
         .ok_or_else(|| "user info missing email".to_string())
 }
 
-pub async fn fetch_projects(
-    client: &reqwest::Client,
-    access_token: &str,
-) -> Result<Vec<GcpProject>, String> {
-    let resp = client
-        .get(GOOGLE_PROJECTS_URL)
-        .bearer_auth(access_token)
-        .header("User-Agent", GEMINI_CLI_USER_AGENT)
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("failed to fetch projects: {}", body));
-    }
-
-    let value = resp
-        .json::<ProjectsResponse>()
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(value.projects)
-}
-
-pub async fn discover_project_id(
-    client: &reqwest::Client,
-    access_token: &str,
-    requested_project: Option<&str>,
-) -> Result<Option<String>, String> {
-    let mut body = serde_json::json!({
-        "metadata": {
-            "ideType": "IDE_UNSPECIFIED",
-            "platform": "PLATFORM_UNSPECIFIED",
-            "pluginType": "GEMINI"
-        }
-    });
-    if let Some(project_id) = requested_project
-        .map(str::trim)
-        .filter(|project_id| !project_id.is_empty())
-    {
-        body["cloudaicompanionProject"] = serde_json::Value::String(project_id.to_string());
-    }
-
-    let value = call_gemini_cli(client, access_token, "loadCodeAssist", &body).await?;
-    Ok(extract_project_id(&value))
-}
-
 pub async fn ensure_project_and_onboard(
     client: &reqwest::Client,
     access_token: &str,
     requested_project: &str,
-) -> Result<String, String> {
-    let metadata = serde_json::json!({
+) -> Result<GeminiSetup, String> {
+    let requested_project = requested_project
+        .trim()
+        .split(',')
+        .map(str::trim)
+        .find(|project_id| !project_id.is_empty())
+        .map(str::to_string);
+    let load_body = build_load_code_assist_request(requested_project.as_deref());
+
+    let load_resp = call_gemini_cli(client, access_token, "loadCodeAssist", &load_body).await?;
+    if let Some(error) = validation_required_error(&load_resp) {
+        return Err(error);
+    }
+    if has_current_tier(&load_resp) {
+        if let Some(project_id) = extract_project_id(&load_resp) {
+            return Ok(GeminiSetup {
+                project_id,
+                auto_project: requested_project.is_none(),
+            });
+        }
+        if let Some(project_id) = requested_project {
+            return Ok(GeminiSetup {
+                project_id,
+                auto_project: false,
+            });
+        }
+        return Err(project_required_error(&load_resp));
+    }
+
+    let tier_id = default_onboarding_tier(&load_resp);
+    // Gemini Code Assist for individuals provisions a managed project. The
+    // current official Gemini CLI deliberately omits the project for this tier.
+    let onboarding_project = onboarding_project_for_tier(&tier_id, requested_project.as_deref());
+    let onboard_body = build_onboarding_request(&tier_id, onboarding_project);
+    let started_at = std::time::Instant::now();
+    let mut onboard_resp =
+        call_gemini_cli(client, access_token, "onboardUser", &onboard_body).await?;
+
+    while !onboard_resp
+        .get("done")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        if started_at.elapsed() > Duration::from_secs(300) {
+            return Err("Gemini onboarding timed out".to_string());
+        }
+        let operation_name = onboard_resp
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "Gemini onboarding did not return an operation name".to_string())?;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        onboard_resp = get_gemini_cli_operation(client, access_token, operation_name).await?;
+    }
+
+    if let Some(error) = onboarding_operation_error(&onboard_resp) {
+        return Err(error);
+    }
+
+    if let Some(project_id) = onboard_resp.get("response").and_then(extract_project_id) {
+        return Ok(GeminiSetup {
+            project_id,
+            auto_project: onboarding_project.is_none(),
+        });
+    }
+    if let Some(project_id) = onboarding_project {
+        return Ok(GeminiSetup {
+            project_id: project_id.to_string(),
+            auto_project: false,
+        });
+    }
+    Err(project_required_error(&load_resp))
+}
+
+fn has_current_tier(value: &serde_json::Value) -> bool {
+    value.get("currentTier").is_some_and(|tier| !tier.is_null())
+}
+
+fn default_onboarding_tier(value: &serde_json::Value) -> String {
+    value
+        .get("allowedTiers")
+        .and_then(|tiers| tiers.as_array())
+        .and_then(|tiers| {
+            tiers.iter().find_map(|tier| {
+                tier.get("isDefault")
+                    .and_then(|is_default| is_default.as_bool())
+                    .filter(|is_default| *is_default)
+                    .and_then(|_| tier.get("id"))
+                    .and_then(|id| id.as_str())
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+            })
+        })
+        .unwrap_or_else(|| GEMINI_LEGACY_TIER_ID.to_string())
+}
+
+fn code_assist_metadata(project_id: Option<&str>) -> serde_json::Value {
+    let mut metadata = serde_json::json!({
         "ideType": "IDE_UNSPECIFIED",
         "platform": "PLATFORM_UNSPECIFIED",
         "pluginType": "GEMINI"
     });
-    let trimmed_request = requested_project.trim();
-    let explicit_project = !trimmed_request.is_empty();
-
-    let mut load_body = serde_json::json!({
-        "metadata": metadata.clone()
-    });
-    if explicit_project {
-        load_body["cloudaicompanionProject"] =
-            serde_json::Value::String(trimmed_request.to_string());
+    if let Some(project_id) = project_id
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty())
+    {
+        metadata["duetProject"] = serde_json::Value::String(project_id.to_string());
     }
+    metadata
+}
 
-    let load_resp = call_gemini_cli(client, access_token, "loadCodeAssist", &load_body).await?;
-    let tier_id = load_resp
-        .get("allowedTiers")
-        .and_then(|value| value.as_array())
-        .and_then(|tiers| {
-            tiers.iter().find_map(|tier| {
-                let is_default = tier
-                    .get("isDefault")
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(false);
-                if !is_default {
-                    return None;
-                }
-                tier.get("id")
-                    .and_then(|value| value.as_str())
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(|value| value.to_string())
-            })
-        })
-        .unwrap_or_else(|| "legacy-tier".to_string());
-
-    let project_id = if explicit_project {
-        trimmed_request.to_string()
-    } else {
-        extract_project_id(&load_resp)
-            .ok_or_else(|| "Gemini onboarding requires a Google Cloud project ID".to_string())?
-    };
-
-    let onboard_body = serde_json::json!({
-        "tierId": tier_id,
-        "metadata": metadata,
-        "cloudaicompanionProject": project_id.clone()
+pub(crate) fn build_load_code_assist_request(project_id: Option<&str>) -> serde_json::Value {
+    let project_id = project_id
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty());
+    let mut request = serde_json::json!({
+        "metadata": code_assist_metadata(project_id)
     });
-    let started_at = std::time::Instant::now();
+    if let Some(project_id) = project_id {
+        request["cloudaicompanionProject"] = serde_json::Value::String(project_id.to_string());
+    }
+    request
+}
 
-    loop {
-        let onboard_resp =
-            call_gemini_cli(client, access_token, "onboardUser", &onboard_body).await?;
-        if onboard_resp
-            .get("done")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
-        {
-            let response_project = onboard_resp
-                .get("response")
-                .and_then(extract_project_id)
-                .or_else(|| {
-                    onboard_resp
-                        .get("response")
-                        .and_then(|value| value.get("cloudaicompanionProject"))
-                        .and_then(|value| value.as_str())
-                        .map(|value| value.trim().to_string())
-                })
-                .filter(|value| !value.is_empty());
-            let final_project = if explicit_project {
-                project_id.clone()
-            } else {
-                response_project.unwrap_or_else(|| project_id.clone())
-            };
-            if final_project.trim().is_empty() {
-                return Err("Gemini onboarding completed without a project id".to_string());
-            }
-            return Ok(final_project);
-        }
+fn build_onboarding_request(tier_id: &str, project_id: Option<&str>) -> serde_json::Value {
+    let mut request = serde_json::json!({
+        "tierId": tier_id,
+        "metadata": code_assist_metadata(project_id)
+    });
+    if let Some(project_id) = project_id
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty())
+    {
+        request["cloudaicompanionProject"] = serde_json::Value::String(project_id.to_string());
+    }
+    request
+}
 
-        if started_at.elapsed() > Duration::from_secs(300) {
-            return Err("Gemini onboarding timed out".to_string());
-        }
-        tokio::time::sleep(Duration::from_secs(5)).await;
+fn onboarding_project_for_tier<'a>(
+    tier_id: &str,
+    requested_project: Option<&'a str>,
+) -> Option<&'a str> {
+    if tier_id.eq_ignore_ascii_case(GEMINI_FREE_TIER_ID) {
+        None
+    } else {
+        requested_project
     }
 }
 
-pub async fn ensure_cloud_api_enabled(
-    client: &reqwest::Client,
-    access_token: &str,
-    project_id: &str,
-) -> Result<(), String> {
-    let project_id = project_id.trim();
-    if project_id.is_empty() {
-        return Err("project id is required".to_string());
+fn project_required_error(load_resp: &serde_json::Value) -> String {
+    let reasons = load_resp
+        .get("ineligibleTiers")
+        .and_then(|tiers| tiers.as_array())
+        .map(|tiers| {
+            tiers
+                .iter()
+                .filter_map(|tier| tier.get("reasonMessage").and_then(|reason| reason.as_str()))
+                .map(str::trim)
+                .filter(|reason| !reason.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if reasons.is_empty() {
+        "Gemini Code Assist requires a Google Cloud project for this account; provide one only for an organization or subscription account".to_string()
+    } else {
+        format!(
+            "Gemini Code Assist account is not eligible: {}",
+            reasons.join("; ")
+        )
+    }
+}
+
+fn validation_required_error(load_resp: &serde_json::Value) -> Option<String> {
+    if has_current_tier(load_resp) {
+        return None;
     }
 
-    let service = "cloudaicompanion.googleapis.com";
-    let check_url = format!(
-        "{}/v1/projects/{}/services/{}",
-        SERVICE_USAGE_URL, project_id, service
-    );
-    let check_resp = client
-        .get(&check_url)
-        .bearer_auth(access_token)
-        .header("Content-Type", "application/json")
-        .header("User-Agent", GEMINI_CLI_USER_AGENT)
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let tier = load_resp
+        .get("ineligibleTiers")
+        .and_then(|tiers| tiers.as_array())?
+        .iter()
+        .find(|tier| {
+            tier.get("reasonCode")
+                .and_then(|reason| reason.as_str())
+                .is_some_and(|reason| reason.eq_ignore_ascii_case("VALIDATION_REQUIRED"))
+        })?;
+    let description = tier
+        .get("reasonMessage")
+        .and_then(|message| message.as_str())
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .unwrap_or("Google requires account verification");
+    let validation_url = tier
+        .get("validationUrl")
+        .and_then(|url| url.as_str())
+        .map(str::trim)
+        .filter(|url| !url.is_empty());
 
-    if check_resp.status().is_success() {
-        let body: serde_json::Value = check_resp.json().await.map_err(|e| e.to_string())?;
-        if body
-            .get("state")
-            .and_then(|value| value.as_str())
-            .map(|value| value.eq_ignore_ascii_case("ENABLED"))
-            .unwrap_or(false)
-        {
-            return Ok(());
-        }
-    }
+    Some(match validation_url {
+        Some(url) => format!(
+            "Gemini Code Assist account verification is required: {}. Open {}, complete verification, then start a new Gemini login.",
+            description, url
+        ),
+        None => format!(
+            "Gemini Code Assist account verification is required: {}. Complete the Google verification, then start a new Gemini login.",
+            description
+        ),
+    })
+}
 
-    let enable_url = format!(
-        "{}/v1/projects/{}/services/{}:enable",
-        SERVICE_USAGE_URL, project_id, service
-    );
-    let resp = client
-        .post(&enable_url)
-        .bearer_auth(access_token)
-        .header("Content-Type", "application/json")
-        .header("User-Agent", GEMINI_CLI_USER_AGENT)
-        .body("{}")
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if resp.status().is_success() {
-        return Ok(());
-    }
-
-    let body: serde_json::Value = resp.json().await.unwrap_or_default();
-    let message = body
-        .get("error")
-        .and_then(|value| value.get("message"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("project activation required");
-    if message.to_ascii_lowercase().contains("already enabled") {
-        return Ok(());
-    }
-    Err(format!("project activation required: {}", message))
+fn onboarding_operation_error(operation: &serde_json::Value) -> Option<String> {
+    let error = operation.get("error")?;
+    let message = error
+        .get("message")
+        .and_then(|message| message.as_str())
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| error.to_string());
+    Some(format!("Gemini onboarding failed: {}", message))
 }
 
 pub fn save_auth(
@@ -404,26 +416,32 @@ pub fn save_auth(
     auto: bool,
     checked: bool,
 ) -> Result<String, String> {
-    let refresh_token = token_resp
-        .refresh_token
-        .clone()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if refresh_token.is_empty() {
-        return Err("google oauth did not return a refresh token; retry consent flow".to_string());
-    }
-
     let expires_at =
         (Utc::now() + ChronoDuration::seconds(token_resp.expires_in.max(0))).to_rfc3339();
-    let file_name = credential_file_name(email, project_id);
     let auth_dir = state
         .cfg
         .auth_dir
         .clone()
         .unwrap_or_else(|| "/root/dev/yow/io-gateway/auths".to_string());
-    let path = std::path::Path::new(&auth_dir).join(file_name);
     std::fs::create_dir_all(&auth_dir).map_err(|e| e.to_string())?;
+    let generated_path =
+        std::path::Path::new(&auth_dir).join(credential_file_name(email, project_id));
+    let path = if auto {
+        existing_auto_managed_account_path(std::path::Path::new(&auth_dir), email)
+            .unwrap_or(generated_path)
+    } else {
+        generated_path
+    };
+    let refresh_token = token_resp
+        .refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .or_else(|| existing_refresh_token(&path))
+        .ok_or_else(|| {
+            "google oauth did not return a refresh token; retry consent flow".to_string()
+        })?;
 
     let client_id = env_client_id()?;
     let client_secret = env_client_secret()?;
@@ -527,6 +545,69 @@ fn extract_project_id(value: &serde_json::Value) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string())
+        .or_else(|| {
+            value
+                .get("project")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+}
+
+pub(crate) fn gemini_cli_base_url() -> String {
+    let provider = provider_config(None, OAuthProvider::Gemini);
+    provider
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(GEMINI_CLI_ENDPOINT)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn existing_auto_managed_account_path(
+    auth_dir: &std::path::Path,
+    email: &str,
+) -> Option<std::path::PathBuf> {
+    let mut entries = std::fs::read_dir(auth_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.path());
+
+    entries.into_iter().find_map(|entry| {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            return None;
+        }
+        let value = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())?;
+        let is_matching_account = value.get("type").and_then(|kind| kind.as_str())
+            == Some("gemini")
+            && value.get("auto").and_then(|auto| auto.as_bool()) == Some(true)
+            && value
+                .get("email")
+                .and_then(|candidate| candidate.as_str())
+                .is_some_and(|candidate| candidate.trim().eq_ignore_ascii_case(email.trim()));
+        is_matching_account.then_some(path)
+    })
+}
+
+fn existing_refresh_token(path: &std::path::Path) -> Option<String> {
+    let value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())?;
+    value
+        .get("token")
+        .and_then(|token| token.get("refresh_token"))
+        .or_else(|| value.get("refresh_token"))
+        .and_then(|token| token.as_str())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
 }
 
 async fn call_gemini_cli(
@@ -535,15 +616,7 @@ async fn call_gemini_cli(
     endpoint: &str,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let provider = provider_config(None, OAuthProvider::Gemini);
-    let base_url = provider
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(GEMINI_CLI_ENDPOINT)
-        .trim_end_matches('/')
-        .to_string();
+    let base_url = gemini_cli_base_url();
     let resp = gemini_headers(
         client
             .post(format!("{}/v1internal:{}", base_url, endpoint))
@@ -561,6 +634,39 @@ async fn call_gemini_cli(
     let text = resp.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
         return Err(format!("Gemini {} failed: {}", endpoint, text));
+    }
+
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+async fn get_gemini_cli_operation(
+    client: &reqwest::Client,
+    access_token: &str,
+    operation_name: &str,
+) -> Result<serde_json::Value, String> {
+    let operation_name = operation_name.trim().trim_start_matches('/');
+    if operation_name.is_empty() {
+        return Err("Gemini onboarding operation name is empty".to_string());
+    }
+    let base_url = gemini_cli_base_url();
+    let resp = gemini_headers(
+        client
+            .get(format!("{}/v1internal/{}", base_url, operation_name))
+            .header("Accept", "application/json")
+            .timeout(Duration::from_secs(30)),
+        access_token,
+    )
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "Gemini onboarding operation {} failed: {}",
+            operation_name, text
+        ));
     }
 
     serde_json::from_str(&text).map_err(|e| e.to_string())
@@ -738,4 +844,123 @@ fn required_config(value: &Option<String>, field_name: &str) -> Result<String, S
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string())
         .ok_or_else(|| format!("{} is required for Gemini OAuth login", field_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn free_tier_onboarding_uses_a_managed_project() {
+        let project = onboarding_project_for_tier(GEMINI_FREE_TIER_ID, Some("user-project"));
+        let body = build_onboarding_request(GEMINI_FREE_TIER_ID, project);
+
+        assert!(body.get("cloudaicompanionProject").is_none());
+        assert!(body["metadata"].get("duetProject").is_none());
+        assert_eq!(body["tierId"], GEMINI_FREE_TIER_ID);
+    }
+
+    #[test]
+    fn load_request_uses_the_explicit_project_in_code_assist_metadata() {
+        let body = build_load_code_assist_request(Some("organization-project"));
+
+        assert_eq!(body["cloudaicompanionProject"], "organization-project");
+        assert_eq!(body["metadata"]["duetProject"], "organization-project");
+    }
+
+    #[test]
+    fn organization_tier_includes_the_configured_project_everywhere() {
+        let project = onboarding_project_for_tier("standard-tier", Some("organization-project"));
+        let body = build_onboarding_request("standard-tier", project);
+
+        assert_eq!(body["cloudaicompanionProject"], "organization-project");
+        assert_eq!(body["metadata"]["duetProject"], "organization-project");
+    }
+
+    #[test]
+    fn default_tier_uses_google_free_tier_when_available() {
+        let response = json!({
+            "allowedTiers": [
+                { "id": "standard-tier", "isDefault": false },
+                { "id": GEMINI_FREE_TIER_ID, "isDefault": true }
+            ]
+        });
+
+        assert_eq!(default_onboarding_tier(&response), GEMINI_FREE_TIER_ID);
+    }
+
+    #[test]
+    fn extract_project_id_accepts_code_assist_response_shapes() {
+        assert_eq!(
+            extract_project_id(&json!({ "cloudaicompanionProject": { "id": "managed-project" } })),
+            Some("managed-project".to_string())
+        );
+        assert_eq!(
+            extract_project_id(&json!({ "project": "legacy-project" })),
+            Some("legacy-project".to_string())
+        );
+    }
+
+    #[test]
+    fn validation_required_response_includes_the_google_verification_link() {
+        let error = validation_required_error(&json!({
+            "currentTier": null,
+            "ineligibleTiers": [{
+                "reasonCode": "VALIDATION_REQUIRED",
+                "reasonMessage": "Verify this account",
+                "validationUrl": "https://accounts.google.com/verify"
+            }]
+        }))
+        .unwrap();
+
+        assert!(error.contains("Verify this account"));
+        assert!(error.contains("https://accounts.google.com/verify"));
+    }
+
+    #[test]
+    fn onboarding_operation_error_is_not_reported_as_a_missing_project() {
+        let error = onboarding_operation_error(&json!({
+            "done": true,
+            "error": { "message": "Google rejected the requested tier" }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            error,
+            "Gemini onboarding failed: Google rejected the requested tier"
+        );
+    }
+
+    #[test]
+    fn auto_managed_relogin_reuses_the_existing_account_file() {
+        let auth_dir = std::env::temp_dir().join(format!(
+            "io-gateway-gemini-auth-tests-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&auth_dir).unwrap();
+        let existing_path = auth_dir.join("gemini-person-old-project.json");
+        std::fs::write(
+            &existing_path,
+            json!({
+                "type": "gemini",
+                "email": "person@example.com",
+                "auto": true,
+                "token": { "refresh_token": "existing-refresh-token" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            existing_auto_managed_account_path(&auth_dir, "PERSON@example.com"),
+            Some(existing_path.clone())
+        );
+        assert_eq!(
+            existing_refresh_token(&existing_path),
+            Some("existing-refresh-token".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(auth_dir);
+    }
 }

@@ -566,9 +566,9 @@ Antigravity models include advanced Gemini variants and image generation:
 
 ---
 
-### Gemini (Google AI Studio)
+### Gemini (Google Code Assist)
 
-OAuth flow using Google credentials. Same flow as Antigravity. From the dashboard, click **+ Add account → Gemini (Google)**.
+OAuth flow using the official Gemini Code Assist Google client. From the dashboard, click **+ Add account → Gemini (Google)**. Individual Google accounts should leave Project ID empty so Google can provision or return its managed Code Assist project. Workspace, organization, and Gemini Code Assist subscription accounts must provide a project that already has the required Gemini API and IAM access.
 
 Standard Gemini models: `gem:gemini-2.5-pro`, `gem:gemini-2.5-flash`, `gem:gemini-2.5-flash-lite`, `gem:gemini-3-pro`.
 

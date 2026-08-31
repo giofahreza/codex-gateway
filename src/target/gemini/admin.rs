@@ -4,6 +4,8 @@ use axum::{
 };
 use serde::Deserialize;
 
+const GEMINI_OAUTH_PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
 #[derive(Deserialize)]
 pub struct CallbackForm {
     pub redirect_url: String,
@@ -64,11 +66,9 @@ pub async fn login_start(State(state): State<crate::AppState>) -> impl IntoRespo
         }
     };
 
-    state
-        .gemini_oauth_pending
-        .lock()
-        .unwrap()
-        .insert(state_token.clone(), std::time::Instant::now());
+    let mut pending = state.gemini_oauth_pending.lock().unwrap();
+    pending.retain(|_, started_at| oauth_state_is_valid(*started_at));
+    pending.insert(state_token.clone(), std::time::Instant::now());
     axum::Json(serde_json::json!({ "url": url, "state": state_token })).into_response()
 }
 
@@ -97,13 +97,12 @@ pub async fn login_submit(
         }
     };
 
-    let removed = state
+    let started_at = state
         .gemini_oauth_pending
         .lock()
         .unwrap()
-        .remove(&state_token)
-        .is_some();
-    if !removed {
+        .remove(&state_token);
+    if !started_at.is_some_and(oauth_state_is_valid) {
         return axum::Json(serde_json::json!({
             "ok": false,
             "message": "invalid or expired state"
@@ -133,58 +132,14 @@ pub async fn login_submit(
         }
     };
 
-    let project_id = if !requested_project.is_empty() {
-        requested_project.clone()
-    } else {
-        if let Ok(Some(project_id)) =
-            super::auth::discover_project_id(&state.client, &token_resp.access_token, None).await
-        {
-            project_id
-        } else {
-            let projects =
-                match super::auth::fetch_projects(&state.client, &token_resp.access_token).await {
-                    Ok(projects) => projects,
-                    Err(err) => {
-                        return axum::Json(serde_json::json!({
-                            "ok": false,
-                            "message": err
-                        }))
-                        .into_response();
-                    }
-                };
-
-            if projects.len() == 1 {
-                projects[0].project_id.clone()
-            } else if projects.is_empty() {
-                return axum::Json(serde_json::json!({
-                    "ok": false,
-                    "message": "no Google Cloud projects were returned for this account; retry with an explicit project id"
-                }))
-                .into_response();
-            } else {
-                let project_list = projects
-                    .iter()
-                    .map(|project| format!("{} ({})", project.project_id, project.name))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return axum::Json(serde_json::json!({
-                    "ok": false,
-                    "message": format!("multiple Google Cloud projects found for this account; retry with a project id. Available projects: {}", project_list),
-                    "projects": projects
-                }))
-                .into_response();
-            }
-        }
-    };
-
-    let final_project = match super::auth::ensure_project_and_onboard(
+    let setup = match super::auth::ensure_project_and_onboard(
         &state.client,
         &token_resp.access_token,
-        &project_id,
+        &requested_project,
     )
     .await
     {
-        Ok(project_id) => project_id,
+        Ok(setup) => setup,
         Err(err) => {
             return axum::Json(serde_json::json!({
                 "ok": false,
@@ -194,26 +149,12 @@ pub async fn login_submit(
         }
     };
 
-    if let Err(err) = super::auth::ensure_cloud_api_enabled(
-        &state.client,
-        &token_resp.access_token,
-        &final_project,
-    )
-    .await
-    {
-        return axum::Json(serde_json::json!({
-            "ok": false,
-            "message": err
-        }))
-        .into_response();
-    }
-
     match super::auth::save_auth(
         &state,
         &email,
         &token_resp,
-        &final_project,
-        requested_project.is_empty(),
+        &setup.project_id,
+        setup.auto_project,
         true,
     ) {
         Ok(saved_path) => axum::Json(serde_json::json!({
@@ -226,5 +167,24 @@ pub async fn login_submit(
             "message": err
         }))
         .into_response(),
+    }
+}
+
+fn oauth_state_is_valid(started_at: std::time::Instant) -> bool {
+    started_at.elapsed() <= GEMINI_OAUTH_PENDING_TTL
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oauth_state_expires_after_five_minutes() {
+        assert!(oauth_state_is_valid(std::time::Instant::now()));
+        assert!(!oauth_state_is_valid(
+            std::time::Instant::now()
+                - GEMINI_OAUTH_PENDING_TTL
+                - std::time::Duration::from_secs(1)
+        ));
     }
 }
