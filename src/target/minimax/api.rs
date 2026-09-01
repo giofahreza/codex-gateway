@@ -123,7 +123,7 @@ pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) ->
                 .into_response(),
         },
         Err(err) => {
-            let data = MODEL_FALLBACKS
+            let mut data = MODEL_FALLBACKS
                 .iter()
                 .map(|id| {
                     json!({
@@ -134,6 +134,7 @@ pub async fn models(State(state): State<crate::AppState>, headers: HeaderMap) ->
                     })
                 })
                 .collect::<Vec<_>>();
+            append_media_models(&mut data);
             let body = serde_json::to_vec(&json!({
                 "object": "list",
                 "data": data,
@@ -522,7 +523,7 @@ fn models_to_openai_json(value: &Value) -> Result<Vec<u8>, String> {
         .or_else(|| value.as_array())
         .ok_or_else(|| "MiniMax models response was missing data".to_string())?;
 
-    let data = models
+    let mut data = models
         .iter()
         .filter_map(|model| {
             let id = model
@@ -537,6 +538,7 @@ fn models_to_openai_json(value: &Value) -> Result<Vec<u8>, String> {
             }))
         })
         .collect::<Vec<_>>();
+    append_media_models(&mut data);
 
     serde_json::to_vec(&json!({
         "object": "list",
@@ -544,6 +546,19 @@ fn models_to_openai_json(value: &Value) -> Result<Vec<u8>, String> {
         "models": data
     }))
     .map_err(|e| e.to_string())
+}
+
+fn append_media_models(data: &mut Vec<Value>) {
+    for media_model in super::media::media_model_records() {
+        let id = media_model.get("id").and_then(|value| value.as_str());
+        if id.is_some_and(|id| {
+            data.iter()
+                .any(|existing| existing.get("id").and_then(|value| value.as_str()) == Some(id))
+        }) {
+            continue;
+        }
+        data.push(media_model);
+    }
 }
 
 pub(super) fn build_chat_completions_payload(raw: &Value, model: &str) -> Result<Value, String> {
@@ -1650,6 +1665,16 @@ mod tests {
 
         assert_eq!(value["data"][0]["id"], "MiniMax-M3");
         assert_eq!(value["models"][0]["id"], "MiniMax-M3");
+        assert!(value["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| model["id"] == crate::target::minimax::media::IMAGE_MODEL));
+        assert!(value["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| model["id"] == crate::target::minimax::media::VIDEO_MODEL_H3));
     }
 
     #[test]

@@ -1420,6 +1420,7 @@ mod tests {
                 deepseek_accounts: Arc::new(Mutex::new(Vec::new())),
                 grok_accounts: Arc::new(Mutex::new(Vec::new())),
                 minimax_accounts: Arc::new(Mutex::new(Vec::new())),
+                minimax_video_tasks: Arc::new(Mutex::new(HashMap::new())),
                 copilot_accounts: Arc::new(Mutex::new(Vec::new())),
                 claude_accounts: Arc::new(Mutex::new(Vec::new())),
                 glm_accounts: Arc::new(Mutex::new(Vec::new())),

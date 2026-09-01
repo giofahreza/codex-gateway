@@ -42,7 +42,13 @@ fn target_from_unprefixed_model(model: &str) -> TargetModel {
         TargetModel::DeepSeek
     } else if lower.starts_with("grok") {
         TargetModel::Grok
-    } else if lower.starts_with("minimax") || lower.starts_with("abab") {
+    } else if matches!(lower.as_str(), "image-01" | "image-01-live")
+        || lower.starts_with("minimax")
+        || lower.starts_with("abab")
+        || lower.starts_with("t2v-")
+        || lower.starts_with("i2v-")
+        || lower.starts_with("s2v-")
+    {
         TargetModel::MiniMax
     } else if lower.starts_with("claude") {
         TargetModel::Claude
@@ -155,6 +161,10 @@ mod tests {
         assert_eq!(target_from_model("deepseek-v4-pro"), TargetModel::DeepSeek);
         assert_eq!(target_from_model("grok-4.3"), TargetModel::Grok);
         assert_eq!(target_from_model("MiniMax-M3"), TargetModel::MiniMax);
+        assert_eq!(target_from_model("image-01"), TargetModel::MiniMax);
+        assert_eq!(target_from_model("image-01-live"), TargetModel::MiniMax);
+        assert_eq!(target_from_model("T2V-01"), TargetModel::MiniMax);
+        assert_eq!(target_from_model("I2V-01-live"), TargetModel::MiniMax);
         assert_eq!(target_from_model("MiniMax-Text-01"), TargetModel::MiniMax);
         assert_eq!(target_from_model("abab6.5s-chat"), TargetModel::MiniMax);
         assert_eq!(target_from_model("minimax-text-01"), TargetModel::MiniMax);

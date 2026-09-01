@@ -81,6 +81,16 @@ pub fn resolve(path: &str, method: &Method) -> Result<String, RouteError> {
             })
         };
     }
+    if let Some(task_id) = upstream_path.strip_prefix("videos/") {
+        return if !task_id.is_empty() && !task_id.contains('/') && *method == Method::GET {
+            Ok(upstream_path)
+        } else {
+            Err(RouteError {
+                status: StatusCode::METHOD_NOT_ALLOWED,
+                message: "method not allowed for v1 video endpoint",
+            })
+        };
+    }
     Err(RouteError {
         status: StatusCode::NOT_FOUND,
         message: "v1 endpoint not found",

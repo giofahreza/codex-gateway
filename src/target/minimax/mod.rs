@@ -2,6 +2,7 @@ pub mod accounts;
 pub mod admin;
 pub mod anthropic;
 pub mod api;
+pub mod media;
 pub mod quota;
 pub mod responses_native;
 

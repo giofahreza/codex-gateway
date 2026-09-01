@@ -677,6 +677,59 @@ curl http://127.0.0.1:8319/v1/responses \
   -d '{"model":"MiniMax-M3","input":"say hi in one word"}'
 ```
 
+#### Image and video generation
+
+The OpenAI-style media routes select MiniMax from the model prefix and retain
+the provider's native request semantics:
+
+| Gateway route | MiniMax models | Result |
+|---|---|---|
+| `POST /v1/images/generations` | `min:image-01`, `min:image-01-live` | Synchronous image response with `data[].url` or `data[].b64_json` |
+| `POST /v1/videos/generations` | `min:MiniMax-H3`, `min:MiniMax-H3-Max`, or legacy Hailuo models | Async task response with `id` and `status_url` |
+| `GET /v1/videos/{task_id}` | N/A | Normalized task state and `url` after completion |
+
+`image-01-live` supports the provider's `subject_reference` array for
+character-reference image generation. H3/H3 Max use MiniMax's V2 video API and
+require Pay-as-you-go access: H3 supports 768P/2K and reference media, while
+H3 Max is the faster 480P/768P text or first/last-frame variant. The gateway
+also supports the legacy V1 Hailuo models (`MiniMax-Hailuo-2.3`,
+`MiniMax-Hailuo-2.3-Fast`, `MiniMax-Hailuo-02`, `T2V-01*`, `I2V-01*`, and
+`S2V-01`) for accounts that retain that entitlement.
+
+For the legacy models, `MiniMax-Hailuo-2.3` and
+`MiniMax-Hailuo-2.3-Fast` support `768P` (default) or `1080P` at 6 seconds;
+10-second output is `768P` only. `MiniMax-Hailuo-02` accepts `512P` only for
+first-frame image-to-video, while text-to-video and first/last-frame requests
+use `768P` or `1080P` (again, `768P` only at 10 seconds).
+
+```bash
+# Generate one image. Use response_format=b64_json to receive base64 instead.
+curl -sS http://127.0.0.1:8319/v1/images/generations \
+  -H "Authorization: Bearer $IO_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "min:image-01",
+    "prompt": "A small red ceramic cup on a white table",
+    "size": "1024x1024",
+    "response_format": "url"
+  }' | jq
+
+# Submit a legacy Hailuo video task, then poll until status is completed or failed.
+# Use min:MiniMax-H3 with duration 4-15 and resolution 768P/2K on a Pay-as-you-go key.
+task_id=$(curl -sS http://127.0.0.1:8319/v1/videos/generations \
+  -H "Authorization: Bearer $IO_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "min:MiniMax-Hailuo-2.3",
+    "prompt": "A small red ceramic cup slowly rotates on a white table",
+    "duration": 6,
+    "resolution": "768P"
+  }' | jq -r '.id')
+
+curl -sS "http://127.0.0.1:8319/v1/videos/$task_id" \
+  -H "Authorization: Bearer $IO_GATEWAY_KEY" | jq
+```
+
 #### Codex CLI config
 
 ```toml

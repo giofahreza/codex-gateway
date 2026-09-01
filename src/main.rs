@@ -121,6 +121,7 @@ struct AppState {
     qwen_accounts: Arc<Mutex<Vec<target::qwen::accounts::QwenAccount>>>,
     deepseek_accounts: Arc<Mutex<Vec<target::deepseek::accounts::DeepSeekAccount>>>,
     minimax_accounts: Arc<Mutex<Vec<target::minimax::accounts::MiniMaxAccount>>>,
+    minimax_video_tasks: Arc<Mutex<HashMap<String, target::minimax::media::VideoTaskBinding>>>,
     grok_accounts: Arc<Mutex<Vec<target::grok::accounts::GrokAccount>>>,
     copilot_accounts: Arc<Mutex<Vec<target::copilot::accounts::CopilotAccount>>>,
     claude_accounts: Arc<Mutex<Vec<target::claude::accounts::ClaudeAccount>>>,
@@ -544,6 +545,7 @@ async fn main() {
         deepseek_accounts: Arc::new(Mutex::new(deepseek_accounts)),
         grok_accounts: Arc::new(Mutex::new(grok_accounts)),
         minimax_accounts: Arc::new(Mutex::new(minimax_accounts)),
+        minimax_video_tasks: Arc::new(Mutex::new(HashMap::new())),
         copilot_accounts: Arc::new(Mutex::new(copilot_accounts)),
         claude_accounts: Arc::new(Mutex::new(claude_accounts)),
         glm_accounts: Arc::new(Mutex::new(glm_accounts)),
@@ -12842,6 +12844,27 @@ async fn proxy(
                     State(state),
                     headers,
                     routed.upstream_body,
+                )
+                .await
+                .into_response(),
+                "images/generations" => target::minimax::media::image_generations(
+                    State(state),
+                    headers,
+                    routed.upstream_body,
+                )
+                .await
+                .into_response(),
+                "videos/generations" => target::minimax::media::video_generations(
+                    State(state),
+                    headers,
+                    routed.upstream_body,
+                )
+                .await
+                .into_response(),
+                path if path.starts_with("videos/") => target::minimax::media::video_status(
+                    State(state),
+                    headers,
+                    path.trim_start_matches("videos/"),
                 )
                 .await
                 .into_response(),

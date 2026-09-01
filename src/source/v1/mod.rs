@@ -28,6 +28,15 @@ pub fn route_to_target(
         ));
     }
 
+    if *method == Method::GET && upstream_path.starts_with("videos/") {
+        return Ok(provider::convert(
+            crate::source::TargetModel::MiniMax,
+            upstream_path,
+            uri,
+            body,
+        ));
+    }
+
     if matches!(upstream_path.as_str(), "responses" | "responses/compact")
         && *method == Method::POST
     {
@@ -551,5 +560,59 @@ mod tests {
         )
         .unwrap();
         assert_eq!(agw_gemini.target, crate::source::TargetModel::Antigravity);
+    }
+
+    #[test]
+    fn route_to_target_routes_minimax_media_endpoints() {
+        let image_uri: Uri = "/v1/images/generations".parse().unwrap();
+        let image = route_to_target(
+            "/v1/images/generations",
+            &image_uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"min:image-01-live","prompt":"a cup"}"#),
+        )
+        .unwrap();
+        assert_eq!(image.target, crate::source::TargetModel::MiniMax);
+        assert_eq!(image.upstream_path, "images/generations");
+        let image_body: serde_json::Value = serde_json::from_slice(&image.upstream_body).unwrap();
+        assert_eq!(image_body["model"], "image-01-live");
+
+        let video_uri: Uri = "/v1/videos/generations".parse().unwrap();
+        let video = route_to_target(
+            "/v1/videos/generations",
+            &video_uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"min:MiniMax-H3","prompt":"a cup rotates"}"#),
+        )
+        .unwrap();
+        assert_eq!(video.target, crate::source::TargetModel::MiniMax);
+        assert_eq!(video.upstream_path, "videos/generations");
+
+        let legacy_video = route_to_target(
+            "/v1/videos/generations",
+            &video_uri,
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"min:MiniMax-Hailuo-2.3","prompt":"a cup rotates"}"#),
+        )
+        .unwrap();
+        assert_eq!(legacy_video.target, crate::source::TargetModel::MiniMax);
+        let legacy_body: serde_json::Value =
+            serde_json::from_slice(&legacy_video.upstream_body).unwrap();
+        assert_eq!(legacy_body["model"], "MiniMax-Hailuo-2.3");
+
+        let status_uri: Uri = "/v1/videos/task_123".parse().unwrap();
+        let status = route_to_target(
+            "/v1/videos/task_123",
+            &status_uri,
+            &Method::GET,
+            &HeaderMap::new(),
+            Bytes::new(),
+        )
+        .unwrap();
+        assert_eq!(status.target, crate::source::TargetModel::MiniMax);
+        assert_eq!(status.upstream_path, "videos/task_123");
     }
 }
