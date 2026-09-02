@@ -144,10 +144,10 @@
           <div class="docs-heading">
             <p class="eyebrow">Tutorials</p>
             <h1>Quick start</h1>
-            <dl class="docs-meta"><div><dt>Type</dt><dd>Tutorial</dd></div><div><dt>Applies to</dt><dd>New local and server installs</dd></div><div><dt>Docs version</dt><dd>v0.1.11+</dd></div><div><dt>Updated</dt><dd>July 28, 2026</dd></div></dl>
+            <dl class="docs-meta"><div><dt>Type</dt><dd>Tutorial</dd></div><div><dt>Applies to</dt><dd>New local, desktop, and server installs</dd></div><div><dt>Docs version</dt><dd>v0.1.11+</dd></div><div><dt>Updated</dt><dd>September 1, 2026</dd></div></dl>
           </div>
 
-      <p class="docs-lead">Use this tutorial to get IO Gateway running, open the operator dashboard, add upstream credentials, and verify that a model request reaches a provider account.</p>
+      <p class="docs-lead">Install a published IO Gateway release or build it from source, then open the operator dashboard, add upstream credentials, and verify that a model request reaches a provider account.</p>
 
       <figure class="docs-figure">
         <div class="docs-figure-frame">
@@ -155,23 +155,51 @@
         </div>
         <figcaption>The dashboard is the first place to verify that the gateway sees accounts, quota, and routes.</figcaption>
       </figure>
-      <h2>Before you start</h2>
+      <h2>Choose an install path</h2>
       <ul class="docs-list">
-        <li><strong>Repository checkout</strong> Work from the IO Gateway source tree that contains <code>Cargo.toml</code>.</li>
-        <li><strong>Rust toolchain</strong> Build the app with the installed Rust toolchain used by the server.</li>
+        <li><strong>Published release</strong> Recommended for a desktop or server. It does not require Rust, Docker, or administrator access.</li>
+        <li><strong>Build from source</strong> Use this when developing IO Gateway or when your operating system is not covered by a published release.</li>
         <li><strong>Provider credential</strong> Prepare at least one upstream account before testing real model calls.</li>
       </ul>
-      <h2>Install and run</h2>
+      <h2>Install a published release</h2>
+      <p>The release installers select the native archive for the current computer, verify the downloaded archive against the release <code>SHA256SUMS</code> file, and keep an existing configuration and credential directory intact during upgrades.</p>
+      <p><strong>Linux and macOS</strong></p>
+      <pre><code>bash -c 'set -o pipefail; curl -fsSL https://github.com/giofahreza/io-gateway/releases/latest/download/install.sh | sh'</code></pre>
+      <p>The Bash wrapper preserves a failed <code>curl</code> exit status instead of treating an empty download as a successful install.</p>
+      <p><strong>Windows PowerShell</strong></p>
+      <pre><code>irm https://github.com/giofahreza/io-gateway/releases/latest/download/install.ps1 | iex</code></pre>
+      <p>Use <code>--version vX.Y.Z</code> on Linux or macOS, or <code>-Version vX.Y.Z</code> in PowerShell, to install a particular release. Use <code>--no-start</code> or <code>-NoStart</code> to install without starting the gateway.</p>
+      <h3>Supported release platforms</h3>
+      <div class="docs-table-wrap"><table class="docs-table"><thead><tr><th>Operating system</th><th>Published CPUs</th><th>Notes</th></tr></thead><tbody>
+        <tr><td>Linux</td><td>x86_64, ARM64</td><td>64-bit glibc-based distributions. Alpine and other musl-only systems should build from source.</td></tr>
+        <tr><td>macOS</td><td>Intel, Apple Silicon</td><td>Intel binaries target macOS 10.13+; Apple Silicon binaries target macOS 11+.</td></tr>
+        <tr><td>Windows</td><td>x86_64, ARM64</td><td>Use the PowerShell installer on 64-bit Windows.</td></tr>
+      </tbody></table></div>
+      <p>Other CPU families and 32-bit systems are not currently published as release assets.</p>
+      <h3>What first run does</h3>
+      <ul class="docs-list">
+        <li><strong>Installs per user</strong> No <code>sudo</code> or Administrator prompt is needed by default.</li>
+        <li><strong>Creates a safe local configuration</strong> A new install binds to <code>127.0.0.1:8319</code>, creates <code>auths/</code>, and generates a private client API key.</li>
+        <li><strong>Starts locally when possible</strong> Linux uses a systemd user service, macOS uses a LaunchAgent, and Windows uses a per-user startup task; each installer prints a manual start command if that setup is unavailable.</li>
+      </ul>
+      <div class="docs-note warning"><strong>Secure before exposing</strong><p>Admin authentication is initially disabled only for local setup. Configure a TOTP secret and enable <code>admin_auth</code> before changing <code>listen</code> to a LAN or public address.</p></div>
+      <h2>Finish setup</h2>
       <ol class="docs-steps">
-        <li><span>1</span><div><strong>Build the gateway.</strong><p>Run <code>cargo build --release</code> from the repository root.</p></div></li>
-        <li><span>2</span><div><strong>Create configuration.</strong><p>Start from the <a class="docs-inline-link" href="/docs/configuration/">configuration reference</a> and set <code>listen</code>, <code>proxy_api_key</code>, and <code>auth_dir</code>.</p></div></li>
-        <li><span>3</span><div><strong>Start the service locally.</strong><p>Run the binary with the config you want to test, then open the dashboard host and port from <code>listen</code>.</p></div></li>
-        <li><span>4</span><div><strong>Add a provider account.</strong><p>Use the provider account workflow before sending client traffic.</p></div></li>
+        <li><span>1</span><div><strong>Open the local dashboard.</strong><p>Visit <code>http://127.0.0.1:8319/</code> after the installer starts the gateway, or run the printed command if it could not create a user service.</p></div></li>
+        <li><span>2</span><div><strong>Review configuration.</strong><p>Use the <a class="docs-inline-link" href="/docs/configuration/">configuration reference</a> to set <code>listen</code>, <code>proxy_api_key</code>, <code>auth_dir</code>, and dashboard authentication for the intended environment.</p></div></li>
+        <li><span>3</span><div><strong>Add a provider account.</strong><p>Use the provider account workflow before sending client traffic.</p></div></li>
       </ol>
       <h2>Verify</h2>
       <pre><code>curl http://127.0.0.1:8319/health
 curl http://127.0.0.1:8319/ready</code></pre>
       <p>After the health checks pass, use <a class="docs-inline-link" href="/docs/test-api/">Test API</a> from the dashboard to send a short prompt through one model route.</p>
+      <h2>Build from source</h2>
+      <p>For development or an unsupported platform, work from a repository checkout with Rust installed.</p>
+      <pre><code>cargo build --release
+cp config.example.json config.json
+# Edit config.json before exposing the gateway.
+./target/release/io-gateway --config ./config.json</code></pre>
+      <p><code>--config PATH</code> takes precedence over <code>IO_GATEWAY_CONFIG</code>. When a selected configuration uses a relative <code>auth_dir</code>, IO Gateway resolves it from that configuration file's directory rather than the current working directory.</p>
       <h2>Next steps</h2>
       <ul class="docs-list">
         <li><strong>Secure dashboard access</strong> Configure admin auth before exposing the service.</li>

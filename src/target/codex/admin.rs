@@ -175,7 +175,7 @@ pub async fn toggle_credential(
         }
     }
 
-    if let Err(err) = persist_disabled_list(&state.disabled) {
+    if let Err(err) = persist_disabled_list(&state.config_path, &state.disabled) {
         return axum::Json(serde_json::json!({
             "ok": false,
             "message": format!("failed to persist: {}", err)
@@ -204,9 +204,12 @@ pub async fn toggle_credential(
     .into_response()
 }
 
-fn persist_disabled_list(disabled: &Arc<Mutex<HashSet<String>>>) -> Result<(), String> {
+fn persist_disabled_list(
+    config_path: &std::path::Path,
+    disabled: &Arc<Mutex<HashSet<String>>>,
+) -> Result<(), String> {
     let mut v: serde_json::Value = {
-        let data = std::fs::read_to_string("config.json").map_err(|e| e.to_string())?;
+        let data = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
         serde_json::from_str(&data).map_err(|e| e.to_string())?
     };
     let list: Vec<String> = disabled.lock().unwrap().iter().cloned().collect();
@@ -218,7 +221,7 @@ fn persist_disabled_list(disabled: &Arc<Mutex<HashSet<String>>>) -> Result<(), S
         }
     }
     let data = serde_json::to_vec_pretty(&v).map_err(|e| e.to_string())?;
-    super::super::atomic_write(std::path::Path::new("config.json"), &data, true)
+    super::super::atomic_write(config_path, &data, true)
 }
 
 fn is_safe_credential_filename(file_name: &str) -> bool {
@@ -229,4 +232,38 @@ fn is_safe_credential_filename(file_name: &str) -> bool {
             path.components().next(),
             Some(std::path::Component::Normal(_))
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::persist_disabled_list;
+    use std::{
+        collections::HashSet,
+        sync::{Arc, Mutex},
+    };
+
+    #[test]
+    fn disabled_files_are_persisted_to_the_selected_config_path() {
+        let directory = std::env::temp_dir().join(format!(
+            "io-gateway-codex-admin-tests-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let config_path = directory.join("custom-config.json");
+        std::fs::write(
+            &config_path,
+            r#"{"listen":"127.0.0.1:8319","disabled_files":["old.json"]}"#,
+        )
+        .expect("write config");
+        let disabled = Arc::new(Mutex::new(HashSet::from(["new.json".to_string()])));
+
+        persist_disabled_list(&config_path, &disabled).expect("persist disabled files");
+
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&config_path).expect("read saved config"),
+        )
+        .expect("parse saved config");
+        assert_eq!(saved["disabled_files"], serde_json::json!(["new.json"]));
+        let _ = std::fs::remove_dir_all(directory);
+    }
 }

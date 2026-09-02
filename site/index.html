@@ -8,7 +8,7 @@
     <link rel="icon" href="data:,">
     <meta
       name="description"
-      content="Fast Rust self-hosted AI account gateway with /v1, /codex, and /claude endpoints, quota-aware routing, priority account usage, scoped API-key prompt limits, model testing, and dashboard operations."
+      content="Fast Rust self-hosted AI account gateway with native one-command desktop installs, /v1, /codex, and /claude endpoints, quota-aware routing, scoped API-key limits, and dashboard operations."
     >
     <style>
       :root {
@@ -906,6 +906,32 @@
         background: #050807;
       }
 
+      .install-section {
+        border-bottom: 1px solid var(--line);
+        background: #07100e;
+      }
+
+      .install-layout {
+        display: grid;
+        grid-template-columns: 0.92fr 1.08fr;
+        gap: 26px;
+        align-items: start;
+      }
+
+      .install-layout > * {
+        min-width: 0;
+      }
+
+      .install-terminal {
+        background: #101316;
+      }
+
+      .install-note {
+        margin: 14px 0 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
       .runtime-layout {
         display: grid;
         grid-template-columns: 0.92fr 1.08fr;
@@ -995,12 +1021,13 @@
         .custom-model-layout,
         .routes,
         .architecture-layout,
+        .install-layout,
         .runtime-layout {
           grid-template-columns: 1fr;
         }
       }
 
-      @media (max-width: 900px) {
+      @media (max-width: 1040px) {
         nav {
           display: none;
         }
@@ -1302,6 +1329,7 @@
           <a href="#workflow">Workflow</a>
           <a href="#custom-models">Custom</a>
           <a href="#routing">Routing</a>
+          <a href="#install">Install</a>
           <a href="#runtime">Runtime</a>
           <a href="/docs/">Docs</a>
           <a href="https://github.com/giofahreza/io-gateway">GitHub</a>
@@ -1332,10 +1360,10 @@
           <div class="hero-signals" aria-label="Gateway capabilities">
             <span class="hero-signal">OpenAI-compatible clients</span>
             <span class="hero-signal">Priority drain mode</span>
-            <span class="hero-signal">Per-key prompt limits</span>
+            <span class="hero-signal">One-command desktop install</span>
           </div>
           <div class="actions">
-            <a class="button primary" href="https://github.com/giofahreza/io-gateway/releases">Download Release</a>
+            <a class="button primary" href="#install">Install locally</a>
             <a class="button secondary" href="/docs/">Read Docs</a>
           </div>
         </div>
@@ -1702,6 +1730,57 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8319/claude
 POST /v1/responses
 POST /codex/responses
 POST /claude/v1/messages</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="install-section" id="install" aria-labelledby="install-title">
+        <div class="shell install-layout">
+          <div>
+            <div class="section-head">
+              <span class="unique-kicker">Desktop install</span>
+              <h2 id="install-title">Install without building Rust.</h2>
+              <p>
+                Release installers select the native build for your computer, verify its
+                checksum, retain an existing configuration and credential directory, and start
+                a user-level gateway with a localhost-only first-run config.
+              </p>
+            </div>
+            <div class="runtime-spec" aria-label="Release installer details">
+              <div class="runtime-row">
+                <code>Linux / macOS</code>
+                <span><strong>One shell command</strong> Native x86_64 and ARM64 archives; Linux targets 64-bit glibc distributions.</span>
+              </div>
+              <div class="runtime-row">
+                <code>Windows</code>
+                <span><strong>One PowerShell command</strong> Native x86_64 and ARM64 ZIP releases, installed for the current user.</span>
+              </div>
+              <div class="runtime-row">
+                <code>safe default</code>
+                <span><strong>Local first run</strong> The generated config binds to <code>127.0.0.1</code>; configure administrator authentication before exposing it.</span>
+              </div>
+            </div>
+          </div>
+          <div>
+            <div class="terminal install-terminal" aria-label="One-command installation">
+              <div class="window-bar">
+                <span></span><span></span><span></span>
+              </div>
+              <pre><code># Linux / macOS
+bash -c 'set -o pipefail; curl -fsSL https://github.com/giofahreza/io-gateway/releases/latest/download/install.sh | sh'
+
+# Windows PowerShell
+irm https://github.com/giofahreza/io-gateway/releases/latest/download/install.ps1 | iex</code></pre>
+            </div>
+            <p class="install-note">
+              Every release includes verified archives, both installers, and <code>SHA256SUMS</code>. The Bash wrapper also preserves a failed download exit status.
+              Use <code>--version vX.Y.Z</code> or <code>-Version vX.Y.Z</code> to select a
+              specific release.
+            </p>
+            <div class="actions">
+              <a class="button secondary" href="/docs/quick-start/">Read the installation guide</a>
+              <a class="button secondary" href="https://github.com/giofahreza/io-gateway/releases">Browse releases</a>
+            </div>
           </div>
         </div>
       </section>

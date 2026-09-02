@@ -8,6 +8,7 @@ use axum::{
     Json, Router,
 };
 use bytes::{Bytes, BytesMut};
+use clap::Parser;
 use futures_util::{stream, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -15,7 +16,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path as FsPath, PathBuf},
     pin::Pin,
     sync::{mpsc, Arc, Mutex, OnceLock, RwLock},
     time::Duration,
@@ -55,9 +56,18 @@ const MODEL_CACHE_TTL_SECONDS: u64 = 10 * 60;
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(3);
 const QUOTA_REFRESH_SECONDS: u64 = 60;
 const EXHAUSTED_QUOTA_REFRESH_SECONDS: u64 = 60 * 60;
+const CONFIG_PATH_ENV: &str = "IO_GATEWAY_CONFIG";
 const MODEL_PROVIDER_PREFIXES: [&str; 10] = [
     "cod", "agw", "gem", "qwn", "dsk", "grk", "min", "cop", "cld", "glm",
 ];
+
+#[derive(Debug, Parser)]
+#[command(name = "io-gateway", about = "IO Gateway API proxy")]
+struct GatewayArgs {
+    /// Path to the runtime configuration file. Defaults to $IO_GATEWAY_CONFIG, then ./config.json.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+}
 const MOBILE_QUOTA_SCALAR_KEYS: [&str; 25] = [
     "label",
     "email",
@@ -103,6 +113,7 @@ const MOBILE_QUOTA_CONTAINER_KEYS: [&str; 12] = [
 #[derive(Clone)]
 struct AppState {
     cfg: Arc<Config>,
+    config_path: PathBuf,
     rr: Arc<Mutex<usize>>,
     agw_rr: Arc<Mutex<usize>>,
     gemini_rr: Arc<Mutex<usize>>,
@@ -453,7 +464,12 @@ enum AccountRuntimeStatus {
 async fn main() {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let cfg = load_config();
+    let args = GatewayArgs::parse();
+    let requested_config_path = select_config_path(
+        args.config,
+        std::env::var_os(CONFIG_PATH_ENV).map(PathBuf::from),
+    );
+    let (cfg, config_path) = load_config(&requested_config_path);
     let disabled = cfg
         .disabled_files
         .clone()
@@ -526,6 +542,7 @@ async fn main() {
 
     let state = AppState {
         cfg: cfg.clone(),
+        config_path,
         rr: Arc::new(Mutex::new(0)),
         agw_rr: Arc::new(Mutex::new(0)),
         gemini_rr: Arc::new(Mutex::new(0)),
@@ -1112,8 +1129,8 @@ async fn background_maintenance(state: AppState) {
 }
 
 fn cleanup_generated_temp_files(max_age: Duration) {
-    let dir = std::path::Path::new("/tmp/io-gateway-downloads");
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let dir = generated_temp_download_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
         return;
     };
     let now = std::time::SystemTime::now();
@@ -12114,7 +12131,7 @@ async fn temp_file_route(
         return (StatusCode::BAD_REQUEST, "invalid file name").into_response();
     }
 
-    let path = std::path::Path::new("/tmp/io-gateway-downloads").join(&name);
+    let path = generated_temp_download_dir().join(&name);
     let body = match std::fs::read(&path) {
         Ok(body) => body,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -20663,12 +20680,110 @@ pub(crate) fn should_drop_incoming_header(name: &str) -> bool {
     lower.starts_with("cf-")
 }
 
-fn load_config() -> Config {
-    // expects config.json in working dir
-    let data = std::fs::read_to_string("config.json").expect("config.json missing");
-    let mut cfg: Config = serde_json::from_str(&data).expect("invalid config.json");
+fn select_config_path(cli_path: Option<PathBuf>, env_path: Option<PathBuf>) -> PathBuf {
+    cli_path
+        .or(env_path)
+        .unwrap_or_else(|| PathBuf::from("config.json"))
+}
+
+fn absolute_path(path: &FsPath) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .expect("failed to determine current directory")
+            .join(path)
+    }
+}
+
+fn resolve_config_relative_paths(cfg: &mut Config, config_path: &FsPath) {
+    let Some(auth_dir) = cfg.auth_dir.as_mut() else {
+        return;
+    };
+    let configured_auth_dir = FsPath::new(auth_dir);
+    if configured_auth_dir.is_absolute() {
+        return;
+    }
+
+    let config_dir = config_path.parent().unwrap_or_else(|| FsPath::new("."));
+    *auth_dir = config_dir
+        .join(configured_auth_dir)
+        .to_string_lossy()
+        .into_owned();
+}
+
+fn load_config(config_path: &FsPath) -> (Config, PathBuf) {
+    let config_path = absolute_path(config_path);
+    let data = std::fs::read_to_string(&config_path)
+        .unwrap_or_else(|err| panic!("failed to read config {}: {err}", config_path.display()));
+    let mut cfg: Config = serde_json::from_str(&data)
+        .unwrap_or_else(|err| panic!("invalid config {}: {err}", config_path.display()));
+    resolve_config_relative_paths(&mut cfg, &config_path);
     admin_auth::apply_env_overrides(&mut cfg.admin_auth);
-    cfg
+    (cfg, config_path)
+}
+
+pub(crate) fn generated_temp_download_dir() -> PathBuf {
+    std::env::temp_dir().join("io-gateway-downloads")
+}
+
+#[cfg(test)]
+mod runtime_path_tests {
+    use super::{
+        generated_temp_download_dir, resolve_config_relative_paths, select_config_path, Config,
+        GatewayArgs,
+    };
+    use clap::Parser;
+    use std::path::PathBuf;
+
+    #[test]
+    fn config_flag_is_parsed_and_has_priority_over_environment_path() {
+        let args = GatewayArgs::try_parse_from(["io-gateway", "--config", "cli/config.json"])
+            .expect("parse --config");
+        assert_eq!(
+            select_config_path(args.config, Some(PathBuf::from("env/config.json"))),
+            PathBuf::from("cli/config.json")
+        );
+    }
+
+    #[test]
+    fn environment_config_path_is_used_before_legacy_default() {
+        assert_eq!(
+            select_config_path(None, Some(PathBuf::from("env/config.json"))),
+            PathBuf::from("env/config.json")
+        );
+        assert_eq!(select_config_path(None, None), PathBuf::from("config.json"));
+    }
+
+    #[test]
+    fn relative_auth_dir_is_resolved_from_config_parent() {
+        let mut cfg: Config = serde_json::from_value(serde_json::json!({
+            "listen": "127.0.0.1:8319",
+            "upstream_base": "https://example.test",
+            "proxy_api_key": "test-key",
+            "tokens": [],
+            "auth_dir": "auths"
+        }))
+        .expect("valid test config");
+        let config_path = std::env::temp_dir()
+            .join("io-gateway-runtime-path-tests")
+            .join("config.json");
+
+        resolve_config_relative_paths(&mut cfg, &config_path);
+
+        assert_eq!(
+            PathBuf::from(cfg.auth_dir.expect("auth dir")),
+            config_path.parent().expect("config parent").join("auths")
+        );
+    }
+
+    #[test]
+    fn generated_download_dir_uses_the_system_temp_directory() {
+        assert_eq!(
+            generated_temp_download_dir(),
+            std::env::temp_dir().join("io-gateway-downloads")
+        );
+    }
 }
 
 fn admin_session_path(cfg: &Config) -> PathBuf {

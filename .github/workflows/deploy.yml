@@ -1,4 +1,4 @@
-name: Build and Deploy
+name: Build, Release and Deploy
 
 on:
   push:
@@ -129,6 +129,202 @@ jobs:
             target/release/iogw
             target/release/iogw.sha256
           if-no-files-found: error
+
+  package-release-assets:
+    name: Package ${{ matrix.platform }} release asset
+    runs-on: ${{ matrix.runner }}
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Use native runners for every published architecture.  The ARM64
+          # runner labels are available to public repositories and avoid
+          # relying on an untested cross-linker setup for release binaries.
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+            asset_suffix: linux-x86_64.tar.gz
+            macosx_deployment_target: ''
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            asset_suffix: linux-aarch64.tar.gz
+            macosx_deployment_target: ''
+          - platform: macos-x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            archive: tar.gz
+            asset_suffix: macos-x86_64.tar.gz
+            macosx_deployment_target: '10.13'
+          - platform: macos-aarch64
+            runner: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+            asset_suffix: macos-aarch64.tar.gz
+            macosx_deployment_target: '11.0'
+          - platform: windows-x86_64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            archive: zip
+            asset_suffix: windows-x86_64.zip
+          - platform: windows-aarch64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            archive: zip
+            asset_suffix: windows-aarch64.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-cargo-
+
+      - name: Build and package Unix release asset
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target "${TARGET}"
+
+          stage_dir="$(mktemp -d)"
+          install -m 0755 "target/${TARGET}/release/io-gateway" "${stage_dir}/io-gateway"
+          install -m 0755 "target/${TARGET}/release/iogw" "${stage_dir}/iogw"
+          install -m 0644 config.example.json "${stage_dir}/config.example.json"
+
+          mkdir -p dist
+          tar -C "${stage_dir}" -czf "dist/io-gateway-${TAG}-${ASSET_SUFFIX}" \
+            io-gateway iogw config.example.json
+
+      - name: Build and package Windows release asset
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release --locked --target "$env:TARGET"
+
+          $stageDir = Join-Path $env:RUNNER_TEMP 'io-gateway-release-stage'
+          Remove-Item -Recurse -Force $stageDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $stageDir | Out-Null
+          Copy-Item "target/$env:TARGET/release/io-gateway.exe" (Join-Path $stageDir 'io-gateway.exe')
+          Copy-Item "target/$env:TARGET/release/iogw.exe" (Join-Path $stageDir 'iogw.exe')
+          Copy-Item 'config.example.json' (Join-Path $stageDir 'config.example.json')
+
+          New-Item -ItemType Directory -Path 'dist' -Force | Out-Null
+          $archive = "dist/io-gateway-$env:TAG-$env:ASSET_SUFFIX"
+          Compress-Archive -Path (Join-Path $stageDir '*') -DestinationPath $archive -Force
+
+      - name: Upload packaged release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/io-gateway-${{ github.ref_name }}-${{ matrix.asset_suffix }}
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - changes
+      - build
+      - package-release-assets
+    # `build` is deliberately allowed to be skipped for a tag that changes
+    # only documentation. If app code changed, a failed build/test job blocks
+    # publication just as it blocks deployment.
+    if: >-
+      always() &&
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.changes.result == 'success' &&
+      needs.package-release-assets.result == 'success' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Checkout installer scripts
+        uses: actions/checkout@v4
+
+      - name: Download packaged release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: ./release-assets
+          merge-multiple: true
+
+      - name: Add installers and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/install.sh
+          test -f scripts/install.ps1
+          chmod 0755 scripts/install.sh
+          cp scripts/install.sh release-assets/install.sh
+          cp scripts/install.ps1 release-assets/install.ps1
+
+          cd release-assets
+          for asset in \
+            "io-gateway-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" \
+            "io-gateway-${GITHUB_REF_NAME}-linux-aarch64.tar.gz" \
+            "io-gateway-${GITHUB_REF_NAME}-macos-x86_64.tar.gz" \
+            "io-gateway-${GITHUB_REF_NAME}-macos-aarch64.tar.gz" \
+            "io-gateway-${GITHUB_REF_NAME}-windows-x86_64.zip" \
+            "io-gateway-${GITHUB_REF_NAME}-windows-aarch64.zip" \
+            install.sh \
+            install.ps1
+          do
+            test -f "${asset}"
+          done
+          sha256sum \
+            "io-gateway-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" \
+            "io-gateway-${GITHUB_REF_NAME}-linux-aarch64.tar.gz" \
+            "io-gateway-${GITHUB_REF_NAME}-macos-x86_64.tar.gz" \
+            "io-gateway-${GITHUB_REF_NAME}-macos-aarch64.tar.gz" \
+            "io-gateway-${GITHUB_REF_NAME}-windows-x86_64.zip" \
+            "io-gateway-${GITHUB_REF_NAME}-windows-aarch64.zip" \
+            install.sh \
+            install.ps1 > SHA256SUMS
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" release-assets/* --clobber
+          else
+            gh release create "${TAG}" release-assets/* \
+              --generate-notes \
+              --title "${TAG}"
+          fi
 
   deploy:
     name: Deploy to production server

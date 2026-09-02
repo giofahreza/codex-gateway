@@ -26,12 +26,16 @@
       "href": "/docs/quick-start/",
       "keywords": "setup install local run build config dashboard test api health ready first run",
       "headings": [
-        "Before you start",
-        "Install and run",
+        "Choose an install path",
+        "Install a published release",
+        "Supported release platforms",
+        "What first run does",
+        "Finish setup",
         "Verify",
+        "Build from source",
         "Next steps"
       ],
-      "excerpt": "Use this tutorial to get IO Gateway running, open the operator dashboard, add upstream credentials, and verify that a model request reaches a provider account. The dashboard is the first place to verify that the gateway sees accounts, quota, and routes. Before you start Repository checkout Work from the IO Gateway source tree that contains Cargo.toml . Rust "
+      "excerpt": "Install a published IO Gateway release or build it from source, then open the operator dashboard, add upstream credentials, and verify that a model request reaches a provider account. The dashboard is the first place to verify that the gateway sees accounts, quota, and routes. Choose an install path Published release Recommended for a desktop or server. It d"
     },
     {
       "title": "Dashboard",
@@ -197,11 +201,12 @@
       "keywords": "deployment release tags github actions pages health ready artifact systemd ci cd",
       "headings": [
         "Pipeline triggers",
-        "Release deployment flow",
+        "Published release assets",
+        "Tag release flow",
         "Production checks",
         "Rollback"
       ],
-      "excerpt": "The release process should build a clean app artifact, deploy it to the server, restart the service, and verify readiness. Static product pages deploy separately from app releases. Pipeline triggers App release Pushing a v* tag runs the app release workflow and production deployment when app paths changed. Pages deployment Pushes to master or main deploy Git"
+      "excerpt": "A version tag builds native release archives, verifies the application build, publishes downloadable assets and installers to GitHub Releases, and deploys the Linux production binary when application code changed. Static product pages deploy separately. Pipeline triggers Tag release Pushing a v* tag packages every supported platform and creates or updates th"
     },
     {
       "title": "Troubleshooting",

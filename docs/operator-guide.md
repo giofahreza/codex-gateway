@@ -34,6 +34,36 @@ Anyone who runs multiple AI accounts and wants to:
 
 ## Quick Start
 
+### Install a published release
+
+Use a published GitHub Release when you want a native binary without installing Rust. The
+installer selects the right archive, verifies it against the release `SHA256SUMS`, preserves an
+existing config and credential directory, and creates a new localhost-only config only when one
+does not exist.
+
+Linux and macOS:
+
+```sh
+bash -c 'set -o pipefail; curl -fsSL https://github.com/giofahreza/io-gateway/releases/latest/download/install.sh | sh'
+```
+
+The Bash wrapper preserves a failed `curl` exit status instead of treating an empty download as a successful install.
+
+Windows PowerShell:
+
+```powershell
+irm https://github.com/giofahreza/io-gateway/releases/latest/download/install.ps1 | iex
+```
+
+The installers are user-scoped and do not use `sudo` or require an administrator account. They
+publish native downloads for Linux x86_64 and ARM64, macOS Intel and Apple Silicon, and Windows
+x86_64 and ARM64. They do not support 32-bit or other CPU families. Linux archives require a
+64-bit glibc-based distribution (musl-only systems such as Alpine should build from source).
+macOS binaries target Intel macOS 10.13+ and Apple Silicon macOS 11+. The initial config binds to
+`127.0.0.1`; set up `admin_auth` before changing it to a LAN or public address. To choose a
+specific release, use `--version vX.Y.Z` on Unix or `-Version vX.Y.Z` in PowerShell. Use
+`--no-start` / `-NoStart` when you only want to install the files.
+
 ### 1. Build
 
 ```bash
@@ -74,15 +104,40 @@ cargo run --release
 ./target/release/io-gateway
 ```
 
+To use a configuration outside the current working directory:
+
+```bash
+./target/release/io-gateway --config /path/to/config.json
+# or
+IO_GATEWAY_CONFIG=/path/to/config.json ./target/release/io-gateway
+```
+
+`--config` takes precedence over `IO_GATEWAY_CONFIG`. Relative paths in the config, including
+`auth_dir`, are resolved from the directory that contains the selected config file.
+
 Dashboard: `http://127.0.0.1:8319/`
 
 API docs: `http://127.0.0.1:8319/docs/`
 
 ---
 
-## CI/CD Deployment
+## CI/CD Release and Deployment
 
-GitHub Actions builds, tests, and deploys this app when a `v*` release tag is pushed, or when the deploy workflow is run manually.
+GitHub Actions builds, tests, packages, publishes, and deploys this app when a `v*` release tag
+is pushed. A manual run keeps the existing production deployment behavior but does not create a
+GitHub Release.
+
+Every release tag publishes these downloadable assets:
+
+| Asset | Platform |
+|---|---|
+| `io-gateway-<tag>-linux-x86_64.tar.gz` | Linux x86_64 (glibc) |
+| `io-gateway-<tag>-linux-aarch64.tar.gz` | Linux ARM64 (glibc) |
+| `io-gateway-<tag>-macos-x86_64.tar.gz` | macOS Intel |
+| `io-gateway-<tag>-macos-aarch64.tar.gz` | macOS Apple Silicon |
+| `io-gateway-<tag>-windows-x86_64.zip` | Windows x86_64 |
+| `io-gateway-<tag>-windows-aarch64.zip` | Windows ARM64 |
+| `install.sh`, `install.ps1`, `SHA256SUMS` | User installers and checksums |
 
 Required GitHub repository secret:
 
@@ -103,17 +158,23 @@ The workflow uses the current production layout:
 
 Deployment flow:
 
-1. Run `cargo fmt --check`, dashboard JavaScript syntax check, `cargo test --locked`, and `cargo build --release --locked`.
-2. Upload the release binary to `/home/ubuntu/io-gateway.<commit>`.
-3. Verify the staged binary checksum against the GitHub-built artifact.
-4. Back up the current live binary, install the new binary, restart `io-gateway.service`, and verify health/readiness.
-5. Verify the live binary checksum and write `/opt/io-gateway/revision.json`.
+1. Run the existing Linux formatting, dashboard syntax, test, and production-build checks when application code changed.
+2. Build and package six native release archives, then create or update the GitHub Release with the archives, installers, and `SHA256SUMS`.
+3. Upload the existing Linux x86_64 production binary to `/home/ubuntu/io-gateway.<commit>`.
+4. Verify the staged binary checksum against the GitHub-built artifact.
+5. Back up the current live binary, install the new binary, restart `io-gateway.service`, and verify health/readiness.
+6. Verify the live binary checksum and write `/opt/io-gateway/revision.json`.
 
 ---
 
 ## Configuration
 
 ### config.json
+
+By default the gateway reads `./config.json`. Override that location with
+`io-gateway --config /path/to/config.json` or `IO_GATEWAY_CONFIG=/path/to/config.json`.
+The command-line flag takes precedence. A relative `auth_dir` is relative to this config file,
+not the process working directory.
 
 ```json
 {

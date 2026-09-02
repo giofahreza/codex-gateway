@@ -21,33 +21,61 @@ const pages = [
     title: "Quick start",
     group: "Tutorials",
     type: "Tutorial",
-    appliesTo: "New local and server installs",
+    appliesTo: "New local, desktop, and server installs",
     introduced: docsVersion,
-    updated,
+    updated: "September 1, 2026",
     categories: ["Tutorials", "Configuration"],
     keywords: "setup install local run build config dashboard test api health ready first run",
     summary: "Build, configure, run, and smoke-test IO Gateway for the first time.",
     seeAlso: ["configuration", "provider-accounts", "test-api"],
     body: `
-      <p class="docs-lead">Use this tutorial to get IO Gateway running, open the operator dashboard, add upstream credentials, and verify that a model request reaches a provider account.</p>
+      <p class="docs-lead">Install a published IO Gateway release or build it from source, then open the operator dashboard, add upstream credentials, and verify that a model request reaches a provider account.</p>
       ${docsFigure("docs-dashboard-overview.png", "IO Gateway dashboard populated with usage totals, context chart, custom routes, and provider account cards.", "The dashboard is the first place to verify that the gateway sees accounts, quota, and routes.")}
-      <h2>Before you start</h2>
+      <h2>Choose an install path</h2>
       <ul class="docs-list">
-        <li><strong>Repository checkout</strong> Work from the IO Gateway source tree that contains <code>Cargo.toml</code>.</li>
-        <li><strong>Rust toolchain</strong> Build the app with the installed Rust toolchain used by the server.</li>
+        <li><strong>Published release</strong> Recommended for a desktop or server. It does not require Rust, Docker, or administrator access.</li>
+        <li><strong>Build from source</strong> Use this when developing IO Gateway or when your operating system is not covered by a published release.</li>
         <li><strong>Provider credential</strong> Prepare at least one upstream account before testing real model calls.</li>
       </ul>
-      <h2>Install and run</h2>
+      <h2>Install a published release</h2>
+      <p>The release installers select the native archive for the current computer, verify the downloaded archive against the release <code>SHA256SUMS</code> file, and keep an existing configuration and credential directory intact during upgrades.</p>
+      <p><strong>Linux and macOS</strong></p>
+      <pre><code>bash -c 'set -o pipefail; curl -fsSL https://github.com/giofahreza/io-gateway/releases/latest/download/install.sh | sh'</code></pre>
+      <p>The Bash wrapper preserves a failed <code>curl</code> exit status instead of treating an empty download as a successful install.</p>
+      <p><strong>Windows PowerShell</strong></p>
+      <pre><code>irm https://github.com/giofahreza/io-gateway/releases/latest/download/install.ps1 | iex</code></pre>
+      <p>Use <code>--version vX.Y.Z</code> on Linux or macOS, or <code>-Version vX.Y.Z</code> in PowerShell, to install a particular release. Use <code>--no-start</code> or <code>-NoStart</code> to install without starting the gateway.</p>
+      <h3>Supported release platforms</h3>
+      <div class="docs-table-wrap"><table class="docs-table"><thead><tr><th>Operating system</th><th>Published CPUs</th><th>Notes</th></tr></thead><tbody>
+        <tr><td>Linux</td><td>x86_64, ARM64</td><td>64-bit glibc-based distributions. Alpine and other musl-only systems should build from source.</td></tr>
+        <tr><td>macOS</td><td>Intel, Apple Silicon</td><td>Intel binaries target macOS 10.13+; Apple Silicon binaries target macOS 11+.</td></tr>
+        <tr><td>Windows</td><td>x86_64, ARM64</td><td>Use the PowerShell installer on 64-bit Windows.</td></tr>
+      </tbody></table></div>
+      <p>Other CPU families and 32-bit systems are not currently published as release assets.</p>
+      <h3>What first run does</h3>
+      <ul class="docs-list">
+        <li><strong>Installs per user</strong> No <code>sudo</code> or Administrator prompt is needed by default.</li>
+        <li><strong>Creates a safe local configuration</strong> A new install binds to <code>127.0.0.1:8319</code>, creates <code>auths/</code>, and generates a private client API key.</li>
+        <li><strong>Starts locally when possible</strong> Linux uses a systemd user service, macOS uses a LaunchAgent, and Windows uses a per-user startup task; each installer prints a manual start command if that setup is unavailable.</li>
+      </ul>
+      <div class="docs-note warning"><strong>Secure before exposing</strong><p>Admin authentication is initially disabled only for local setup. Configure a TOTP secret and enable <code>admin_auth</code> before changing <code>listen</code> to a LAN or public address.</p></div>
+      <h2>Finish setup</h2>
       <ol class="docs-steps">
-        <li><span>1</span><div><strong>Build the gateway.</strong><p>Run <code>cargo build --release</code> from the repository root.</p></div></li>
-        <li><span>2</span><div><strong>Create configuration.</strong><p>Start from the <a class="docs-inline-link" href="/docs/configuration/">configuration reference</a> and set <code>listen</code>, <code>proxy_api_key</code>, and <code>auth_dir</code>.</p></div></li>
-        <li><span>3</span><div><strong>Start the service locally.</strong><p>Run the binary with the config you want to test, then open the dashboard host and port from <code>listen</code>.</p></div></li>
-        <li><span>4</span><div><strong>Add a provider account.</strong><p>Use the provider account workflow before sending client traffic.</p></div></li>
+        <li><span>1</span><div><strong>Open the local dashboard.</strong><p>Visit <code>http://127.0.0.1:8319/</code> after the installer starts the gateway, or run the printed command if it could not create a user service.</p></div></li>
+        <li><span>2</span><div><strong>Review configuration.</strong><p>Use the <a class="docs-inline-link" href="/docs/configuration/">configuration reference</a> to set <code>listen</code>, <code>proxy_api_key</code>, <code>auth_dir</code>, and dashboard authentication for the intended environment.</p></div></li>
+        <li><span>3</span><div><strong>Add a provider account.</strong><p>Use the provider account workflow before sending client traffic.</p></div></li>
       </ol>
       <h2>Verify</h2>
       <pre><code>curl http://127.0.0.1:8319/health
 curl http://127.0.0.1:8319/ready</code></pre>
       <p>After the health checks pass, use <a class="docs-inline-link" href="/docs/test-api/">Test API</a> from the dashboard to send a short prompt through one model route.</p>
+      <h2>Build from source</h2>
+      <p>For development or an unsupported platform, work from a repository checkout with Rust installed.</p>
+      <pre><code>cargo build --release
+cp config.example.json config.json
+# Edit config.json before exposing the gateway.
+./target/release/io-gateway --config ./config.json</code></pre>
+      <p><code>--config PATH</code> takes precedence over <code>IO_GATEWAY_CONFIG</code>. When a selected configuration uses a relative <code>auth_dir</code>, IO Gateway resolves it from that configuration file's directory rather than the current working directory.</p>
       <h2>Next steps</h2>
       <ul class="docs-list">
         <li><strong>Secure dashboard access</strong> Configure admin auth before exposing the service.</li>
@@ -441,28 +469,40 @@ ADMIN_AUTH_SECURE_COOKIES=true</code></pre>
     title: "Deployment",
     group: "Operations",
     type: "Operations",
-    appliesTo: "Release and GitHub Pages deployment",
+    appliesTo: "GitHub tag releases, production deployment, and GitHub Pages",
     introduced: docsVersion,
-    updated,
+    updated: "September 1, 2026",
     categories: ["Operations", "Deployment"],
     keywords: "deployment release tags github actions pages health ready artifact systemd ci cd",
     summary: "Release with tag-triggered app deployment and push-triggered GitHub Pages deployment.",
     seeAlso: ["configuration", "troubleshooting", "quick-start"],
     body: `
-      <p class="docs-lead">The release process should build a clean app artifact, deploy it to the server, restart the service, and verify readiness. Static product pages deploy separately from app releases.</p>
+      <p class="docs-lead">A version tag builds native release archives, verifies the application build, publishes downloadable assets and installers to GitHub Releases, and deploys the Linux production binary when application code changed. Static product pages deploy separately.</p>
       <h2>Pipeline triggers</h2>
       <ul class="docs-list">
-        <li><strong>App release</strong> Pushing a <code>v*</code> tag runs the app release workflow and production deployment when app paths changed.</li>
+        <li><strong>Tag release</strong> Pushing a <code>v*</code> tag packages every supported platform and creates or updates the matching GitHub Release.</li>
+        <li><strong>Production deployment</strong> When the tagged diff includes an application path, the GitHub-built Linux x86_64 binary is deployed and <code>io-gateway.service</code> is restarted. A documentation-only tag still publishes release assets but skips production deployment.</li>
         <li><strong>Pages deployment</strong> Pushes to <code>master</code> or <code>main</code> deploy GitHub Pages when <code>site/</code> or the Pages workflow changed.</li>
-        <li><strong>No duplicate release</strong> Branch pushes should not run app release deployment, and release tags should not deploy GitHub Pages.</li>
+        <li><strong>Manual dispatch</strong> A manual run can validate and deploy the current checkout, but publishing a GitHub Release requires a pushed version tag.</li>
       </ul>
-      <h2>Release deployment flow</h2>
+      <h2>Published release assets</h2>
+      <div class="docs-table-wrap"><table class="docs-table"><thead><tr><th>Platform</th><th>Release asset</th></tr></thead><tbody>
+        <tr><td>Linux x86_64</td><td><code>io-gateway-&lt;tag&gt;-linux-x86_64.tar.gz</code></td></tr>
+        <tr><td>Linux ARM64</td><td><code>io-gateway-&lt;tag&gt;-linux-aarch64.tar.gz</code></td></tr>
+        <tr><td>macOS Intel</td><td><code>io-gateway-&lt;tag&gt;-macos-x86_64.tar.gz</code></td></tr>
+        <tr><td>macOS Apple Silicon</td><td><code>io-gateway-&lt;tag&gt;-macos-aarch64.tar.gz</code></td></tr>
+        <tr><td>Windows x86_64</td><td><code>io-gateway-&lt;tag&gt;-windows-x86_64.zip</code></td></tr>
+        <tr><td>Windows ARM64</td><td><code>io-gateway-&lt;tag&gt;-windows-aarch64.zip</code></td></tr>
+      </tbody></table></div>
+      <p>Every release also includes <code>SHA256SUMS</code>, <code>install.sh</code>, and <code>install.ps1</code>. The checksum file covers every archive and both installers. Each archive contains <code>io-gateway</code>, <code>iogw</code>, and <code>config.example.json</code> (with <code>.exe</code> names on Windows).</p>
+      <p>The installer URLs use GitHub’s <code>releases/latest/download/</code> endpoint. They become available after a version tag has completed the release workflow successfully.</p>
+      <h2>Tag release flow</h2>
       <ol class="docs-steps">
-        <li><span>1</span><div><strong>Push a release tag or run the workflow manually.</strong><p>The app deploy workflow runs for <code>v*</code> tags and manual dispatch only.</p></div></li>
-        <li><span>2</span><div><strong>Run checks in GitHub Actions.</strong><p>CI should run formatting, dashboard JavaScript syntax checks, tests, and release build.</p></div></li>
-        <li><span>3</span><div><strong>Upload the built artifact.</strong><p>The server should receive the GitHub-built binary, not build from a dirty local checkout.</p></div></li>
-        <li><span>4</span><div><strong>Install and restart.</strong><p>Back up the live binary, install the new one, and restart <code>io-gateway.service</code>.</p></div></li>
-        <li><span>5</span><div><strong>Verify readiness.</strong><p>Check <code>/health</code>, <code>/ready</code>, service state, and revision metadata.</p></div></li>
+        <li><span>1</span><div><strong>Push the finished commit and a version tag.</strong><p>For example: <code>git tag vX.Y.Z</code>, then <code>git push origin vX.Y.Z</code>.</p></div></li>
+        <li><span>2</span><div><strong>Validate the application.</strong><p>When application paths changed, the workflow checks formatting, dashboard JavaScript syntax, tests, and the Linux release build.</p></div></li>
+        <li><span>3</span><div><strong>Build six native archives.</strong><p>GitHub Actions builds Linux x86_64/ARM64, macOS Intel/Apple Silicon, and Windows x86_64/ARM64 binaries on their matching runners.</p></div></li>
+        <li><span>4</span><div><strong>Publish the GitHub Release.</strong><p>The workflow collects the archives, installers, and <code>SHA256SUMS</code>, then creates the tag’s Release or replaces matching assets on an existing Release.</p></div></li>
+        <li><span>5</span><div><strong>Deploy production when applicable.</strong><p>The server receives the GitHub-built Linux artifact rather than a binary from a local checkout. The deployment keeps the previous binary as a backup, installs the new version, restarts <code>io-gateway.service</code>, and checks readiness.</p></div></li>
       </ol>
       <h2>Production checks</h2>
       <pre><code>curl http://127.0.0.1:8319/health

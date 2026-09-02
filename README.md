@@ -167,7 +167,37 @@ IO Gateway is designed around real coding-agent workflows:
 | GitHub Copilot | `cop:` | GitHub device code |
 | GLM / Z.AI | `glm:` | API key |
 
-## Quick Start
+## Install a Release
+
+Published releases install without Rust, Docker, or administrator access. The installer selects the
+native archive for the current machine, verifies its SHA-256 checksum, preserves an existing
+configuration and credentials, and creates a localhost-only first-run configuration when needed.
+
+Linux and macOS:
+
+```sh
+bash -c 'set -o pipefail; curl -fsSL https://github.com/giofahreza/io-gateway/releases/latest/download/install.sh | sh'
+```
+
+The Bash wrapper preserves a failed `curl` exit status instead of treating an empty download as a successful install.
+
+Windows PowerShell:
+
+```powershell
+irm https://github.com/giofahreza/io-gateway/releases/latest/download/install.ps1 | iex
+```
+
+Release assets are published for Linux x86_64 and ARM64, macOS Intel and Apple Silicon, and
+Windows x86_64 and ARM64. Other CPU families and 32-bit systems are not currently supported.
+The Linux archives target 64-bit glibc-based distributions; musl-only systems such as Alpine need
+to build from source for now. macOS release binaries target Intel macOS 10.13+ and Apple Silicon
+macOS 11+.
+The first-run gateway listens only on `127.0.0.1`; configure administrator authentication before
+exposing it to a LAN or the internet. Use `--version vX.Y.Z` (Unix) or `-Version vX.Y.Z`
+(PowerShell) to install a specific release, and `--no-start` / `-NoStart` to install without
+starting it.
+
+## Build from Source
 
 ```bash
 cargo build --release
@@ -175,6 +205,17 @@ cp config.example.json config.json
 export IO_GATEWAY_KEY="your-shared-proxy-key"
 ./target/release/io-gateway
 ```
+
+To keep the configuration outside the current working directory, select it explicitly:
+
+```bash
+./target/release/io-gateway --config /path/to/config.json
+# or
+IO_GATEWAY_CONFIG=/path/to/config.json ./target/release/io-gateway
+```
+
+The `--config` flag takes precedence over `IO_GATEWAY_CONFIG`. Relative paths such as
+`"auth_dir": "./auths"` are resolved from the selected configuration file's directory.
 
 Dashboard:
 

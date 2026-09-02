@@ -1526,7 +1526,8 @@ fn attach_temp_downloads(response: &mut serde_json::Value) {
         return;
     }
 
-    if std::fs::create_dir_all("/tmp/io-gateway-downloads").is_err() {
+    let download_dir = crate::generated_temp_download_dir();
+    if std::fs::create_dir_all(&download_dir).is_err() {
         return;
     }
 
@@ -1553,7 +1554,7 @@ fn attach_temp_downloads(response: &mut serde_json::Value) {
 
         let ext = image_extension(mime_type);
         let file_name = format!("agw-{}.{}", Uuid::new_v4().simple(), ext);
-        let file_path = format!("/tmp/io-gateway-downloads/{}", file_name);
+        let file_path = download_dir.join(&file_name);
         if std::fs::write(&file_path, bytes).is_err() {
             continue;
         }
@@ -1564,7 +1565,7 @@ fn attach_temp_downloads(response: &mut serde_json::Value) {
         );
         image_obj.insert(
             "file_path".to_string(),
-            serde_json::Value::String(file_path),
+            serde_json::Value::String(file_path.to_string_lossy().into_owned()),
         );
         image_obj.insert(
             "download_name".to_string(),

@@ -830,6 +830,7 @@ mod tests {
             };
             let state = crate::AppState {
                 cfg: Arc::new(cfg),
+                config_path: PathBuf::from("config.json"),
                 rr: Arc::new(Mutex::new(0)),
                 agw_rr: Arc::new(Mutex::new(0)),
                 gemini_rr: Arc::new(Mutex::new(0)),
