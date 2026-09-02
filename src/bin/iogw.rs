@@ -24,6 +24,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::{self, Stdout, Write},
+    net::SocketAddr,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -109,8 +110,9 @@ const PROVIDERS: &[ProviderSpec] = &[
 #[command(name = "iogw")]
 #[command(about = "Terminal management client for IO Gateway")]
 struct Cli {
-    #[arg(short = 'u', long, env = "IOGW_BASE_URL", default_value = DEFAULT_BASE_URL, global = true)]
-    base_url: String,
+    /// Gateway URL. Defaults to the port in the locally installed gateway config.
+    #[arg(short = 'u', long, env = "IOGW_BASE_URL", global = true)]
+    base_url: Option<String>,
 
     #[arg(long, global = true)]
     json: bool,
@@ -554,7 +556,7 @@ async fn main() {
 
 async fn run() -> Result<(), String> {
     let cli = Cli::parse();
-    let mut client = GatewayClient::new(cli.base_url)?;
+    let mut client = GatewayClient::new(resolve_base_url(cli.base_url.as_deref()))?;
     match cli.command.unwrap_or(Command::Tui) {
         Command::Tui => run_tui(client).await,
         Command::Login(args) => {
@@ -4434,6 +4436,149 @@ fn config_dir() -> PathBuf {
     PathBuf::from(".")
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GatewayConfigPlatform {
+    Linux,
+    Macos,
+    Windows,
+    Other,
+}
+
+#[derive(Default)]
+struct GatewayConfigLocations {
+    config_path: Option<PathBuf>,
+    config_dir: Option<PathBuf>,
+    xdg_config_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+    app_data: Option<PathBuf>,
+    user_profile: Option<PathBuf>,
+}
+
+fn resolve_base_url(explicit_base_url: Option<&str>) -> String {
+    let candidates = local_gateway_config_candidates();
+    resolve_base_url_from_config_candidates(explicit_base_url, &candidates)
+}
+
+fn resolve_base_url_from_config_candidates(
+    explicit_base_url: Option<&str>,
+    candidates: &[PathBuf],
+) -> String {
+    if let Some(base_url) = explicit_base_url {
+        return normalize_base_url(base_url);
+    }
+
+    candidates
+        .iter()
+        .find_map(|path| base_url_from_gateway_config(path))
+        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
+}
+
+fn local_gateway_config_candidates() -> Vec<PathBuf> {
+    let home = environment_path("HOME").or_else(|| environment_path("USERPROFILE"));
+    let user_profile = environment_path("USERPROFILE").or_else(|| home.clone());
+    let locations = GatewayConfigLocations {
+        config_path: environment_path("IO_GATEWAY_CONFIG"),
+        config_dir: environment_path("IO_GATEWAY_CONFIG_DIR"),
+        xdg_config_home: environment_path("XDG_CONFIG_HOME"),
+        home,
+        app_data: environment_path("APPDATA"),
+        user_profile,
+    };
+    gateway_config_candidates(current_gateway_config_platform(), &locations)
+}
+
+fn environment_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn current_gateway_config_platform() -> GatewayConfigPlatform {
+    if cfg!(target_os = "linux") {
+        GatewayConfigPlatform::Linux
+    } else if cfg!(target_os = "macos") {
+        GatewayConfigPlatform::Macos
+    } else if cfg!(target_os = "windows") {
+        GatewayConfigPlatform::Windows
+    } else {
+        GatewayConfigPlatform::Other
+    }
+}
+
+fn gateway_config_candidates(
+    platform: GatewayConfigPlatform,
+    locations: &GatewayConfigLocations,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(path) = locations.config_path.as_ref() {
+        push_config_candidate(&mut candidates, path.clone());
+    }
+    if let Some(dir) = locations.config_dir.as_ref() {
+        push_config_candidate(&mut candidates, dir.join("config.json"));
+    }
+
+    match platform {
+        GatewayConfigPlatform::Linux | GatewayConfigPlatform::Other => {
+            if let Some(dir) = locations.xdg_config_home.as_ref() {
+                push_config_candidate(&mut candidates, dir.join("io-gateway/config.json"));
+            }
+            if let Some(home) = locations.home.as_ref() {
+                push_config_candidate(&mut candidates, home.join(".config/io-gateway/config.json"));
+            }
+        }
+        GatewayConfigPlatform::Macos => {
+            if let Some(dir) = locations.xdg_config_home.as_ref() {
+                push_config_candidate(&mut candidates, dir.join("io-gateway/config.json"));
+            }
+            if let Some(home) = locations.home.as_ref() {
+                push_config_candidate(
+                    &mut candidates,
+                    home.join("Library/Application Support/io-gateway/config.json"),
+                );
+            }
+        }
+        GatewayConfigPlatform::Windows => {
+            if let Some(app_data) = locations.app_data.as_ref() {
+                push_config_candidate(&mut candidates, app_data.join("io-gateway/config.json"));
+            }
+            if let Some(user_profile) = locations.user_profile.as_ref() {
+                push_config_candidate(
+                    &mut candidates,
+                    user_profile.join("AppData/Roaming/io-gateway/config.json"),
+                );
+            }
+        }
+    }
+
+    candidates
+}
+
+fn push_config_candidate(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if !candidates.iter().any(|path| path == &candidate) {
+        candidates.push(candidate);
+    }
+}
+
+fn base_url_from_gateway_config(path: &Path) -> Option<String> {
+    let config = fs::read_to_string(path).ok()?;
+    let value = serde_json::from_str::<Value>(&config).ok()?;
+    let listen = value.get("listen")?.as_str()?.trim();
+    let address = listen.parse::<SocketAddr>().ok()?;
+    let port = address.port();
+    if port == 0 {
+        return None;
+    }
+
+    let host = if address.is_ipv6() && (address.ip().is_loopback() || address.ip().is_unspecified())
+    {
+        "[::1]"
+    } else {
+        "127.0.0.1"
+    };
+    Some(format!("http://{host}:{port}"))
+}
+
 fn normalize_base_url(raw: &str) -> String {
     raw.trim().trim_end_matches('/').to_string()
 }
@@ -4668,5 +4813,104 @@ impl EmptyStringExt for String {
         } else {
             self
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_dir(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("io-gateway-iogw-{name}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&path).expect("create test directory");
+        path
+    }
+
+    #[test]
+    fn explicit_base_url_wins_over_local_config() {
+        let dir = test_dir("explicit-base-url");
+        let config = dir.join("config.json");
+        fs::write(&config, r#"{"listen":"127.0.0.1:9123"}"#).expect("write config");
+
+        assert_eq!(
+            resolve_base_url_from_config_candidates(
+                Some("https://example.test/gateway/"),
+                &[config]
+            ),
+            "https://example.test/gateway"
+        );
+
+        fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn discovers_the_selected_local_port_and_skips_invalid_configs() {
+        let dir = test_dir("selected-port");
+        let invalid = dir.join("invalid.json");
+        let valid = dir.join("valid.json");
+        fs::write(&invalid, "not json").expect("write invalid config");
+        fs::write(&valid, r#"{"listen":"0.0.0.0:9123"}"#).expect("write config");
+
+        assert_eq!(
+            resolve_base_url_from_config_candidates(None, &[invalid, valid]),
+            "http://127.0.0.1:9123"
+        );
+
+        fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn preserves_a_loopback_ipv6_listener() {
+        let dir = test_dir("ipv6-listener");
+        let config = dir.join("config.json");
+        fs::write(&config, r#"{"listen":"[::1]:9124"}"#).expect("write config");
+
+        assert_eq!(
+            resolve_base_url_from_config_candidates(None, &[config]),
+            "http://[::1]:9124"
+        );
+
+        fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn falls_back_to_the_historical_default_without_a_valid_local_config() {
+        assert_eq!(
+            resolve_base_url_from_config_candidates(None, &[]),
+            DEFAULT_BASE_URL
+        );
+    }
+
+    #[test]
+    fn searches_the_platform_specific_installer_config_locations() {
+        let locations = GatewayConfigLocations {
+            xdg_config_home: Some(PathBuf::from("/xdg")),
+            home: Some(PathBuf::from("/home/alice")),
+            app_data: Some(PathBuf::from("C:/Users/Alice/AppData/Roaming")),
+            user_profile: Some(PathBuf::from("C:/Users/Alice")),
+            ..GatewayConfigLocations::default()
+        };
+
+        assert_eq!(
+            gateway_config_candidates(GatewayConfigPlatform::Linux, &locations),
+            vec![
+                PathBuf::from("/xdg/io-gateway/config.json"),
+                PathBuf::from("/home/alice/.config/io-gateway/config.json"),
+            ]
+        );
+        assert_eq!(
+            gateway_config_candidates(GatewayConfigPlatform::Macos, &locations),
+            vec![
+                PathBuf::from("/xdg/io-gateway/config.json"),
+                PathBuf::from("/home/alice/Library/Application Support/io-gateway/config.json"),
+            ]
+        );
+        assert_eq!(
+            gateway_config_candidates(GatewayConfigPlatform::Windows, &locations),
+            vec![PathBuf::from(
+                "C:/Users/Alice/AppData/Roaming/io-gateway/config.json"
+            )]
+        );
     }
 }

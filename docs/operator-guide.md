@@ -48,6 +48,8 @@ bash -c 'set -o pipefail; curl -fsSL https://github.com/giofahreza/io-gateway/re
 ```
 
 The Bash wrapper preserves a failed `curl` exit status instead of treating an empty download as a successful install.
+For an interactive terminal install, the script reads its answers from `/dev/tty` rather than its
+standard input, so its questions do not consume the script being downloaded through `curl | sh`.
 
 Windows PowerShell:
 
@@ -59,10 +61,50 @@ The installers are user-scoped and do not use `sudo` or require an administrator
 publish native downloads for Linux x86_64 and ARM64, macOS Intel and Apple Silicon, and Windows
 x86_64 and ARM64. They do not support 32-bit or other CPU families. Linux archives require a
 64-bit glibc-based distribution (musl-only systems such as Alpine should build from source).
-macOS binaries target Intel macOS 10.13+ and Apple Silicon macOS 11+. The initial config binds to
-`127.0.0.1`; set up `admin_auth` before changing it to a LAN or public address. To choose a
-specific release, use `--version vX.Y.Z` on Unix or `-Version vX.Y.Z` in PowerShell. Use
-`--no-start` / `-NoStart` when you only want to install the files.
+macOS binaries target Intel macOS 10.13+ and Apple Silicon macOS 11+.
+
+#### First-run choices and unattended setup
+
+On a new install run from an interactive terminal, the installer asks for these choices in order
+before it writes the first configuration:
+
+| Choice | Default | Result |
+|---|---|---|
+| Local TCP port | `8319` | The generated config listens on `127.0.0.1:<port>` and its Qwen callback uses the same port. The installer preflights the port; an occupied interactive choice is re-prompted, while an explicit or unattended choice fails. |
+| `iogw` management client/TUI | Yes | Installs the optional terminal client next to `io-gateway`. |
+| Start at sign-in | Yes | Creates a persistent user service: systemd on Linux, a LaunchAgent on macOS, or a Scheduled Task on Windows. This governs future sign-ins, separately from starting now. |
+| Start now | Yes | Launches the gateway after this installation. It can run now even when sign-in autostart is off, or be skipped while autostart remains on. |
+
+The generated configuration always remains localhost-only (`127.0.0.1`); set up `admin_auth`
+before changing it to a LAN or public address. During an upgrade, the installer preserves the
+existing config, credential directory, and `listen` port rather than prompting or rewriting them.
+
+For a repeatable, noninteractive installation, provide the choices explicitly:
+
+```sh
+# Linux or macOS
+IO_GATEWAY_PORT=9444 \
+IO_GATEWAY_INSTALL_IOGW=no \
+IO_GATEWAY_AUTOSTART=no \
+IO_GATEWAY_START_NOW=no \
+IO_GATEWAY_INTERACTIVE=no \
+bash -c 'set -o pipefail; curl -fsSL https://github.com/giofahreza/io-gateway/releases/latest/download/install.sh | sh'
+```
+
+Unix flags are `--port <1-65535>`, `--with-iogw` / `--without-iogw`, `--autostart` /
+`--no-autostart`, `--start-now` / `--no-start`, and `--interactive` / `--non-interactive`.
+PowerShell accepts `-Port`, `-InstallIogw` / `-NoIogw`, `-AutoStart` / `-NoAutoStart`,
+`-StartNow` / `-NoStart`, and `-Interactive` / `-NonInteractive` (with equivalent long
+POSIX-style spellings). The environment variables `IO_GATEWAY_PORT`,
+`IO_GATEWAY_INSTALL_IOGW=auto|yes|no`, `IO_GATEWAY_AUTOSTART=auto|yes|no`,
+`IO_GATEWAY_START_NOW=auto|yes|no`, and `IO_GATEWAY_INTERACTIVE=auto|yes|no` work on all three
+desktop platforms; explicit command line choices take precedence. `--start-now` / `-StartNow`
+means launch immediately without changing the persistent service or task. `--no-start` /
+`-NoStart` skips the immediate launch while preserving an existing service or task. For a
+next-sign-in-only setup, combine `--autostart --no-start`; for a one-off local background process,
+combine `--no-autostart --start-now`.
+
+To choose a specific release, use `--version vX.Y.Z` on Unix or `-Version vX.Y.Z` in PowerShell.
 
 ### 1. Build
 

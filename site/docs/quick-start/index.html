@@ -144,7 +144,7 @@
           <div class="docs-heading">
             <p class="eyebrow">Tutorials</p>
             <h1>Quick start</h1>
-            <dl class="docs-meta"><div><dt>Type</dt><dd>Tutorial</dd></div><div><dt>Applies to</dt><dd>New local, desktop, and server installs</dd></div><div><dt>Docs version</dt><dd>v0.1.11+</dd></div><div><dt>Updated</dt><dd>September 1, 2026</dd></div></dl>
+            <dl class="docs-meta"><div><dt>Type</dt><dd>Tutorial</dd></div><div><dt>Applies to</dt><dd>New local, desktop, and server installs</dd></div><div><dt>Docs version</dt><dd>v0.1.11+</dd></div><div><dt>Updated</dt><dd>September 2, 2026</dd></div></dl>
           </div>
 
       <p class="docs-lead">Install a published IO Gateway release or build it from source, then open the operator dashboard, add upstream credentials, and verify that a model request reaches a provider account.</p>
@@ -165,10 +165,10 @@
       <p>The release installers select the native archive for the current computer, verify the downloaded archive against the release <code>SHA256SUMS</code> file, and keep an existing configuration and credential directory intact during upgrades.</p>
       <p><strong>Linux and macOS</strong></p>
       <pre><code>bash -c 'set -o pipefail; curl -fsSL https://github.com/giofahreza/io-gateway/releases/latest/download/install.sh | sh'</code></pre>
-      <p>The Bash wrapper preserves a failed <code>curl</code> exit status instead of treating an empty download as a successful install.</p>
+      <p>The Bash wrapper preserves a failed <code>curl</code> exit status instead of treating an empty download as a successful install. In an interactive terminal, the Unix installer reads setup answers from <code>/dev/tty</code>, not from the downloaded script stream, so this <code>curl | sh</code> command can still ask its first-run questions safely.</p>
       <p><strong>Windows PowerShell</strong></p>
       <pre><code>irm https://github.com/giofahreza/io-gateway/releases/latest/download/install.ps1 | iex</code></pre>
-      <p>Use <code>--version vX.Y.Z</code> on Linux or macOS, or <code>-Version vX.Y.Z</code> in PowerShell, to install a particular release. Use <code>--no-start</code> or <code>-NoStart</code> to install without starting the gateway.</p>
+      <p>Use <code>--version vX.Y.Z</code> on Linux or macOS, or <code>-Version vX.Y.Z</code> in PowerShell, to install a particular release.</p>
       <h3>Supported release platforms</h3>
       <div class="docs-table-wrap"><table class="docs-table"><thead><tr><th>Operating system</th><th>Published CPUs</th><th>Notes</th></tr></thead><tbody>
         <tr><td>Linux</td><td>x86_64, ARM64</td><td>64-bit glibc-based distributions. Alpine and other musl-only systems should build from source.</td></tr>
@@ -176,21 +176,34 @@
         <tr><td>Windows</td><td>x86_64, ARM64</td><td>Use the PowerShell installer on 64-bit Windows.</td></tr>
       </tbody></table></div>
       <p>Other CPU families and 32-bit systems are not currently published as release assets.</p>
-      <h3>What first run does</h3>
+      <h3>Choose first-run setup</h3>
       <ul class="docs-list">
         <li><strong>Installs per user</strong> No <code>sudo</code> or Administrator prompt is needed by default.</li>
-        <li><strong>Creates a safe local configuration</strong> A new install binds to <code>127.0.0.1:8319</code>, creates <code>auths/</code>, and generates a private client API key.</li>
-        <li><strong>Starts locally when possible</strong> Linux uses a systemd user service, macOS uses a LaunchAgent, and Windows uses a per-user startup task; each installer prints a manual start command if that setup is unavailable.</li>
+        <li><strong>Choose a local port</strong> The first question chooses a TCP port from 1 through 65535 (default <code>8319</code>). The installer preflights <code>127.0.0.1:&lt;port&gt;</code>: an occupied interactive choice is asked again, while an explicit or unattended occupied port fails before a new config is created. The generated config stays localhost-only, creates <code>auths/</code>, and generates a private client API key.</li>
+        <li><strong>Choose the terminal client</strong> Decide whether to install the optional <code>iogw</code> management client and TUI beside the gateway binary.</li>
+        <li><strong>Choose autostart at sign-in</strong> Enable a systemd user service on Linux, a LaunchAgent on macOS, or a per-user Scheduled Task on Windows. This is a persistent next-sign-in choice, not an immediate launch.</li>
+        <li><strong>Choose whether to start now</strong> Start the gateway immediately after installation, independently of autostart. Choose this for a one-off local background process even when sign-in autostart is off, or decline it while enabling the next-sign-in service.</li>
       </ul>
+      <p>These questions apply only when a configuration does not already exist. Upgrades preserve the existing configuration, credential directory, and chosen <code>listen</code> port.</p>
+      <h3>Automate an install</h3>
+      <p>Use explicit flags when there is no terminal or when setup must be repeatable. Unix accepts <code>--port</code>, <code>--with-iogw</code> / <code>--without-iogw</code>, <code>--autostart</code> / <code>--no-autostart</code>, <code>--start-now</code> / <code>--no-start</code>, and <code>--interactive</code> / <code>--non-interactive</code>. PowerShell accepts <code>-Port</code>, <code>-InstallIogw</code> / <code>-NoIogw</code>, <code>-AutoStart</code> / <code>-NoAutoStart</code>, <code>-StartNow</code> / <code>-NoStart</code>, and <code>-Interactive</code> / <code>-NonInteractive</code>.</p>
+      <pre><code>IO_GATEWAY_PORT=9444 \
+IO_GATEWAY_INSTALL_IOGW=no \
+IO_GATEWAY_AUTOSTART=no \
+IO_GATEWAY_START_NOW=no \
+IO_GATEWAY_INTERACTIVE=no \
+bash -c 'set -o pipefail; curl -fsSL https://github.com/giofahreza/io-gateway/releases/latest/download/install.sh | sh'</code></pre>
+      <p>The same cross-platform environment variables are available with values <code>auto</code>, <code>yes</code>, or <code>no</code> where applicable: <code>IO_GATEWAY_INSTALL_IOGW</code>, <code>IO_GATEWAY_AUTOSTART</code>, <code>IO_GATEWAY_START_NOW</code>, and <code>IO_GATEWAY_INTERACTIVE</code>; <code>IO_GATEWAY_PORT</code> selects the port. Explicit command-line choices take precedence. <code>--start-now</code> / <code>-StartNow</code> starts the gateway immediately without changing autostart; <code>--no-start</code> / <code>-NoStart</code> skips that launch while preserving an existing service or task. Combine <code>--autostart --no-start</code> for a next-sign-in-only service, or <code>--no-autostart --start-now</code> for a one-off local background process.</p>
       <div class="docs-note warning"><strong>Secure before exposing</strong><p>Admin authentication is initially disabled only for local setup. Configure a TOTP secret and enable <code>admin_auth</code> before changing <code>listen</code> to a LAN or public address.</p></div>
       <h2>Finish setup</h2>
       <ol class="docs-steps">
-        <li><span>1</span><div><strong>Open the local dashboard.</strong><p>Visit <code>http://127.0.0.1:8319/</code> after the installer starts the gateway, or run the printed command if it could not create a user service.</p></div></li>
+        <li><span>1</span><div><strong>Open the local dashboard.</strong><p>If you chose <em>Start now</em>, visit <code>http://127.0.0.1:&lt;selected-port&gt;/</code> after the gateway becomes healthy (the default is <code>http://127.0.0.1:8319/</code>). Otherwise, use the printed command to start it now or sign in again when autostart is enabled.</p></div></li>
         <li><span>2</span><div><strong>Review configuration.</strong><p>Use the <a class="docs-inline-link" href="/docs/configuration/">configuration reference</a> to set <code>listen</code>, <code>proxy_api_key</code>, <code>auth_dir</code>, and dashboard authentication for the intended environment.</p></div></li>
         <li><span>3</span><div><strong>Add a provider account.</strong><p>Use the provider account workflow before sending client traffic.</p></div></li>
       </ol>
       <h2>Verify</h2>
-      <pre><code>curl http://127.0.0.1:8319/health
+      <pre><code># Replace 8319 if you chose another first-run port.
+curl http://127.0.0.1:8319/health
 curl http://127.0.0.1:8319/ready</code></pre>
       <p>After the health checks pass, use <a class="docs-inline-link" href="/docs/test-api/">Test API</a> from the dashboard to send a short prompt through one model route.</p>
       <h2>Build from source</h2>

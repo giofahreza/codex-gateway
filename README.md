@@ -171,7 +171,7 @@ IO Gateway is designed around real coding-agent workflows:
 
 Published releases install without Rust, Docker, or administrator access. The installer selects the
 native archive for the current machine, verifies its SHA-256 checksum, preserves an existing
-configuration and credentials, and creates a localhost-only first-run configuration when needed.
+configuration and credentials, and guides a new local install through its important choices.
 
 Linux and macOS:
 
@@ -180,6 +180,9 @@ bash -c 'set -o pipefail; curl -fsSL https://github.com/giofahreza/io-gateway/re
 ```
 
 The Bash wrapper preserves a failed `curl` exit status instead of treating an empty download as a successful install.
+When this is run from a terminal, the installer reads its setup answers from the controlling
+terminal (`/dev/tty`), not from the downloaded script stream, so the `curl | sh` form remains safe
+to use interactively.
 
 Windows PowerShell:
 
@@ -192,10 +195,31 @@ Windows x86_64 and ARM64. Other CPU families and 32-bit systems are not currentl
 The Linux archives target 64-bit glibc-based distributions; musl-only systems such as Alpine need
 to build from source for now. macOS release binaries target Intel macOS 10.13+ and Apple Silicon
 macOS 11+.
-The first-run gateway listens only on `127.0.0.1`; configure administrator authentication before
-exposing it to a LAN or the internet. Use `--version vX.Y.Z` (Unix) or `-Version vX.Y.Z`
-(PowerShell) to install a specific release, and `--no-start` / `-NoStart` to install without
-starting it.
+On a fresh interactive install, the prompts appear in this order: choose the local TCP port
+(default `8319`), whether to install the optional `iogw` terminal management client/TUI, whether
+to start automatically at sign-in, and whether to start the gateway now. The installer checks that
+the selected `127.0.0.1` port is available before creating a new config: interactive setup asks
+again for an occupied port, while an explicit or unattended occupied port fails with a clear error.
+Autostart controls a persistent user-level systemd service on Linux, a LaunchAgent on macOS, or a
+per-user Scheduled Task on Windows; it does not by itself mean the gateway must launch immediately.
+The separate **start now** choice launches it after this installation even when autostart is off.
+A generated config always listens on `127.0.0.1`; configure administrator authentication before
+exposing it to a LAN or the internet. Existing configuration, credentials, and its configured port
+are never overwritten on upgrade.
+
+For unattended installs, pass explicit choices instead of relying on prompts. On Linux and macOS,
+use `--port 9444`, `--with-iogw` or `--without-iogw`, `--autostart` or `--no-autostart`,
+`--start-now` or `--no-start`, and `--non-interactive`. PowerShell accepts the corresponding
+`-Port`, `-InstallIogw` / `-NoIogw`, `-AutoStart` / `-NoAutoStart`, `-StartNow` / `-NoStart`, and
+`-NonInteractive` options. The cross-platform environment variables `IO_GATEWAY_PORT`,
+`IO_GATEWAY_INSTALL_IOGW=auto|yes|no`, `IO_GATEWAY_AUTOSTART=auto|yes|no`,
+`IO_GATEWAY_START_NOW=auto|yes|no`, and `IO_GATEWAY_INTERACTIVE=auto|yes|no` support the same
+automation. `--start-now` / `-StartNow` requests an immediate launch without changing autostart;
+`--no-start` / `-NoStart` skips that launch while retaining an existing autostart service or task.
+For example, combine `--autostart --no-start` to enable the next-sign-in service without starting
+now, or `--no-autostart --start-now` to run a local background gateway now without a persistent
+service. Use `--version vX.Y.Z` (Unix) or `-Version vX.Y.Z` (PowerShell) to install a specific
+release.
 
 ## Build from Source
 

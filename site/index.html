@@ -1742,8 +1742,8 @@ POST /claude/v1/messages</code></pre>
               <h2 id="install-title">Install without building Rust.</h2>
               <p>
                 Release installers select the native build for your computer, verify its
-                checksum, retain an existing configuration and credential directory, and start
-                a user-level gateway with a localhost-only first-run config.
+                checksum, retain an existing configuration and credential directory, and guide a
+                new local install through its port, terminal-client, and autostart choices.
               </p>
             </div>
             <div class="runtime-spec" aria-label="Release installer details">
@@ -1756,8 +1756,12 @@ POST /claude/v1/messages</code></pre>
                 <span><strong>One PowerShell command</strong> Native x86_64 and ARM64 ZIP releases, installed for the current user.</span>
               </div>
               <div class="runtime-row">
+                <code>first run</code>
+                <span><strong>Choose what matters</strong> Pick a local port, install the optional <code>iogw</code> terminal TUI or not, and enable a systemd user service, LaunchAgent, or Windows Scheduled Task at sign-in.</span>
+              </div>
+              <div class="runtime-row">
                 <code>safe default</code>
-                <span><strong>Local first run</strong> The generated config binds to <code>127.0.0.1</code>; configure administrator authentication before exposing it.</span>
+                <span><strong>Local only</strong> The generated config binds to <code>127.0.0.1</code>; configure administrator authentication before exposing it.</span>
               </div>
             </div>
           </div>
@@ -1774,8 +1778,7 @@ irm https://github.com/giofahreza/io-gateway/releases/latest/download/install.ps
             </div>
             <p class="install-note">
               Every release includes verified archives, both installers, and <code>SHA256SUMS</code>. The Bash wrapper also preserves a failed download exit status.
-              Use <code>--version vX.Y.Z</code> or <code>-Version vX.Y.Z</code> to select a
-              specific release.
+              In an interactive terminal, the Unix installer reads answers from <code>/dev/tty</code>, so its questions work with the download pipe. Use <code>--port</code>, <code>--with-iogw</code> / <code>--without-iogw</code>, <code>--autostart</code> / <code>--no-autostart</code>, and <code>--non-interactive</code> for automation; PowerShell provides matching <code>-Port</code>, <code>-InstallIogw</code> / <code>-NoIogw</code>, <code>-AutoStart</code> / <code>-NoAutoStart</code>, and <code>-NonInteractive</code> options.
             </p>
             <div class="actions">
               <a class="button secondary" href="/docs/quick-start/">Read the installation guide</a>
